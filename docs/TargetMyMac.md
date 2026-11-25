@@ -7,7 +7,8 @@ This doc covers everything about running godeep on the actual machine it's devel
 4. **the TamaGo blockers** specific to this Mac;
 5. **how godeep would boot** here;
 6. **a step-by-step guide** to carving out a godeep boot entry and data partition next to macOS and Omarchy;
-7. **the milestone order** for getting there.
+7. **how to develop native drivers incrementally** while QEMU, TamaGo and firmware cover whatever isn't native yet;
+8. **the milestone order** for getting there.
 
 **How the inventory was gathered (2026-11-25).** Everything came from the running machine through system tools; no web lookups were needed:
 - `system_profiler` (hardware, displays, memory, NVMe, storage, Wi-Fi, Bluetooth, Thunderbolt, card reader, audio, camera, power, SPI)
@@ -443,13 +444,107 @@ The godeep entry disappears from the startup picker once its stub container is g
 
 ---
 
-## 7. Recommendation and milestones
+## 7. Developing native drivers incrementally
+
+The goal is to replace about 40 hardware blocks with native Go drivers **one at a time**, without ever losing a working system. At every step, godeep should boot and be useful, with whatever isn't native yet covered by QEMU, a TamaGo or go-net driver, or state the firmware already set up.
+
+### 7.1 The principle: one kernel, swappable boards, drivers behind interfaces
+
+godeep is already shaped for this:
+
+```
+             ┌──────────────── kernel/ (identical everywhere) ────────────────┐
+             │ proc · tty · sh · dev (manager) · irq (bridge) · dma · rtkit   │
+             └──────▲─────────────▲──────────────▲──────────────▲─────────────┘
+                    │ interfaces: irq.Controller · dma.IOMMU · rtkit.Mailbox ·
+                    │ kernel.Console · dev.Clock · dev.LatencyProbe · …
+     board/hosted   board/virt (QEMU, HVF/TCG)   board/microvm   board/applem1 (future)
+     host OS shims  GIC · PL011 · PL031 · PL061   TamaGo microvm  AIC2 · DART · ASC ·
+                    · virtio · Identity IOMMU                    Samsung UART · …
+```
+
+- **The kernel never knows which board it's on.** A board supplies a `kernel.Board`: console, interrupt bridge, DMA region, device list, power-off.
+- **Drivers bind by `compatible` string** through `dev.Register`, so a board's device list decides which drivers run.
+- **Consumers ask for services, not drivers.** The shell asks the device manager for "a `dev.Clock`", not "the PL031". Whether that's QEMU's RTC or the M1's SMC RTC, nothing above the driver changes.
+
+**So "partially native" is a supported state.** `board/applem1` can start with three real drivers and borrow everything else, and the same kernel keeps running on `board/virt` for everything not yet ported.
+
+### 7.2 The development ladder for each driver
+
+Every native driver climbs the same five rungs. Each rung is cheap to rerun, and most bugs die on the first two, where iteration takes seconds.
+
+| Rung | Where | What you test | Tools |
+|---|---|---|---|
+| **1. Protocol on the host** | `go test` on macOS | The driver's logic as pure Go against a **fake device**: message formats, state machines, queue handling, error and crash paths | the way `kernel/rtkit` is tested against a fake coprocessor; `go test -race -count=50` |
+| **2. Registers against a model or trace** | `go test` on macOS | Register sequences, through an MMIO interface whose fake records reads and writes and replays **real traces captured on the Mac** (rung 4) | proposed `kernel/mmio` package (below); m1n1 hypervisor trace logs |
+| **3. Integration on a QEMU analog** | `make qemu` (HVF) | The driver's *shape* inside godeep: a `drv/<name>` process under `devmgr`, interrupts through the bridge, buffers from `kernel/dma`, restart on crash, idle CPU | the closest QEMU device (table below) |
+| **4. Real hardware under m1n1's hypervisor** | the Mac, from a second computer (§5 option A) | The real device, with **every MMIO access logged**. godeep runs as a guest, and m1n1 can stop, inspect and trace it | m1n1 `run_guest.py`, the tethered-boot entry (§6.5) |
+| **5. Native boot** | the godeep boot entry (§6) | Boots without a second computer: the driver is done | U-Boot `booti` (§6.8) |
+
+QEMU analogs for rung 3 (same role, same godeep plumbing, different registers):
+
+| M1 hardware | QEMU stand-in that exercises the same path |
+|---|---|
+| AIC2 interrupt controller | GICv3 (`board/virt`): both implement `irq.Controller` |
+| DART IOMMU | `dma.Identity`, or a fake IOMMU that remaps (useful to catch drivers that hand devices `Phys` instead of the IOVA) |
+| ASC mailbox + RTKit | a fake coprocessor goroutine behind `rtkit.Mailbox` (as in the tests), run inside the kernel as a pretend device |
+| Samsung UART | PL011 |
+| ANS2 NVMe | virtio-blk (submission/completion queues in DMA memory, doorbells, interrupts) |
+| DWC3 USB gadget + CDC-ECM | virtio-net (frames in and out of the gVisor stack) |
+| SMC (battery, lid, power button) | PL061 power button + PL031 RTC (events and a clock through the same service interfaces) |
+| Boot framebuffer | `ramfb` / virtio-gpu (`../GoGpuSupport.md`) |
+
+### 7.3 Borrow what isn't native yet
+
+While a block has no native driver, something else covers it. Each row says what stands in, and what retires it.
+
+| Need | Stand-in until the native driver lands | Retired by |
+|---|---|---|
+| Everything (daily development) | **QEMU `board/virt`**: virtio net/blk/9p/rng/gpu, PL011, RTC | each native driver, one at a time; QEMU stays for tests and CI |
+| CPU boot, MMU, timer, caches | **TamaGo `arm64`** (with the §4 patches) | stays: this *is* the native driver |
+| TCP/IP, TLS, SSH | **gVisor netstack via `go-net`**, `x/crypto/ssh` | stays: only the NIC underneath changes |
+| Screen | **firmware framebuffer** that iBoot/m1n1 already set up | DCP driver (maybe never: the framebuffer is enough) |
+| Console | framebuffer text out; **Samsung debug UART** in/out via a second Mac or the m1n1 proxy | SPI-HID keyboard (M2) |
+| PCIe links, some clocks and power domains | **m1n1** brings them up before jumping to godeep | native PMGR/PCIe drivers, when needed |
+| Networking on the Mac | **USB-C gadget Ethernet**, reusing `go-net/imx-usb`'s CDC-ECM logic on a new DWC3 driver; meanwhile the m1n1 proxy link | Wi-Fi (maybe never) |
+| Files and storage | **GODEEPDATA** (§6.6) read by Omarchy/macOS; **9P over the USB network** from the Mac (`../ReUsingGVisor.md` §5) | native NVMe (M5) |
+| Entropy | **`/chosen/random-seed`** from iBoot/m1n1 seeding the DRBG | stays (no hardware RNG reachable on M1 Pro) |
+| Power off / reboot | **watchdog** reboot | SMC power-off (M3) |
+
+Two strategies from this table matter most:
+- **Lean on the firmware.** iBoot and m1n1 already initialized the display, memory, PCIe and more. Using that state instead of re-initializing it removes whole drivers from the critical path. Linux on Apple Silicon started the same way.
+- **Get a network early (M4), then use the Mac as a peripheral.** Once godeep has an IP over a USB-C cable, files (9P), logs, `pprof` and even storage can come from the Mac until native drivers exist. That turns one hard driver (DWC3) into access to everything.
+
+### 7.4 Proposed structure (small additions, not yet built)
+
+These keep native drivers testable on the host and shareable between boards:
+
+| Addition | Purpose |
+|---|---|
+| `kernel/mmio`: a `Regs` interface (`Read32`/`Write32` at an offset) with a real implementation (single atomic 32-bit accesses) and a **recording fake** that can assert or replay traces | rung 2; enforces the "no read-modify-write of W1S/W1C registers" lesson in one place |
+| `drivers/apple/{aic,dart,asc,smc,nvme,spihid,uart,wdt}` and `drivers/virtio/{blk,net,rng}`: driver code as ordinary Go packages, no build tags | host tests run on every driver; boards only wire them up |
+| `board/applem1`: build-tagged `tamago && arm64 && applem1`; device list from the **ADT** m1n1 passes; registers the Apple drivers | the third board, next to `board/virt` |
+| Service interfaces as needed: `dev.Block`, `dev.NIC`, `dev.Framebuffer`, `dev.Keyboard` | consumers (filesystems, netstack, shell) never depend on a specific driver |
+| `make test` stays host-only; `make qemu` runs the rung-3 check; a `make m1-guest` target wraps m1n1's `run_guest.py` | one command per rung |
+
+### 7.5 Definition of done for a native driver
+
+A row in §2 moves from ✗/◐ to ✅ when the driver has:
+1. host tests (rungs 1–2) passing 50× under the race detector;
+2. a QEMU-analog run (rung 3) with `lsdev` showing it `ready`, `kill <drv pid>` followed by a clean restart, and idle CPU unchanged;
+3. an m1n1-hypervisor run (rung 4) whose MMIO trace was reviewed against the Asahi/Linux driver's behavior, with the trace saved as a rung-2 test fixture;
+4. a native-boot run (rung 5);
+5. its §2 row, `DriverModel.md` and any new service interface updated.
+
+---
+
+## 8. Recommendation and milestones
 
 **Keep QEMU `virt` + HVF as the main target.** On this Mac it already gives godeep:
 - the real CPU, natively: Firestorm cores with AES, SHA3 and NEON;
 - through virtio: network (Wi-Fi via QEMU's NAT), disk (an image file on the SSD), files (9P) and display (virtio-gpu in a window).
 
-The driver foundation (§3) is developed and tested there first anyway.
+The driver foundation (§3) is developed and tested there first anyway, and §7 explains how each native driver climbs from host tests to QEMU to the real Mac.
 
 For real-metal godeep, this order gives a visible result quickly:
 
