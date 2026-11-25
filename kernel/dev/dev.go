@@ -50,6 +50,12 @@ var drivers = map[string]Driver{}
 // Register adds a driver. Call only from init().
 func Register(d Driver) { drivers[d.Compatible] = d }
 
+// HasDriver reports whether a driver is registered for compatible.
+func HasDriver(compatible string) bool {
+	_, ok := drivers[compatible]
+	return ok
+}
+
 // Device is what a driver instance is given.
 type Device struct {
 	Node

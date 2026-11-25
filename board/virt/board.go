@@ -8,7 +8,6 @@ import (
 	"github.com/usbarmory/tamago/arm64/gic"
 
 	"godeep/kernel"
-	"godeep/kernel/dev"
 	"godeep/kernel/dma"
 	"godeep/kernel/irq"
 	"godeep/kernel/proc"
@@ -68,20 +67,18 @@ var shutdown = make(chan struct{})
 // NewBoard returns the QEMU virt board.
 func NewBoard() kernel.Board {
 	proc.Kthread("irq", serviceInterrupts)
+	nodes, source := devices()
 	return kernel.Board{
+		Info:     BootInfo(source),
 		Console:  NewConsole(Bridge),
 		Shutdown: shutdown,
-		PowerOff: func() { psciCall(psciSystemOff) },
+		PowerOff: psciPowerOff,
 		IRQ:      Bridge,
+		// The first FDT_RESERVE bytes hold the boot device tree (entry_arm64.s).
 		DMA: dma.New(dma.Region{
-			Base: DMA_BASE,
-			Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE))), DMA_SIZE),
+			Base: DMA_BASE + FDT_RESERVE,
+			Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
 		}),
-		Devices: []dev.Node{
-			{Name: "gpio0", Compatible: "arm,pl061", Reg: []dev.Range{{PL061_BASE, 0x1000}}, IRQ: []int{GPIO_IRQ}},
-			{Name: "rtc", Compatible: "arm,pl031", Reg: []dev.Range{{PL031_BASE, 0x1000}}, IRQ: []int{RTC_IRQ}},
-			{Name: "virtio", Compatible: "virtio,mmio-bus", Reg: []dev.Range{{VIRTIO_MMIO_BASE, VIRTIO_MMIO_SLOTS * 0x200}}},
-			{Name: "ptimer", Compatible: "arm,armv8-ptimer-probe", IRQ: []int{PTIMER_IRQ}},
-		},
+		Devices: nodes,
 	}
 }

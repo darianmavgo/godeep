@@ -7,4 +7,18 @@ package virt
 const psciSystemOff = 0x84000008
 
 // defined in psci_arm64.s
-func psciCall(fn uint64) uint64
+func psciCall(fn uint64) uint64    // HVC conduit
+func psciCallSMC(fn uint64) uint64 // SMC conduit
+
+// psciMethod is the conduit from the device tree's /psci "method" property:
+// "hvc" (QEMU virt at EL1, the default) or "smc" (QEMU with EL2, where HVC
+// belongs to the hypervisor level). Apple Silicon has no PSCI at all.
+var psciMethod = "hvc"
+
+func psciPowerOff() {
+	if psciMethod == "smc" {
+		psciCallSMC(psciSystemOff)
+	} else {
+		psciCall(psciSystemOff)
+	}
+}

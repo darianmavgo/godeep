@@ -10,7 +10,11 @@ import (
 	"time"
 	"unsafe"
 
+	"godeep/drivers/arm/pl031"
+	"godeep/drivers/arm/pl061"
+	virtiommio "godeep/drivers/virtio/mmio"
 	"godeep/kernel/dev"
+	kmmio "godeep/kernel/mmio"
 )
 
 func r32(addr uint64) uint32 { return atomic.LoadUint32((*uint32)(unsafe.Pointer(uintptr(addr)))) }
@@ -19,98 +23,23 @@ func w32(addr uint64, v uint32) {
 }
 
 func init() {
-	dev.Register(dev.Driver{Compatible: "arm,pl061", Run: runPL061})
-	dev.Register(dev.Driver{Compatible: "arm,pl031", Run: runPL031})
-	dev.Register(dev.Driver{Compatible: "virtio,mmio-bus", Run: runVirtioScan})
-	dev.Register(dev.Driver{Compatible: "arm,armv8-ptimer-probe", Run: runPtimerProbe})
+	window := func(base uint64) kmmio.Regs { return kmmio.Window{Base: base} }
+	dev.Register(pl061.Driver(window, 3, func() { shutdownOnce.Do(func() { close(shutdown) }) }))
+	dev.Register(pl031.Driver(window))
+	dev.Register(virtiommio.Driver(window))
+	dev.Register(dev.Driver{Compatible: "arm,armv8-timer", Run: runPtimerProbe})
+	dev.Register(dev.Driver{Compatible: "arm,pl011", Run: func(ctx context.Context, d *dev.Device) error {
+		d.Ready(dev.Lister(lister{"board console (" + UARTMode + " mode)"}))
+		<-ctx.Done()
+		return nil
+	}})
 }
-
-// ---- PL061 GPIO: the power button (line 3), interrupt-driven ----
-
-const (
-	gpioIS  = 0x404 // interrupt sense (0 = edge)
-	gpioIBE = 0x408 // both edges
-	gpioIEV = 0x40c // event (1 = rising)
-	gpioIE  = 0x410 // interrupt enable
-	gpioMIS = 0x418 // masked interrupt status
-	gpioIC  = 0x41c // interrupt clear
-
-	powerButton = 1 << 3
-)
 
 var shutdownOnce sync.Once
 
-func runPL061(ctx context.Context, d *dev.Device) error {
-	base := d.Reg[0].Base
-	line, err := d.Bridge.Request(d.IRQ0(), "gpio0")
-	if err != nil {
-		return err
-	}
-	defer line.Release()
-	w32(base+gpioIS, r32(base+gpioIS)&^powerButton)
-	w32(base+gpioIBE, r32(base+gpioIBE)&^powerButton)
-	w32(base+gpioIEV, r32(base+gpioIEV)|powerButton)
-	w32(base+gpioIC, powerButton)
-	w32(base+gpioIE, r32(base+gpioIE)|powerButton)
-	d.Ready("power button")
-	for {
-		select {
-		case <-line.C:
-			mis := r32(base + gpioMIS)
-			w32(base+gpioIC, mis)
-			line.Done()
-			if mis&powerButton != 0 {
-				shutdownOnce.Do(func() { close(shutdown) })
-			}
-		case <-ctx.Done():
-			return nil
-		}
-	}
-}
+type lister []string
 
-// ---- PL031 RTC: wall clock ----
-
-type rtc struct{ base uint64 }
-
-func (r rtc) Now() time.Time { return time.Unix(int64(r32(r.base)), 0) }
-
-func runPL031(ctx context.Context, d *dev.Device) error {
-	d.Ready(dev.Clock(rtc{d.Reg[0].Base}))
-	<-ctx.Done()
-	return nil
-}
-
-// ---- virtio-mmio: discover what QEMU attached ----
-
-var virtioNames = map[uint32]string{1: "net", 2: "blk", 3: "console", 4: "rng", 9: "9p", 16: "gpu", 18: "input"}
-
-type virtioBus []string
-
-func (v virtioBus) Devices() []string { return v }
-
-func runVirtioScan(ctx context.Context, d *dev.Device) error {
-	var found virtioBus
-	for slot := uint64(0); slot < VIRTIO_MMIO_SLOTS; slot++ {
-		base := d.Reg[0].Base + slot*0x200
-		if r32(base) != 0x74726976 { // "virt"
-			continue
-		}
-		id := r32(base + 0x008)
-		if id == 0 {
-			continue // empty slot
-		}
-		name := virtioNames[id]
-		if name == "" {
-			name = fmt.Sprintf("id%d", id)
-		}
-		found = append(found, fmt.Sprintf("%s@slot%d(irq %d)", name, slot, VIRTIO_IRQ+int(slot)))
-	}
-	if len(found) == 0 {
-		found = virtioBus{"no devices attached"}
-	}
-	d.Ready(dev.Lister(found))
-	return nil // probe-only: drivers for each device come later
-}
+func (l lister) Devices() []string { return l }
 
 // ---- ARM physical timer as an interrupt latency probe ----
 
@@ -160,9 +89,17 @@ func (p *ptimerProbe) Measure(ctx context.Context, n int) ([]time.Duration, erro
 	return out, nil
 }
 
+// runPtimerProbe drives the "arm,armv8-timer" node. Its interrupts are, in
+// order: secure physical, non-secure physical, virtual, hypervisor. The
+// virtual timer belongs to the idle governor; the probe uses the
+// non-secure physical one.
 func runPtimerProbe(ctx context.Context, d *dev.Device) error {
+	id := PTIMER_IRQ
+	if len(d.IRQ) >= 2 {
+		id = d.IRQ[1]
+	}
 	write_cntp_ctl(0)
-	line, err := d.Bridge.Request(d.IRQ0(), "ptimer")
+	line, err := d.Bridge.Request(id, "ptimer")
 	if err != nil {
 		return err
 	}

@@ -525,6 +525,8 @@ CLAUDE.md            rules and notes for AI-assisted development
 | `make test` | `go vet` + `go test ./...` on your Mac |
 | `make hosted` | build and run godeep as a Mac process |
 | `make kernel` | build `bin/godeep-arm64.elf` with TamaGo (`ARCH=amd64` for x86-64) |
+| `make image` | turn it into an arm64 Linux-style Image (`bin/godeep-arm64.img`), the format m1n1 and U-Boot load; `make qemu` boots this by default, with the device tree in `x0` |
+| `make qemu EL2=1` | boot entered at EL2, the way m1n1 starts kernels on a real Mac (emulated, TCG) |
 | `make qemu` | build, then boot in QEMU (arm64 + HVF by default) |
 | `make stop` | from another terminal: power godeep off cleanly, falling back to killing QEMU |
 | `make kill` | from another terminal: kill QEMU immediately |

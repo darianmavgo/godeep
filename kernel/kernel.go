@@ -34,6 +34,8 @@ type Console struct {
 
 // Board is everything the kernel needs from the platform.
 type Board struct {
+	// Info is printed under the boot banner (how the board booted).
+	Info    string
 	Console Console
 	// Shutdown receives when the host asks godeep to power off: the VM's
 	// power button (QEMU system_powerdown) or SIGTERM for the hosted build.
@@ -57,6 +59,9 @@ func Boot(ctx context.Context, b Board) error {
 	con := b.Console
 	fmt.Fprintf(con.Out, "godeep %s (%s/%s, %s, GOMAXPROCS=%d)\n",
 		Version, runtime.GOOS, runtime.GOARCH, runtime.Version(), runtime.GOMAXPROCS(0))
+	if b.Info != "" {
+		fmt.Fprintln(con.Out, b.Info)
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

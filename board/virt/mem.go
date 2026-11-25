@@ -21,6 +21,10 @@ var ramSize uint64 = 0xe0000000 // 3.5GB
 const (
 	DMA_BASE = DRAM_BASE + 0xe0000000
 	DMA_SIZE = 0x20000000 // 512MB
+
+	// The boot device tree is copied to the start of the DMA region by
+	// cpuinit (entry_arm64.s, FDT_COPY); the allocator gets the rest.
+	FDT_RESERVE = 0x200000 // 2MB
 )
 
 //go:linkname ramStackOffset runtime/goos.RamStackOffset

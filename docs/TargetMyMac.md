@@ -25,6 +25,7 @@ The serial number is deliberately left out of this file, since the repo may be s
 - **The machine:** a 14-inch MacBook Pro (2021), `MacBookPro18,1`, board `J316sAP`, **Apple M1 Pro** (SoC `t6000`). 8 performance + 2 efficiency cores, 16-core GPU, 16 GB LPDDR5, 512 GB SSD. macOS 26.6.2, plus Omarchy (Asahi-based Linux) on the same SSD.
 - **Existing Go driver coverage on bare metal is thin.** The *CPU* side works: TamaGo's arm64 boot, MMU and timers, plus Go's assembly-accelerated crypto and SIMD. Almost every peripheral has no Go driver; the reference code is Asahi Linux (C/Rust) and its bootloader m1n1 (C/Python).
 - **godeep now has its driver foundation** (§3): a DMA allocator with an IOMMU interface, an interrupt bridge, a device manager, and an RTKit coprocessor protocol engine. They're tested on the host and running on QEMU. On the M1 the remaining work narrows to three small hardware adapters: an AIC2 interrupt-controller driver, a DART IOMMU driver and an ASC mailbox driver. Every other M1 driver builds on those.
+- **godeep now boots like a Linux kernel** (§3.1): a raw arm64 Image (`make image`), entry at **EL2** with a drop to EL1, and its device list read from the **device tree** the boot loader passes in `x0`. That's exactly what m1n1 does on this Mac, and it's tested in QEMU (`make qemu EL2=1`). Of the §4 blockers, two are done; the MMU patch and AIC2 remain.
 - **Through QEMU (today's setup)**, godeep uses this Mac's CPU natively via HVF and reaches everything else through virtio. That remains the practical target.
 - **For bare metal, this Mac is well placed.** The Omarchy install means Asahi's **m1n1** bootloader is already set up. §6 shows how to add a separate **godeep** boot entry and data partition between Macintosh HD and Omarchy without touching either. The first milestone is "godeep prints its shell on the laptop screen" via the framebuffer the firmware already set up, which needs **no display driver at all**.
 
@@ -139,7 +140,7 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 
 | Hardware | Go code | Status | Notes / reference | Effort |
 |---|---|---|---|---|
-| CPU boot, exceptions, caches | `tamago/arm64` | ◐ | Needs two patches (§4): an EL2 entry path and an MMU that reaches RAM at `0x100_0000_0000` | S |
+| CPU boot, exceptions, caches | `tamago/arm64` + godeep's own entry (`board/virt/entry_arm64.s`) | ◐ | **EL2 entry done** (§3.1, tested at EL2 in QEMU). Left: the MMU reaching RAM at `0x100_0000_0000` | S |
 | MMU / page tables | `tamago/arm64` mmu | ◐ | Hard-codes a 39-bit VA with flat mapping. Needs a 48-bit VA (T0SZ=16), 4-level tables and 16 KB-aware DMA mappings | S–M |
 | Generic timer | `tamago/arm64` `InitGenericTimers`, `GetTime` | ✅ | Architected and identical to QEMU. The timer *interrupt* arrives as a FIQ through AIC, not the GIC | — |
 | AES, SHA-1/2/3, GHASH | Go std `crypto/*` (arm64 assembly) | ✅ | Uses the CPU's AES, SHA3 and PMULL instructions directly | — |
@@ -149,7 +150,7 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 | More cores (SMP) | none (TamaGo has no arm64 SMP) | ✗ | Apple starts cores through PMGR "cpu-start" registers, not PSCI. Reference: m1n1 `smp.c`, Linux `arch/arm64` + Apple PMGR | M |
 | **Interrupt controller (AIC2)** | **godeep `kernel/irq` bridge** (routing, oneshot masking, stats, latency probe) | ◐ | Only the controller adapter is left: implement `irq.Controller` (`Enable`/`Disable`) plus the ack loop for AIC2's event register. Reference: Linux `irq-apple-aic.c`, m1n1 `aic.c` | S |
 | Power off / reboot | `board/virt` PSCI | ✗ | No PSCI firmware on Apple Silicon. Reboot through the watchdog (Linux `apple_wdt.c`, tiny); power-off through SMC. The kernel's shutdown path (`Board.PowerOff`) is ready | XS / M |
-| **Device discovery + driver supervision** | **godeep `kernel/dev`** device manager | ◐ | Drivers already run as supervised, restartable processes with dependency ordering. Missing: a parser that turns Apple's device tree (ADT, from m1n1) into `dev.Node`s | S |
+| **Device discovery + driver supervision** | **godeep `kernel/dev`** device manager + **`kernel/fdt`** parser | ◐ | Drivers run as supervised, restartable processes, and the device list comes from the FDT in `x0` (§3.1). m1n1 converts Apple's ADT into an FDT for its payload, so no ADT parser is needed. Left: check m1n1's FDT for this Mac, and map AIC2's interrupt cells | XS |
 
 ### Peripherals
 
@@ -221,6 +222,25 @@ Design and rules are in [`DriverModel.md`](DriverModel.md).
 | Bridge service time | ~10–27 µs |
 | Idle host CPU | ~2% under HVF (UART polled, see below), ~0.2% under TCG |
 
+### 3.1 Booting like a Linux kernel (built, 2026-11-25)
+
+m1n1, U-Boot's `booti` and QEMU's `-kernel` all load kernels the same way: a raw arm64 **Image** at a 2 MB-aligned RAM base + `text_offset`, entered at its first instruction with the **device tree address in `x0`**. On this Mac, m1n1 enters at **EL2**. godeep now does all of this, and it's tested in QEMU:
+
+| Piece | Where | What it does | Tested |
+|---|---|---|---|
+| `make image` | `tools/mkimage` | turns the TamaGo ELF into an arm64 Linux Image: 64-byte header (branch to entry, `text_offset`, size incl. bss, magic `ARM\x64`) over the never-executed ELF header, so no code moves | host test on the real kernel; QEMU boots it (now the default `make qemu`) |
+| EL2 → EL1 entry | `board/virt/entry_arm64.s` (TamaGo `linkcpuinit` build tag replaces its `cpuinit`) | at EL2: `HCR_EL2.RW`, EL1 timer access (`CNTHCTL_EL2`), no FP/cp15 traps, `ICC_SRE_EL2.Enable` for the GIC, then `ERET` to EL1 with interrupts masked | `make qemu EL2=1`: QEMU TCG with `virtualization=on` enters at EL2 like m1n1; full shell, GIC, timers and power-off work |
+| device tree capture | same file | keeps `x0`, validates the FDT magic, copies it (up to 2 MB) to the start of the DMA region **before the Go heap exists**, since the loader may have put it where the heap will grow | QEMU Image boot |
+| device list from the FDT | `kernel/fdt` (parser with `ranges` translation for `/soc`-style buses, GIC interrupt cells) + `board/virt/devices.go` | every node with a `compatible` becomes a `dev.Node`; empty virtio slots are skipped; nodes without a driver show as `no driver` in `lsdev` (like `lspci`); `/psci` `method` picks the power-off conduit (`hvc`/`smc`) | host tests against QEMU's real DTB; `lsdev` lists 10 devices from the tree |
+| register access | `kernel/mmio` (`Regs`; `Window` on hardware, recording `Fake` in tests; `Modify` documented as never-for-W1C) | §7.2 rung 2 | host tests |
+| portable drivers | `drivers/arm/pl061` (power button), `drivers/arm/pl031` (RTC), `drivers/virtio/mmio` (slot probe) | moved out of the board; host-tested against `mmio.Fake`, e.g. the power button's config writes touch only its own bit | host tests + QEMU |
+
+The first boot line says how godeep was entered, for example:
+
+```
+board: qemu-virt; entered at EL2, dropped to EL1; linux,dummy-virt, device tree from boot loader (10 devices); PSCI via smc
+```
+
 **Lessons from building it that carry over to the M1:**
 - **Never read-modify-write a write-1-to-set/clear register.** TamaGo's GIC driver did exactly that on `GICD_ICENABLER`: disabling one interrupt disabled its whole bank, and the first keystroke silently disabled the power button. AIC2's mask registers have the same semantics, so its adapter must write single bits.
 - **`goos.Idle(until)` gets `until == 0` for "no timer pending",** not "due now". Treating it as due spun the CPU.
@@ -234,11 +254,11 @@ Design and rules are in [`DriverModel.md`](DriverModel.md).
 
 These must be fixed before godeep can print a single character on the real hardware:
 
-1. **Entry at EL2.** m1n1 starts payloads at **EL2** (Asahi kernels run in EL2/VHE). `tamago/arm64` `cpuinit` handles EL1 or EL3 only: from EL2 it would execute EL3 register writes, which is an undefined-instruction fault. Add an EL2→EL1 drop (set `HCR_EL2.RW`, then `ERET` to EL1). That's about 15 lines of assembly in a board-specific `linkcpuinit` override.
+1. ✅ **Entry at EL2.** *Done (§3.1): `board/virt/entry_arm64.s` drops EL2 → EL1 and is tested at EL2 in QEMU. `board/applem1` reuses it, adding any Apple-specific EL2 setup m1n1's docs call for.* Background: m1n1 starts payloads at **EL2** (Asahi kernels run in EL2/VHE). `tamago/arm64` `cpuinit` handles EL1 or EL3 only: from EL2 it would execute EL3 register writes, which is an undefined-instruction fault. Add an EL2→EL1 drop (set `HCR_EL2.RW`, then `ERET` to EL1). That's about 15 lines of assembly in a board-specific `linkcpuinit` override.
 2. **RAM is above 1 TiB.** DRAM starts at `0x100_0000_0000`. TamaGo's arm64 MMU sets up a 39-bit VA with a 40-bit physical range and flat mapping, which can't reach it. Either patch the MMU (48-bit VA, 4-level tables) or map RAM at a low virtual address. Flat mapping plus a 48-bit VA is the simpler patch. The DMA region (§3) must sit in RAM the Go heap doesn't own, exactly as `board/virt` does it.
 3. **AIC, not GIC.** `board/virt`'s idle routine and interrupt service use the GIC. On the M1, the `irq.Controller` adapter talks to AIC2, and the timer FIQ wakes WFI the same way.
-4. **No PSCI.** `halt` and `make stop`'s power-off must use the watchdog or SMC instead (`Board.PowerOff`).
-5. **Image format.** m1n1 and U-Boot load raw arm64 "Image" binaries (with Linux's 64-byte header), not ELF. Add a `make image` step: `objcopy -O binary` plus a header shim.
+4. **No PSCI.** `halt` and `make stop`'s power-off must use the watchdog or SMC instead (`Board.PowerOff`). The board already reads the PSCI conduit from the device tree; on the M1 the tree has no `/psci`, which the board will use as the cue to use the watchdog.
+5. ✅ **Image format.** *Done: `make image` (`tools/mkimage`) builds a raw arm64 Image, and QEMU boots it by default.* For the M1, link `board/applem1` at the RAM base m1n1 uses and set `-ram` to match.
 6. **16 KB IOMMU pages.** DART works in 16 KB pages, so DMA buffers must be 16 KB-aligned (`dma.Alloc(size, 16384)`) even if the CPU uses 4 KB pages.
 
 ---
@@ -521,11 +541,11 @@ These keep native drivers testable on the host and shareable between boards:
 
 | Addition | Purpose |
 |---|---|
-| `kernel/mmio`: a `Regs` interface (`Read32`/`Write32` at an offset) with a real implementation (single atomic 32-bit accesses) and a **recording fake** that can assert or replay traces | rung 2; enforces the "no read-modify-write of W1S/W1C registers" lesson in one place |
-| `drivers/apple/{aic,dart,asc,smc,nvme,spihid,uart,wdt}` and `drivers/virtio/{blk,net,rng}`: driver code as ordinary Go packages, no build tags | host tests run on every driver; boards only wire them up |
-| `board/applem1`: build-tagged `tamago && arm64 && applem1`; device list from the **ADT** m1n1 passes; registers the Apple drivers | the third board, next to `board/virt` |
+| ✅ `kernel/mmio`: a `Regs` interface (`Read32`/`Write32` at an offset) with a real implementation (single atomic 32-bit accesses) and a **recording fake** that can assert or replay traces | rung 2; enforces the "no read-modify-write of W1S/W1C registers" lesson in one place. *Built.* |
+| ◐ `drivers/<vendor>/<device>`: driver code as ordinary Go packages, no build tags | host tests run on every driver; boards only wire them up. *Started: `drivers/arm/{pl061,pl031}`, `drivers/virtio/mmio`. Next: `drivers/apple/{aic,dart,asc,smc,nvme,spihid,uart,wdt}`, `drivers/virtio/{rng,blk,net}`* |
+| `board/applem1`: build-tagged `tamago && arm64 && applem1`; device list from the **FDT** m1n1 builds from the ADT (via `kernel/fdt`, as `board/virt` already does); registers the Apple drivers | the third board, next to `board/virt` |
 | Service interfaces as needed: `dev.Block`, `dev.NIC`, `dev.Framebuffer`, `dev.Keyboard` | consumers (filesystems, netstack, shell) never depend on a specific driver |
-| `make test` stays host-only; `make qemu` runs the rung-3 check; a `make m1-guest` target wraps m1n1's `run_guest.py` | one command per rung |
+| `make test` stays host-only; `make qemu` (✅ Image + device tree) and `make qemu EL2=1` (✅ m1n1-style entry) run the rung-3 checks; a `make m1-guest` target wraps m1n1's `run_guest.py` | one command per rung |
 
 ### 7.5 Definition of done for a native driver
 
@@ -551,8 +571,9 @@ For real-metal godeep, this order gives a visible result quickly:
 | Milestone | What | Uses existing Go code | New Go code |
 |---|---|---|---|
 | **M0: foundation** ✅ | DMA + IOMMU interface, interrupt bridge, device manager, RTKit engine (§3) | — | **done** |
+| **M0.7: boot like Linux** ✅ | `make image`, EL2 → EL1 entry, device tree from `x0` → device list, PSCI conduit from the tree, `kernel/mmio`, first portable `drivers/` (§3.1) | `kernel/fdt`, `kernel/mmio` | **done**, tested in QEMU at EL1 and EL2 |
 | **M0.5: a place to boot** | the godeep stub, ESP and GODEEPDATA partition (§6); optionally the tethered-boot entry for m1n1 development | Asahi installer | none: just §6 |
-| **M1: hello on the laptop screen** | `board/applem1`: EL2 entry, MMU patch, RAM + DMA layout, boot framebuffer console (text drawn with `x/image/font`), watchdog reboot, `make image` | TamaGo arm64, generic timer, `image/draw`, `x/image/font` | EL2 shim, MMU patch, framebuffer console, WDT |
+| **M1: hello on the laptop screen** | `board/applem1`: MMU patch, RAM + DMA layout, boot framebuffer console (text drawn with `x/image/font`), watchdog reboot | TamaGo arm64, generic timer, **godeep's EL2 entry, Image format and FDT device list (M0.7)**, `image/draw`, `x/image/font` | MMU patch, framebuffer console, WDT |
 | M2: interactive | AIC2 adapter (`irq.Controller`); keyboard via SPI-HID as a managed driver; the godeep shell on the built-in screen and keyboard | `kernel/irq`, `kernel/dev`, godeep `tty`, `sh` | AIC2 adapter, ADT parser, SPI, HID |
 | M3: coprocessors | ASC mailbox (`rtkit.Mailbox`) + DART (`dma.IOMMU`); verify the RTKit encodings; SMC (battery, lid, power button) as the first client | `kernel/rtkit`, `kernel/dma` | ASC mailbox, DART, SMC protocol |
 | M4: networking | DWC3 device mode + CDC-ECM, so godeep gets an IP over a USB-C cable; SSH into it | go-net/imx-usb CDC-ECM logic, `go-net`, gVisor netstack, `x/crypto/ssh` | DWC3 gadget driver |

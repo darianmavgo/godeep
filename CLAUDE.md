@@ -35,7 +35,8 @@ Full roadmap: `docs/architecture.md`.
 make test      # go test ./... on the host (core packages must stay host-buildable)
 make hosted    # build ./bin/godeep-hosted and run the kernel as a normal process
 make kernel    # build bin/godeep-$(ARCH).elf with TamaGo (TAMAGO=path/to/tamago-go/bin/go)
-make qemu      # boot it with an interactive shell on serial
+make image     # arm64 Linux-style Image (bin/godeep-arm64.img) for QEMU -kernel, m1n1, U-Boot booti
+make qemu      # boot it with an interactive shell on serial (arm64: the Image + device tree; BOOT=elf for the ELF; EL2=1 to enter at EL2 like m1n1, TCG)
 make stop      # (another terminal) power button → clean shutdown; falls back to SIGTERM/SIGKILL
 make kill      # (another terminal) SIGKILL QEMU
 ```
@@ -63,10 +64,14 @@ In QEMU, ^C goes to godeep (it kills the foreground program). Quit QEMU with `Ct
   - `irq`: interrupt bridge. The board acks and calls `Dispatch`; the line is masked until the driver calls `line.Done()` (oneshot)
   - `dev`: device manager. Each driver is a process `drv/<name>` under `devmgr`, with dependencies (`Needs`), readiness (`Ready`/`Get`) and restart-on-crash
   - `rtkit`: Apple RTKit coprocessor protocol over a `Mailbox` interface (encodings unverified on hardware)
+  - `fdt`: device-tree parser (`ranges` translation, GIC interrupt cells); boards build `dev.Node`s from the tree in `x0`
+  - `mmio`: `Regs` interface for device registers: `Window` (tamago only) and a recording `Fake` for host tests
+- `drivers/<vendor>/<device>`: portable drivers taking `mmio.Regs`, host-tested; boards register them (`drivers/arm/pl061`, `pl031`, `drivers/virtio/mmio`)
+- `tools/mkimage`: ELF → arm64 Linux Image
   - See `docs/DriverModel.md` for the driver rules and these four pieces
   - planned: cap, ipc, vfs, klog
 - `board/*`: the only places with platform code, behind build tags
-  - `board/virt` (`tamago && arm64`): **written by us**, since TamaGo has no arm64 QEMU-virt board. It provides the TamaGo runtime hooks via `//go:linkname`: `RamStart`/`RamSize`/`RamStackOffset`, `Hwinit1`, `Nanotime`, `Printk`, `InitRNG`/`GetRandomData`. It also has a PL011 UART driver, a GICv3 + virtual-timer idle governor, and PSCI power-off.
+  - `board/virt` (`tamago && arm64`; entry code needs the `linkcpuinit` tag, set in the Makefile): **written by us**. `entry_arm64.s` replaces TamaGo's `cpuinit`: EL2 → EL1, and it copies the boot device tree to the start of the DMA region (2 MB reserved) before the Go heap exists. Devices come from that tree (`devices.go`), or a static list for ELF boots. We wrote this board because TamaGo has no arm64 QEMU-virt board. It provides the TamaGo runtime hooks via `//go:linkname`: `RamStart`/`RamSize`/`RamStackOffset`, `Hwinit1`, `Nanotime`, `Printk`, `InitRNG`/`GetRandomData`. It also has a PL011 UART driver, a GICv3 + virtual-timer idle governor, and PSCI power-off.
   - `board/microvm` (`tamago && amd64`): wraps TamaGo's `board/qemu/microvm`
   - `board/hosted` (`!tamago`)
   - `cmd/godeep/board_<arch>.go` picks the board for each GOARCH

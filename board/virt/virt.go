@@ -68,7 +68,7 @@ func Init() {
 
 	// Power off through PSCI instead of parking the core, so QEMU exits.
 	goos.Exit = func(int32) {
-		psciCall(psciSystemOff)
+		psciPowerOff()
 		for {
 		}
 	}

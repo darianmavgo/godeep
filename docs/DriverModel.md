@@ -94,6 +94,15 @@ Drivers on QEMU virt today:
 | godeep `kernel/proc` | `pprof.Do` resets the *caller's* labels to the context's afterwards, so `Spawn` relabeled its caller as the new process. | A launcher goroutine sets labels for the child from birth (`goWithLabels`). |
 | **QEMU 11.1.x HVF** | After the first device interrupt (SPI), every WFI returns immediately, and an idle VM burns 100% of a host core. Guest state is clean (`ISR_EL1=0`, GIC idle, timer armed); TCG is fine. Appears to be QEMU issue 959 ("Fix WFI halting to stop idle vCPU spinning"). | Under HVF, `board/virt` polls the UART (`UARTMode = "poll"`), so normal use raises no device interrupts. Timer interrupts don't trigger it. Revisit when Homebrew's QEMU includes the fix. |
 
+## Where driver code lives
+
+- **`drivers/<vendor>/<device>`** holds portable packages with no build tags, so they're host-tested. They take a `func(base) mmio.Regs` and return a `dev.Driver`: `drivers/arm/pl061`, `drivers/arm/pl031`, `drivers/virtio/mmio`.
+- **`kernel/mmio`:** drivers use `Regs`.
+  - On hardware it's a `Window`: single 32-bit atomic accesses.
+  - In tests it's a `Fake` that models the device and records every access, so tests assert exact register sequences.
+  - `mmio.Modify` (read-modify-write) is only for ordinary registers, never W1S/W1C banks.
+- **Boards** register drivers and supply the device list. `board/virt` builds that list from the boot device tree (`kernel/fdt`).
+
 ## Next drivers this enables
 
 - **QEMU virt:** virtio-rng (real entropy) and virtio-net. Both are DMA ring devices: `kernel/dma` + bridge + device manager.
