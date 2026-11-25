@@ -107,9 +107,16 @@ Other ways to run it:
 | `make qemu ARCH=amd64` | the x86-64 kernel on QEMU `microvm`. Slower to boot: QEMU emulates an Intel CPU on Apple Silicon |
 | `make qemu ACCEL=tcg` | the arm64 kernel without hardware acceleration (for Linux or Intel hosts) |
 
-To get out of the VM, either:
-- type `halt`, or
-- press **Ctrl-A**, then **X**.
+To get out of the VM:
+
+| From | Do | What happens |
+|---|---|---|
+| inside godeep | type `halt` | powers off immediately |
+| the QEMU window | press **Ctrl-A**, then **X** | QEMU quits immediately |
+| **another terminal** | `make stop` | presses the VM's **power button**: godeep kills every process, reports any that won't exit, and powers off. If the guest doesn't respond within 5 s, it falls back to killing QEMU |
+| another terminal | `make kill` | kills QEMU immediately (SIGKILL) |
+
+`make stop` finds the VM through `bin/qemu-arm64.pid` and the control socket `bin/qmp-arm64.sock`, which `make qemu` creates. It also finds VMs started some other way, by matching QEMU's command line. The hosted build shuts down the same clean way on `SIGTERM` (e.g. `kill <pid>`).
 
 > Everything below works the same in every mode. One difference to notice: hosted shows `GOMAXPROCS=10` (your Mac's cores), and the VM shows `GOMAXPROCS=1` (one virtual CPU; TamaGo doesn't start extra arm64 cores yet).
 
@@ -498,6 +505,8 @@ CLAUDE.md            rules and notes for AI-assisted development
 | `make hosted` | build and run godeep as a Mac process |
 | `make kernel` | build `bin/godeep-arm64.elf` with TamaGo (`ARCH=amd64` for x86-64) |
 | `make qemu` | build, then boot in QEMU (arm64 + HVF by default) |
+| `make stop` | from another terminal: power godeep off cleanly, falling back to killing QEMU |
+| `make kill` | from another terminal: kill QEMU immediately |
 | `make clean` | delete `bin/` |
 
 Development loop: write code, run `make test`, try it with `make hosted`, then confirm on bare metal with `make qemu`.
@@ -514,7 +523,8 @@ Development loop: write code, run `make test`, try it with `make hosted`, then c
 | amd64: QEMU stops after `Booting from ROM..` with no output | The microvm VM needs **at least 3 GB RAM** (`-m 3G`, already in the Makefile). With less, the kernel's stack lands in missing memory. |
 | The VM uses a full CPU core while idle | The idle hook isn't installed. Check that `board/virt` sets `goos.Idle = idle` and that QEMU uses `gic-version=3`. |
 | ^C quit QEMU instead of stopping my program | You ran QEMU by hand without `signal=off`. Use `make qemu`. |
-| Can't exit QEMU | **Ctrl-A**, then **X**, or type `halt`. |
+| Can't exit QEMU | **Ctrl-A**, then **X**, or type `halt`. From another terminal: `make stop` (or `make kill`). |
+| `make stop` says "no response from the guest" | Expected on `ARCH=amd64`: godeep doesn't handle the x86 (ACPI) power button yet, so it falls back to SIGTERM. On arm64 it means godeep is hung; the fallback still stops QEMU. |
 | A process won't die after `kill` | One of its goroutines ignores `ctx` (see section 6). `ps -g PID` shows where it's stuck. |
 | Debugging a crash during boot | Use `ACCEL=tcg` and add `-d int,cpu_reset,guest_errors` to `QEMU_FLAGS`. That logs exceptions with the PC (arm64) or a `Triple fault` with the RIP (amd64). |
 

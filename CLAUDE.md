@@ -36,6 +36,8 @@ make test      # go test ./... on the host (core packages must stay host-buildab
 make hosted    # build ./bin/godeep-hosted and run the kernel as a normal process
 make kernel    # build bin/godeep-$(ARCH).elf with TamaGo (TAMAGO=path/to/tamago-go/bin/go)
 make qemu      # boot it with an interactive shell on serial
+make stop      # (another terminal) power button → clean shutdown; falls back to SIGTERM/SIGKILL
+make kill      # (another terminal) SIGKILL QEMU
 ```
 
 `ARCH` selects the target:
@@ -82,6 +84,7 @@ arm64 / `board/virt`:
 - **Device access under HVF must be single 32/64-bit loads/stores** (e.g. `atomic.Load/StoreUint32`). Paired or vector accesses to MMIO can't be decoded by the hypervisor.
 - TamaGo has no arm64 SMP bring-up, so it's `-smp 1`, and `GOMAXPROCS` is 1.
 - `RamSize` in `board/virt/mem.go` must not exceed QEMU `-m` (4G).
+- **Power button:** QEMU `system_powerdown` (sent by `make stop` over QMP) raises PL061 GPIO line 3 (`0x09030000`). `board/virt/power.go` polls it, and `kernel.Boot` then kills every process (`Table.Shutdown`, 2 s grace) and calls PSCI off. This works with the default `-machine virt` (no `acpi=off` needed when booting with `-kernel`). amd64 has no power-button handler, so `make stop` falls back to SIGTERM there.
 
 amd64 / `board/microvm`:
 - **QEMU needs `-m 3G` or more.** The microvm board maps RAM up to `0xb0000000`. With less memory, the stack lands in unbacked RAM and the guest silently triple-faults (jump to RIP=0).
