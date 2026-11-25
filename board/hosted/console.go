@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"godeep/kernel"
 	"godeep/kernel/proc"
@@ -48,4 +49,18 @@ func NewConsole() kernel.Console {
 		}
 	})
 	return kernel.Console{In: in, Out: os.Stdout, Echo: false}
+}
+
+// NewBoard returns the host as a board: the terminal is the console, and
+// SIGTERM/SIGHUP (e.g. `kill <pid>`, closing the terminal) is a power-off
+// request, so godeep shuts its processes down cleanly before exiting.
+func NewBoard() kernel.Board {
+	shut := make(chan struct{})
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, syscall.SIGTERM, syscall.SIGHUP)
+	proc.Kthread("power", func() {
+		<-term
+		close(shut)
+	})
+	return kernel.Board{Console: NewConsole(), Shutdown: shut}
 }

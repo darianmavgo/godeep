@@ -14,7 +14,7 @@ In a normal OS, a process is an address space plus threads. The kernel switches 
 | system call | an ordinary Go function call |
 
 It runs in two ways:
-- **Bare metal:** on QEMU's `microvm` (x86-64) virtual machine, via [TamaGo](https://github.com/usbarmory/tamago), which runs the Go runtime with no OS underneath.
+- **Bare metal:** on a virtual machine via [TamaGo](https://github.com/usbarmory/tamago), which runs the Go runtime with no OS underneath. The default target is **arm64 on QEMU's `virt` machine, accelerated by Apple's Hypervisor.framework (HVF)**, so it runs at native speed on Apple Silicon. An x86-64 target (QEMU `microvm`, emulated) is also available.
 - **Hosted:** as a normal program on your Mac or Linux machine, for fast development.
 
 This README is a tutorial. Work through it top to bottom.
@@ -39,10 +39,12 @@ This README is a tutorial. Work through it top to bottom.
 
 ## 1. Set up your machine
 
-You need three things: Go, the TamaGo version of Go, and QEMU.
+You need an **Apple Silicon Mac** for the default setup: the VM uses Apple's Hypervisor.framework (HVF) to run arm64 code natively. On any other machine everything still works, just emulated (see `ACCEL=tcg` below).
+
+Install three things: Go, the TamaGo version of Go, and QEMU.
 
 ```sh
-brew install go qemu
+brew install go qemu   # qemu includes qemu-system-aarch64 (arm64) and qemu-system-x86_64
 ```
 
 TamaGo is a fork of the Go toolchain that adds `GOOS=tamago` (Go with no OS). There's no macOS download, so build it from source; it takes about a minute:
@@ -90,20 +92,26 @@ make qemu
 ```
 
 ```
-booting godeep... (quit QEMU: Ctrl-A then X)
-SeaBIOS (version ...)
-Booting from ROM..godeep 0.0.2 (tamago/amd64, go1.27.4-X:simd, GOMAXPROCS=1)
+booting godeep arm64... (quit QEMU: Ctrl-A then X, or type halt)
+godeep 0.0.2 (tamago/arm64, go1.27.4-X:simd, GOMAXPROCS=1)
 type 'help' for commands
 godeep$
 ```
 
-This is a real x86-64 kernel image (`bin/godeep.elf`). QEMU boots it with no Linux and no macOS underneath; Go's runtime *is* the kernel. The boot is a bit slow on Apple Silicon because QEMU emulates an Intel CPU.
+This is a real arm64 kernel image (`bin/godeep-arm64.elf`). QEMU boots it on its `virt` machine using your Mac's hardware virtualization (`-accel hvf -cpu host`), with no Linux and no macOS underneath; Go's runtime *is* the kernel. It boots in about a second and uses almost no CPU while idle.
+
+Other ways to run it:
+
+| Command | What it runs |
+|---|---|
+| `make qemu ARCH=amd64` | the x86-64 kernel on QEMU `microvm`. Slower to boot: QEMU emulates an Intel CPU on Apple Silicon |
+| `make qemu ACCEL=tcg` | the arm64 kernel without hardware acceleration (for Linux or Intel hosts) |
 
 To get out of the VM, either:
 - type `halt`, or
 - press **Ctrl-A**, then **X**.
 
-> Everything below works the same in both modes. One difference to notice: hosted shows `GOMAXPROCS=10` (your Mac's cores), and the VM shows `GOMAXPROCS=1` (one virtual CPU).
+> Everything below works the same in every mode. One difference to notice: hosted shows `GOMAXPROCS=10` (your Mac's cores), and the VM shows `GOMAXPROCS=1` (one virtual CPU; TamaGo doesn't start extra arm64 cores yet).
 
 ---
 
@@ -149,11 +157,11 @@ ping 2
 godeep$ uptime
 up 41.3s
 godeep$ mem
-heap in use        640.0 KiB
-heap objects       1665
+heap in use        552.0 KiB
+heap objects       506
 total from system  4.9 MiB
 GC cycles          0
-goroutines         10
+goroutines         9
 GOMAXPROCS         1
 ```
 
@@ -200,7 +208,7 @@ Now zoom into individual goroutines with `-g`:
 godeep$ ps -g
 GID  PID  PROC          STATE         WAITING  FUNCTION
 1    -    [go runtime]  select        -        proc.(*Proc).Wait
-6    0    uart0         sleep         -        microvm.NewConsole.func1
+6    0    uart0         sleep         -        virt.NewConsole.func1
 7    0    tty           chan receive  -        tty.(*TTY).discipline
 8    1    init          select        -        proc.(*Proc).Wait
 9    2    sh            running       -        proc.Snapshot
@@ -396,31 +404,52 @@ Rules for program code:
 - Take `ctx` seriously: every blocking `select` needs a `case <-ctx.Done()`.
 - Use `p.Go`, not `go`.
 - Write output to `p.Stdout`.
-- Don't busy-loop without blocking. The VM has one CPU, and a goroutine that never blocks or calls into the runtime can starve the others.
+- Don't busy-loop without blocking. The VM has one CPU, so a goroutine that never blocks or calls into the runtime can starve the others, and it keeps your Mac's core at 100%.
 
 ---
 
 ## 8. How it works inside
 
-### Boot sequence (bare metal)
+### Boot sequence (bare metal, arm64)
 
 ```
-QEMU → SeaBIOS → loads bin/godeep.elf
-  → TamaGo: CPU setup, timers, memory, starts the Go runtime
-  → board/microvm: initializes the serial port (COM1)
+QEMU virt (HVF) → loads bin/godeep-arm64.elf, jumps to it at EL1
+  → TamaGo arm64: MMU on, exception vectors, starts the Go runtime
+  → board/virt Init (Hwinit1): caches, generic timer, PL011 UART,
+                               GIC + timer-based idle, PSCI power-off
   → cmd/godeep/main.go: main()
-      → microvm.NewConsole()   starts kernel goroutine "uart0" (driver)
+      → virt.NewConsole()      starts kernel goroutine "uart0" (driver)
       → kernel.Boot()
           → tty.New()          starts kernel goroutine "tty" (line discipline)
           → spawn PID 1 init
               → spawn PID 2 sh
 ```
 
+### The arm64 board (`board/virt`)
+
+TamaGo ships arm64 CPU support (boot, MMU, exceptions, timers, interrupt controller) but **no board for QEMU's `virt` machine**, so godeep has its own. A TamaGo board is a small package that fills in hooks the Go runtime links against with `//go:linkname`:
+
+| Runtime hook | What `board/virt` provides |
+|---|---|
+| `RamStart`, `RamSize` | RAM at `0x40000000`, 4 GB (must not exceed QEMU's `-m`) |
+| `Hwinit1` | enables caches, the generic timer, the PL011 UART, the GIC and the idle hook |
+| `Nanotime` | reads the arm64 generic timer |
+| `Printk` | sends runtime output (`println`, panics) to the UART |
+| `InitRNG`, `GetRandomData` | an AES-CTR random generator (see the caveat below) |
+| `Exit` | PSCI `SYSTEM_OFF`, which is why `halt` closes QEMU |
+
+Two details are worth knowing:
+
+- **Idle sleeps instead of spinning.** When every goroutine is blocked, the Go runtime calls the board's idle hook with the next timer deadline. godeep arms the CPU's virtual timer for that deadline and executes `WFI` (wait for interrupt). Under HVF, QEMU puts the virtual CPU to sleep until the timer fires. An idle godeep VM uses about 1.5% of one Mac core; without this it used 100%.
+- **The random seed isn't secure.** It comes from the timer counter at boot. That's fine for development, but don't rely on `crypto/rand` until a hardware RNG (virtio-rng) is added.
+
+The x86-64 target (`ARCH=amd64`) uses TamaGo's ready-made `microvm` board instead, through `board/microvm`.
+
 ### A keystroke's journey
 
 ```
 you press 'p'
-  → QEMU puts the byte on the virtual COM1 serial port
+  → QEMU puts the byte in the virtual PL011 serial port (COM1 on amd64)
   → uart0 goroutine (polls every 5 ms) reads it → sends on a channel
   → tty goroutine receives it, echoes 'p', adds it to the current line
   → Enter: tty sends the finished line on another channel
@@ -438,7 +467,8 @@ Every arrow after the hardware is a Go channel. That's the "concurrency layer": 
 | `kernel/tty/tty.go` | line discipline: echo, backspace, ^C, typeahead |
 | `programs/sh/` | the shell and its builtins (`ps.go` is the `ps` command) |
 | `programs/initd/` | PID 1 |
-| `board/microvm/console.go` | serial driver goroutine |
+| `board/virt/` | arm64 board: RAM layout, PL011 serial driver, timer, idle, RNG, power-off |
+| `board/microvm/console.go` | amd64 serial driver goroutine |
 | `board/hosted/console.go` | the same interface on top of macOS stdin/stdout |
 
 ---
@@ -453,7 +483,8 @@ kernel/              portable core: never imports board/*
   tty/               console line discipline
   prog/              registry of built-in programs
 programs/            init, sh, coreutils, hello
-board/microvm/       QEMU microvm drivers   (//go:build tamago)
+board/virt/          QEMU virt arm64 board  (//go:build tamago && arm64), the default
+board/microvm/       QEMU microvm x86-64    (//go:build tamago && amd64)
 board/hosted/        host-OS shims          (//go:build !tamago)
 docs/architecture.md design and roadmap
 CLAUDE.md            rules and notes for AI-assisted development
@@ -465,8 +496,8 @@ CLAUDE.md            rules and notes for AI-assisted development
 |---|---|
 | `make test` | `go vet` + `go test ./...` on your Mac |
 | `make hosted` | build and run godeep as a Mac process |
-| `make kernel` | build `bin/godeep.elf` with TamaGo |
-| `make qemu` | build, then boot in QEMU |
+| `make kernel` | build `bin/godeep-arm64.elf` with TamaGo (`ARCH=amd64` for x86-64) |
+| `make qemu` | build, then boot in QEMU (arm64 + HVF by default) |
 | `make clean` | delete `bin/` |
 
 Development loop: write code, run `make test`, try it with `make hosted`, then confirm on bare metal with `make qemu`.
@@ -478,11 +509,14 @@ Development loop: write code, run `make test`, try it with `make hosted`, then c
 | Symptom | Fix |
 |---|---|
 | `make kernel`: `go: no such file` / wrong toolchain | TamaGo isn't at `~/tamago-go/bin/go`. Build it (step 1) or pass `TAMAGO=...`. |
-| QEMU stops after `Booting from ROM..` with no output | The VM needs **at least 3 GB RAM** (`-m 3G`, already in the Makefile). With less, the kernel's stack lands in missing memory. |
+| `-accel hvf` error (e.g. `HV_UNSUPPORTED`, `HV_DENIED`) | HVF needs an Apple Silicon Mac and a QEMU with the hypervisor entitlement (Homebrew's has it). Elsewhere, use `make qemu ACCEL=tcg`. |
+| `make qemu ARCH=amd64` is slow to boot | Expected: your Mac emulates the x86 CPU. Use the default arm64 target for daily work. |
+| amd64: QEMU stops after `Booting from ROM..` with no output | The microvm VM needs **at least 3 GB RAM** (`-m 3G`, already in the Makefile). With less, the kernel's stack lands in missing memory. |
+| The VM uses a full CPU core while idle | The idle hook isn't installed. Check that `board/virt` sets `goos.Idle = idle` and that QEMU uses `gic-version=3`. |
 | ^C quit QEMU instead of stopping my program | You ran QEMU by hand without `signal=off`. Use `make qemu`. |
 | Can't exit QEMU | **Ctrl-A**, then **X**, or type `halt`. |
 | A process won't die after `kill` | One of its goroutines ignores `ctx` (see section 6). `ps -g PID` shows where it's stuck. |
-| Debugging a crash during boot | Add `-d int,cpu_reset` to `QEMU_FLAGS` and look for `Triple fault` and the instruction pointer just before it. |
+| Debugging a crash during boot | Use `ACCEL=tcg` and add `-d int,cpu_reset,guest_errors` to `QEMU_FLAGS`. That logs exceptions with the PC (arm64) or a `Triple fault` with the RIP (amd64). |
 
 ---
 
@@ -494,3 +528,12 @@ See `docs/architecture.md` for the full plan:
 - **Phase 4:** virtio disk and networking (gVisor's pure-Go TCP/IP stack), and interrupt-driven drivers.
 - **Phase 5:** load programs at runtime as WebAssembly (wazero), each one a goroutine-backed process.
 - **Phase 6:** per-process resource limits and hardening.
+
+arm64 follow-ups:
+- **Multi-core:** start the extra CPU cores so `GOMAXPROCS` > 1 (TamaGo has no arm64 SMP bring-up yet, so the VM runs with `-smp 1`).
+- **virtio-rng** for real entropy.
+- **Interrupt-driven UART** through the GIC, replacing the 5 ms keyboard poll.
+
+Design notes:
+- [`ReUsingGVisor.md`](ReUsingGVisor.md): networking, filesystems and which "syscalls" are worth building
+- [`GoGpuSupport.md`](GoGpuSupport.md): options for display and GPU compute

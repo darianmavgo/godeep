@@ -220,3 +220,23 @@ func Kthread(name string, fn func()) {
 		fn()
 	}()
 }
+
+// Shutdown kills every process and waits until all have exited or ctx is
+// done. It returns the processes that did not exit in time (their goroutines
+// ignore cancellation; kill is cooperative).
+func (t *Table) Shutdown(ctx context.Context) []*Proc {
+	for _, p := range t.List() {
+		p.Kill()
+	}
+	for {
+		ps := t.List()
+		if len(ps) == 0 {
+			return nil
+		}
+		select {
+		case <-ps[0].Done():
+		case <-ctx.Done():
+			return t.List()
+		}
+	}
+}

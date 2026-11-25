@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	if err := kernel.Boot(context.Background(), hosted.NewConsole()); err != nil {
+	if err := kernel.Boot(context.Background(), hosted.NewBoard()); err != nil {
 		fmt.Fprintln(os.Stderr, "godeep:", err)
 		os.Exit(1)
 	}

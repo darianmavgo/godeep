@@ -1,4 +1,4 @@
-//go:build tamago
+//go:build tamago && amd64
 
 // Package microvm is the board glue for QEMU's amd64 microvm machine.
 package microvm
@@ -40,4 +40,11 @@ func (crlf) Write(p []byte) (int, error) {
 		vm.UART0.Tx(c)
 	}
 	return len(p), nil
+}
+
+// NewBoard returns the microvm board. Its power button is an ACPI event,
+// which godeep does not handle yet, so there is no Shutdown channel: `make
+// stop` falls back to killing QEMU.
+func NewBoard() kernel.Board {
+	return kernel.Board{Console: NewConsole()}
 }
