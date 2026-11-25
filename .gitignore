@@ -1,0 +1,38 @@
+# Compiled binaries and TamaGo / bare-metal images
+/bin/
+*.elf
+*.bin
+*.img
+*.iso
+*.efi
+
+# Go build & test artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+
+# Go workspace / local overrides
+go.work
+go.work.sum
+
+# macOS Finder / Spotlight metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editor & IDE directories
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Local environment & debug logs
+.env
+*.log
