@@ -3,6 +3,8 @@
 package virt
 
 import (
+	"math"
+
 	"github.com/usbarmory/tamago/arm64/gic"
 )
 
@@ -14,8 +16,9 @@ const (
 	// Virtual timer PPI (INTID 27).
 	VTIMER_IRQ = gic.FirstPPI + 11
 
-	// Upper bound on one idle sleep, so polled devices are still serviced.
-	maxIdle = 50_000_000 // 50ms
+	// Upper bound on one idle sleep. Devices are interrupt-driven, so this
+	// is only a safety net.
+	maxIdle = 1_000_000_000 // 1s
 )
 
 var GIC = &gic.GIC{GICD: GICD_BASE, GICR: GICR_BASE}
@@ -42,12 +45,16 @@ func initIdle() {
 // Under HVF, QEMU handles the WFI by sleeping the vCPU thread until
 // CNTV_CVAL. Under TCG the timer interrupt reaches the core through the GIC.
 func idle(until int64) {
-	d := until - nanotime()
-	if d <= 0 {
-		return
-	}
-	if d > maxIdle {
-		d = maxIdle
+	d := int64(maxIdle)
+	// until == 0 means "no timer pending" (not "already due"): sleep until
+	// an interrupt or maxIdle. Treating it as due made an idle system with
+	// no Go timers spin at 100% of a host core.
+	if until > 0 && until != math.MaxInt64 {
+		d = until - nanotime()
+		if d <= 0 {
+			return
+		}
+		d = min(d, maxIdle)
 	}
 	ticks := uint64(d) * read_cntfrq() / 1e9
 	if ticks == 0 {

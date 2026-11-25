@@ -33,6 +33,8 @@ type TTY struct {
 	echo   bool
 	lines  chan event
 	intr   chan struct{}
+	stop   chan struct{}
+	once   sync.Once
 	closed atomic.Bool
 
 	mu  sync.Mutex
@@ -43,10 +45,13 @@ type TTY struct {
 // set, typed characters are echoed (raw serial); a cooked host terminal
 // echoes by itself.
 func New(in <-chan byte, out io.Writer, echo bool) *TTY {
-	t := &TTY{echo: echo, out: out, lines: make(chan event, 16), intr: make(chan struct{})}
+	t := &TTY{echo: echo, out: out, lines: make(chan event, 16), intr: make(chan struct{}), stop: make(chan struct{})}
 	proc.Kthread("tty", func() { t.discipline(in) })
 	return t
 }
+
+// Close stops the line discipline goroutine. Pending ReadLine calls get io.EOF.
+func (t *TTY) Close() { t.once.Do(func() { close(t.stop) }) }
 
 func (t *TTY) Write(p []byte) (int, error) {
 	t.mu.Lock()
@@ -87,7 +92,17 @@ func (t *TTY) discipline(in <-chan byte) {
 	var line []byte
 	skip := 0
 	lastCR := false
-	for b := range in {
+	for {
+		var b byte
+		select {
+		case <-t.stop:
+			return
+		case c, ok := <-in:
+			if !ok {
+				return
+			}
+			b = c
+		}
 		if skip > 0 {
 			skip--
 			if skip == 1 && b != '[' {
@@ -102,7 +117,9 @@ func (t *TTY) discipline(in <-chan byte) {
 			// CRLF: the CR already ended the line
 		case b == '\r' || b == '\n':
 			t.echoStr("\n")
-			t.lines <- event{line: string(line)}
+			if !t.deliver(event{line: string(line)}) {
+				return
+			}
 			line = nil
 		case b == CtrlC:
 			t.echoStr("^C\n")
@@ -110,11 +127,13 @@ func (t *TTY) discipline(in <-chan byte) {
 			select {
 			case t.intr <- struct{}{}: // a foreground job's waiter took it
 			default:
-				t.lines <- event{err: ErrInterrupt}
+				if !t.deliver(event{err: ErrInterrupt}) {
+					return
+				}
 			}
 		case b == CtrlD:
-			if len(line) == 0 {
-				t.lines <- event{err: io.EOF}
+			if len(line) == 0 && !t.deliver(event{err: io.EOF}) {
+				return
 			}
 		case b == 0x7f || b == 0x08:
 			if len(line) > 0 {
@@ -127,5 +146,15 @@ func (t *TTY) discipline(in <-chan byte) {
 			line = append(line, b)
 			t.echoStr(string(b))
 		}
+	}
+}
+
+// deliver queues an event for ReadLine; false if the TTY was closed.
+func (t *TTY) deliver(ev event) bool {
+	select {
+	case t.lines <- ev:
+		return true
+	case <-t.stop:
+		return false
 	}
 }

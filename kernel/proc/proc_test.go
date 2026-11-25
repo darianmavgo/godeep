@@ -107,3 +107,23 @@ created by godeep/programs/coreutils.spin in goroutine 1
 		t.Fatalf("unlabelled goroutine got pid %d", gs[0].PID)
 	}
 }
+
+// Spawning must not relabel the caller, and the child is attributed from birth.
+func TestSpawnKeepsCallerLabels(t *testing.T) {
+	tab := NewTable()
+	var p *Proc
+	for i := 0; i < 20; i++ {
+		p = tab.Spawn(context.Background(), 0, Spec{Name: "c", Main: func(ctx context.Context, p *Proc) error {
+			<-ctx.Done()
+			return nil
+		}})
+		Kthread("k", func() {})
+	}
+	for _, g := range Snapshot() {
+		if g.Where == "godeep/kernel/proc.TestSpawnKeepsCallerLabels" && g.PID != -1 {
+			t.Fatalf("test goroutine was relabelled to pid %d", g.PID)
+		}
+	}
+	tab.Shutdown(context.Background())
+	_ = p
+}

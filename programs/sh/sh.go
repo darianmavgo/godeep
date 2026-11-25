@@ -11,6 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"godeep/kernel/dev"
+	"godeep/kernel/dma"
+	"godeep/kernel/irq"
 	"godeep/kernel/proc"
 	"godeep/kernel/prog"
 	"godeep/kernel/tty"
@@ -21,6 +24,9 @@ type Env struct {
 	Table *proc.Table
 	TTY   *tty.TTY
 	Boot  time.Time
+	Dev   *dev.Manager
+	IRQ   *irq.Bridge    // nil on boards without interrupts (hosted)
+	DMA   *dma.Allocator // nil on boards without a DMA region
 }
 
 type builtin struct {
@@ -32,13 +38,18 @@ var builtins map[string]builtin
 
 func init() {
 	builtins = map[string]builtin{
-		"help":   {"list commands", help},
-		"ps":     {"ps [-g] [PID]: processes, or goroutines with -g", ps},
-		"kill":   {"kill PID...: cancel processes", kill},
-		"uptime": {"time since boot", uptime},
-		"mem":    {"memory and scheduler stats", mem},
-		"halt":   {"power off", func(context.Context, Env, *proc.Proc, []string) error { os.Exit(0); return nil }},
-		"exit":   {"exit this shell (init starts a new one)", nil},
+		"help":    {"list commands", help},
+		"ps":      {"ps [-g] [PID]: processes, or goroutines with -g", ps},
+		"kill":    {"kill PID...: cancel processes", kill},
+		"uptime":  {"time since boot", uptime},
+		"mem":     {"memory and scheduler stats", mem},
+		"halt":    {"power off", func(context.Context, Env, *proc.Proc, []string) error { os.Exit(0); return nil }},
+		"exit":    {"exit this shell (init starts a new one)", nil},
+		"lsdev":   {"devices, their drivers and state", lsdev},
+		"irqstat": {"interrupt lines and counts", irqstat},
+		"irqlat":  {"irqlat [N]: measure interrupt-to-goroutine latency", irqlat},
+		"dmastat": {"DMA memory usage", dmastat},
+		"date":    {"wall-clock time", date},
 	}
 }
 
@@ -112,7 +123,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "exit", "halt"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "exit", "halt"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")

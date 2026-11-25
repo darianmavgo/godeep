@@ -103,12 +103,29 @@ func (p *Proc) Go(fn func(ctx context.Context)) bool {
 	}
 	p.live++
 	p.mu.Unlock()
-	go p.run(func() error { fn(p.ctx); return nil }, false)
+	p.spawn(func() error { fn(p.ctx); return nil }, false)
 	return true
 }
 
+// spawn starts a goroutine that carries the Proc's labels from its first
+// instruction.
+func (p *Proc) spawn(fn func() error, isMain bool) {
+	goWithLabels(p.ctx, func() { p.run(fn, isMain) })
+}
+
+// goWithLabels starts fn in a goroutine labelled with ctx's pprof labels
+// from birth (goroutines inherit labels when created), without touching the
+// caller's labels. A short-lived launcher goroutine takes the labels and
+// starts fn. (pprof.Do is not usable here: afterwards it sets the caller's
+// labels to ctx's, not back to what they were.)
+func goWithLabels(ctx context.Context, fn func()) {
+	go func() {
+		pprof.SetGoroutineLabels(ctx)
+		go fn()
+	}()
+}
+
 func (p *Proc) run(fn func() error, isMain bool) {
-	pprof.SetGoroutineLabels(p.ctx)
 	defer p.release()
 	defer func() {
 		if r := recover(); r != nil {
@@ -172,7 +189,7 @@ func (t *Table) Spawn(parent context.Context, ppid int, s Spec) *Proc {
 	t.mu.Unlock()
 
 	p.ctx = pprof.WithLabels(ctx, pprof.Labels("pid", strconv.Itoa(pid), "proc", s.Name))
-	go p.run(func() error { return s.Main(p.ctx, p) }, true)
+	p.spawn(func() error { return s.Main(p.ctx, p) }, true)
 	return p
 }
 
@@ -214,11 +231,7 @@ func (t *Table) List() []*Proc {
 
 // Kthread starts a kernel goroutine (pid 0), e.g. a device driver.
 func Kthread(name string, fn func()) {
-	ctx := pprof.WithLabels(context.Background(), pprof.Labels("pid", "0", "proc", name))
-	go func() {
-		pprof.SetGoroutineLabels(ctx)
-		fn()
-	}()
+	goWithLabels(pprof.WithLabels(context.Background(), pprof.Labels("pid", "0", "proc", name)), fn)
 }
 
 // Shutdown kills every process and waits until all have exited or ctx is

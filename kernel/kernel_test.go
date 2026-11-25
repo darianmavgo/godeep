@@ -20,7 +20,7 @@ func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(
 // Boot the whole system, run ps and echo through the shell, then close the console.
 func TestBootShellSession(t *testing.T) {
 	in := make(chan byte, 256)
-	for _, b := range []byte("echo hi there\nworkers 3 &\nps\nps -g\n") {
+	for _, b := range []byte("echo hi there\nworkers 3 &\nsleep 0.2\nps\nps -g\n") {
 		in <- b
 	}
 	out := &syncBuf{}

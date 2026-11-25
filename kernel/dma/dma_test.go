@@ -1,0 +1,77 @@
+package dma
+
+import (
+	"testing"
+)
+
+func newTest(size int) *Allocator {
+	return New(Region{Base: 0x1_2000_0000, Mem: make([]byte, size)})
+}
+
+func TestAllocAlignZeroAndFree(t *testing.T) {
+	a := newTest(1 << 20)
+	b1, err := a.Alloc(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b1.Size() != 128 || b1.Phys%DefaultAlign != 0 {
+		t.Fatalf("bad buffer: size %d phys %#x", b1.Size(), b1.Phys)
+	}
+	b1.Bytes[0] = 0xff
+	b2, err := a.Alloc(5000, 16384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2.Phys%16384 != 0 {
+		t.Fatalf("not 16K aligned: %#x", b2.Phys)
+	}
+	b1.Free()
+	b3, _ := a.Alloc(64, 0) // reuses b1's space, must be zeroed
+	if b3.Phys != b1.Phys || b3.Bytes[0] != 0 {
+		t.Fatalf("reuse/zero failed: %#x %#x %d", b3.Phys, b1.Phys, b3.Bytes[0])
+	}
+	b2.Free()
+	b3.Free()
+	if s := a.Stats(); s.Used != 0 || s.FreeSpans != 1 || s.LargestFreeSpan != 1<<20 {
+		t.Fatalf("not fully coalesced: %+v", s)
+	}
+}
+
+func TestOutOfMemoryAndDoubleFree(t *testing.T) {
+	a := newTest(4096)
+	b, _ := a.Alloc(4096, 0)
+	if _, err := a.Alloc(1, 0); err != ErrNoMemory {
+		t.Fatalf("want ErrNoMemory, got %v", err)
+	}
+	b.Free()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("double free did not panic")
+		}
+	}()
+	b.Free()
+}
+
+func TestFragmentationCoalesces(t *testing.T) {
+	a := newTest(64 * 128)
+	var bs []*Buffer
+	for i := 0; i < 64; i++ {
+		b, err := a.Alloc(128, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bs = append(bs, b)
+	}
+	for i := 0; i < 64; i += 2 { // free evens, then odds: worst-case fragmentation
+		bs[i].Free()
+	}
+	if _, err := a.Alloc(256, 0); err != ErrNoMemory {
+		t.Fatal("expected fragmentation to block a 256-byte alloc")
+	}
+	for i := 1; i < 64; i += 2 {
+		bs[i].Free()
+	}
+	if s := a.Stats(); s.FreeSpans != 1 {
+		t.Fatalf("want 1 span, got %+v", s)
+	}
+}

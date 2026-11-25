@@ -9,9 +9,14 @@ import (
 
 // ARM PrimeCell UART (PL011) registers.
 const (
-	uartDR = 0x00 // data
-	uartFR = 0x18 // flags
-	uartCR = 0x30 // control
+	uartDR   = 0x00 // data
+	uartFR   = 0x18 // flags
+	uartCR   = 0x30 // control
+	uartIMSC = 0x38 // interrupt mask set/clear
+	uartICR  = 0x44 // interrupt clear
+
+	intRX = 1 << 4 // receive
+	intRT = 1 << 6 // receive timeout
 
 	frRXFE = 1 << 4 // receive FIFO empty
 	frTXFF = 1 << 5 // transmit FIFO full
@@ -34,6 +39,16 @@ func (u *PL011) reg(off uintptr) *uint32 {
 // Init enables the UART (QEMU's PL011 only transmits when UARTEN and TXE are set).
 func (u *PL011) Init() {
 	atomic.StoreUint32(u.reg(uartCR), crUARTEN|crTXE|crRXE)
+}
+
+// EnableRxInterrupt makes the UART raise its interrupt when data arrives.
+func (u *PL011) EnableRxInterrupt() {
+	atomic.StoreUint32(u.reg(uartIMSC), intRX|intRT)
+}
+
+// ClearRxInterrupt acknowledges the receive interrupt at the UART.
+func (u *PL011) ClearRxInterrupt() {
+	atomic.StoreUint32(u.reg(uartICR), intRX|intRT)
 }
 
 // Tx transmits one byte.

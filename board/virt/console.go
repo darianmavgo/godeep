@@ -3,24 +3,33 @@
 package virt
 
 import (
-	"time"
-
 	"godeep/kernel"
+	"godeep/kernel/irq"
 	"godeep/kernel/proc"
 )
 
 // NewConsole returns the PL011 as the console. A kernel thread (pid 0,
-// "uart0") owns the UART and turns received bytes into channel sends. It
-// polls; IRQ-driven RX needs the GIC (a later step).
-func NewConsole() kernel.Console {
+// "uart0") owns the UART: it sleeps until the UART's receive interrupt,
+// drains the FIFO into a channel, then re-arms the interrupt.
+func NewConsole(b *irq.Bridge) kernel.Console {
 	in := make(chan byte, 256)
+	line, err := b.Request(UART0_IRQ, "uart0")
+	if err != nil {
+		panic(err)
+	}
+	UART0.EnableRxInterrupt()
 	proc.Kthread("uart0", func() {
 		for {
-			if c, ok := UART0.Rx(); ok {
+			for {
+				c, ok := UART0.Rx()
+				if !ok {
+					break
+				}
 				in <- c
-				continue
 			}
-			time.Sleep(5 * time.Millisecond)
+			UART0.ClearRxInterrupt()
+			line.Done()
+			<-line.C
 		}
 	})
 	return kernel.Console{In: in, Out: crlf{}, Echo: true}

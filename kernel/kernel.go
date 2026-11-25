@@ -8,6 +8,9 @@ import (
 	"runtime"
 	"time"
 
+	"godeep/kernel/dev"
+	"godeep/kernel/dma"
+	"godeep/kernel/irq"
 	"godeep/kernel/proc"
 	"godeep/kernel/tty"
 	_ "godeep/programs/coreutils"
@@ -38,6 +41,13 @@ type Board struct {
 	Shutdown <-chan struct{}
 	// PowerOff is called after a clean shutdown. nil: Boot just returns.
 	PowerOff func()
+
+	// IRQ routes hardware interrupts to driver goroutines (nil: none).
+	IRQ *irq.Bridge
+	// DMA allocates device-visible memory outside the Go heap (nil: none).
+	DMA *dma.Allocator
+	// Devices are started by the device manager, each driver as a process.
+	Devices []dev.Node
 }
 
 // Boot starts PID 1 and blocks until it exits, ctx is done, or the board
@@ -51,7 +61,13 @@ func Boot(ctx context.Context, b Board) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	env := sh.Env{Table: proc.NewTable(), TTY: tty.New(con.In, con.Out, con.Echo), Boot: time.Now()}
+	tab := proc.NewTable()
+	mgr := dev.NewManager(tab, b.IRQ, b.DMA)
+	mgr.Start(ctx, b.Devices)
+
+	env := sh.Env{Table: tab, TTY: tty.New(con.In, con.Out, con.Echo), Boot: time.Now(),
+		Dev: mgr, IRQ: b.IRQ, DMA: b.DMA}
+	defer env.TTY.Close()
 	init := env.Table.Spawn(ctx, 0, proc.Spec{Name: "init", Stdout: env.TTY, Main: initd.Main(env)})
 
 	var shutdown bool
