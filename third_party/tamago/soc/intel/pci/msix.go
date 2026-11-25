@@ -1,0 +1,128 @@
+// Intel Peripheral Component Interconnect (PCI) driver
+// https://github.com/usbarmory/tamago
+//
+// Copyright (c) The TamaGo Authors. All Rights Reserved.
+//
+// Use of this source code is governed by the license
+// that can be found in the LICENSE file.
+
+package pci
+
+import (
+	"encoding/binary"
+	"errors"
+
+	"github.com/usbarmory/tamago/amd64"
+	"github.com/usbarmory/tamago/dma"
+)
+
+const msixEnable = 31
+
+// CapabilityMSIX represents an MSI-X Capability Structure.
+type CapabilityMSIX struct {
+	CapabilityHeader
+
+	MessageControl uint16
+	TableOffset    uint32
+	PBAOffset      uint32
+
+	device *Device
+	off    uint32
+
+	table uint64
+}
+
+// Unmarshal decodes a PCI MSI-X Capability from the argument device
+// configuration space at function 0 and the given register offset.
+func (msix *CapabilityMSIX) Unmarshal(d *Device, off uint32) (err error) {
+	val := d.Read(0, off)
+	msix.Vendor = uint8(val & 0xff)
+	msix.Next = uint8(val >> 8)
+	msix.MessageControl = uint16(val >> 16)
+
+	msix.TableOffset = d.Read(0, off+4)
+	msix.PBAOffset = d.Read(0, off+8)
+
+	msix.device = d
+	msix.off = off
+
+	return
+}
+
+// TableSize returns the number of entries in the MSI-X table.
+func (msix *CapabilityMSIX) TableSize() int {
+	return int(msix.MessageControl&0x7ff) + 1
+}
+
+// TableBAR returns the Base Address Register index (BIR) and offset of the
+// MSI-X table.
+func (msix *CapabilityMSIX) TableBAR() (bir int, offset uint32) {
+	bir = int(msix.TableOffset & 0b111)
+	offset = msix.TableOffset &^ 0b111
+	return
+}
+
+// EnableInterrupt configures an MSI-X interrupt entry and enables the MSI-X
+// table.
+func (msix *CapabilityMSIX) EnableInterrupt(n int, addr uint64, data uint32) (err error) {
+	if n >= msix.TableSize() || msix.device == nil {
+		return errors.New("invalid capability instance")
+	}
+
+	table := msix.table
+
+	if table == 0 {
+		bir, offset := msix.TableBAR()
+		bar := uint64(msix.device.BaseAddress(bir)) &^ 0xf
+		table = bar + uint64(offset)
+	}
+
+	size := 16
+	off := uint64(size * n)
+
+	r, err := dma.NewRegion(uint(table+off), size, false)
+
+	if err != nil {
+		return err
+	}
+
+	ptr, entry := r.Reserve(size, 0)
+	defer r.Release(ptr)
+
+	binary.LittleEndian.PutUint64(entry[0:], addr)
+	binary.LittleEndian.PutUint32(entry[8:], data)
+	binary.LittleEndian.PutUint32(entry[12:], 0)
+
+	msix.device.Write(0, msix.off, 1<<msixEnable)
+
+	return
+}
+
+// MapMSIX returns the device MSI-X capability, with its table mapped as device
+// memory (see [Device.MapBAR]).
+func (d *Device) MapMSIX(cpu *amd64.CPU) (msix *CapabilityMSIX, err error) {
+	for off, hdr := range d.Capabilities() {
+		if hdr.Vendor != MSIX {
+			continue
+		}
+
+		msix = &CapabilityMSIX{}
+
+		if err = msix.Unmarshal(d, off); err != nil {
+			return nil, err
+		}
+
+		bir, offset := msix.TableBAR()
+		va, _, err := d.MapBAR(cpu, bir)
+
+		if err != nil {
+			return nil, err
+		}
+
+		msix.table = va + uint64(offset)
+
+		return msix, nil
+	}
+
+	return nil, errors.New("MSI-X capability not found")
+}

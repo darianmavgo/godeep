@@ -67,7 +67,12 @@ In QEMU, ^C goes to godeep (it kills the foreground program). Quit QEMU with `Ct
   - `fdt`: device-tree parser (`ranges` translation, GIC interrupt cells); boards build `dev.Node`s from the tree in `x0`
   - `mmio`: `Regs` interface for device registers: `Window` (tamago only) and a recording `Fake` for host tests
 - `drivers/<vendor>/<device>`: portable drivers taking `mmio.Regs`, host-tested; boards register them (`drivers/arm/pl061`, `pl031`, `drivers/virtio/mmio`)
-- `tools/mkimage`: ELF → arm64 Linux Image
+- `tools/mkimage`: ELF → arm64 Linux Image (`-text-offset` override to test self-relocation)
+- `kernel/pgtable`: 4-level 48-bit page tables, allocation-free (runs in `Hwinit0`, before the Go runtime)
+- `drivers/simplefb`: text console on a firmware framebuffer
+- `board/applem1` (`tamago && arm64 && applem1`, `make image BOARD=applem1`): this MacBook Pro. Untested on hardware; see docs/TargetMyMac.md §3.1, §6.8
+- `third_party/tamago`: vendored TamaGo with a 2-file patch (arm64 `linkhwinit0`), via `replace` in go.mod; see its GODEEP_PATCHES.md
+- `tools/godeep-partition.sh`: guided partitioning of this Mac (docs/TargetMyMac.md §6)
   - See `docs/DriverModel.md` for the driver rules and these four pieces
   - planned: cap, ipc, vfs, klog
 - `board/*`: the only places with platform code, behind build tags
@@ -98,6 +103,8 @@ arm64 / `board/virt`:
 - Memory: Go heap = first 3.5 GB (`RamSize`); DMA region = last 512 MB of `-m 4G` at `0x1_2000_0000`, mapped as normal memory in `Init`.
 - Don't use TamaGo's `GIC.DisableInterrupt`: it read-modify-writes `GICD_ICENABLER` and disables the whole bank. `board/virt` writes the single bit.
 - `goos.Idle(until)`: `until == 0` means "no timer", not "due now".
+- Entry code (`entry_arm64.s`) must stay position-independent until relocation: Go assembles `MOVD $sym(SB)` as PC-relative (ADRP+ADD), so keep absolute addresses in DATA words. No Go code before the early identity map: with the MMU off, Go's vector loads/stores fault on Device memory.
+- `IMAGE_BASE` in each board's entry_arm64.s must equal the Makefile's `TEXT_START - 0x1000`.
 - **QEMU 11.1.x HVF WFI bug:** after the first device (SPI) interrupt, WFI returns immediately and the idle VM spins at 100%. TCG is fine and the guest state is clean. Under HVF (`MIDR` implementer `0x61`) the UART is polled (`UARTMode`) to avoid it. To measure idle cost: `ps -o %cpu= -p $(cat bin/qemu-arm64.pid)`. Debug counters must not add Go timers or keystrokes, since both change idle behaviour.
 - **Power button:** QEMU `system_powerdown` (sent by `make stop` over QMP) raises PL061 GPIO line 3 (`0x09030000`). `board/virt/power.go` polls it, and `kernel.Boot` then kills every process (`Table.Shutdown`, 2 s grace) and calls PSCI off. This works with the default `-machine virt` (no `acpi=off` needed when booting with `-kernel`). amd64 has no power-button handler, so `make stop` falls back to SIGTERM there.
 

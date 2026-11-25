@@ -267,6 +267,19 @@ m1n1, U-Boot's `booti` and QEMU's `-kernel` all load kernels the same way: a raw
 | register access | `kernel/mmio` (`Regs`; `Window` on hardware, recording `Fake` in tests; `Modify` documented as never-for-W1C) | §7.2 rung 2 | host tests |
 | portable drivers | `drivers/arm/pl061` (power button), `drivers/arm/pl031` (RTC), `drivers/virtio/mmio` (slot probe) | moved out of the board; host-tested against `mmio.Fake`, e.g. the power button's config writes touch only its own bit | host tests + QEMU |
 
+Added for the M1 (2026-11-25), all tested in QEMU except where noted:
+
+| Piece | Where | What it does |
+|---|---|---|
+| **self-relocation** | top of `cpuinit` in both boards' `entry_arm64.s` | m1n1 doesn't honour `text_offset`: it copies the kernel to *any* 2 MB-aligned block of its heap (`payload.c`) and jumps to it with the FDT in `x0` (`kboot.c`). U-Boot's `booti` puts it at `ALIGN(usable RAM start, 2 MB) + text_offset`, and usable RAM starts at iBoot's `phys_base`, which varies. So `cpuinit` checks where it's running (PC-relative), copies the image to its link address if different (either direction, overlap-safe), invalidates the I-cache and restarts. QEMU tests: loaded 2 MB above, 60 KB below and exactly at the link address |
+| **4-level, 48-bit page tables** | `kernel/pgtable` (host-tested, allocation-free) + each board's `mmu.go` (`Hwinit0`) | reaches RAM at 1 TB; 1 GB/2 MB blocks, 4 KB pages only at region edges; Device, Normal, Normal-exec and Normal non-cacheable (framebuffer) types. Replacing TamaGo's `Hwinit0` needed a two-file patch to the vendored TamaGo (`third_party/tamago/GODEEP_PATCHES.md`). `board/virt` runs it daily |
+| **early identity map** | `cpuinit` | Go code can't run with the MMU off (every access is Device memory, and Go's vector loads/stores take alignment faults), so `cpuinit` maps RAM with 1 GB blocks in assembly before the runtime starts, as Linux does |
+| **VHE-aware EL2 drop** | `cpuinit` | Apple cores force `HCR_EL2.E2H = 1`, which changes the `CPTR_EL2` and `CNTHCTL_EL2` layouts. `cpuinit` reads E2H back and programs the right one, so FP/SIMD and the EL1 timer aren't left trapped. Also writes `VTTBR_EL2 = 0` (§3.2) and a fully known `SCTLR_EL1`. *E2H = 1 can only be tested on the Mac* |
+| **framebuffer console** | `drivers/simplefb` (host-tested, renders to PNG) | text on m1n1's `simple-framebuffer`: `x8r8g8b8`, `x2r10g10b10` (the XDR panel), `r5g6b5`; scaled font, scrolling |
+| **`board/applem1`** | `make image BOARD=applem1` → `bin/godeep-applem1.img` | the Mac board: memory map below, framebuffer console (and runtime panics on screen), device list from m1n1's FDT, check that godeep's RAM is inside m1n1's usable memory and clear of `/reserved-memory`, **autorun** of `lsdev`, `ps`, `mem`, `uptime` (no keyboard yet), spin idle (no wake source yet). *Untested on hardware* |
+
+`board/applem1` memory map (16 GB model): DRAM `0x100_0000_0000`–`0x104_0000_0000`; godeep RAM `0x101_0000_0000` + 4 GB (kernel linked at `+1 MB`, page tables below it); DMA region `0x102_0000_0000` + 512 MB (first 2 MB hold the boot device tree); everything else in DRAM mapped non-cacheable (firmware, the framebuffer).
+
 The first boot line says how godeep was entered, for example:
 
 ```
@@ -317,8 +330,8 @@ How that maps to today's implementation (`board/virt/entry_arm64.s`, tested with
 These must be fixed before godeep can print a single character on the real hardware:
 
 1. ✅ **Entry at EL2.** *Decided (§3.2: Option A, drop to EL1) and done (§3.1): `board/virt/entry_arm64.s` drops EL2 → EL1 and is tested at EL2 in QEMU. Small follow-up: write `VTTBR_EL2 = 0` explicitly. `board/applem1` reuses it.* Background: m1n1 starts payloads at **EL2** (Asahi kernels run in EL2/VHE). `tamago/arm64` `cpuinit` handles EL1 or EL3 only: from EL2 it would execute EL3 register writes, which is an undefined-instruction fault. Add an EL2→EL1 drop (set `HCR_EL2.RW`, then `ERET` to EL1). That's about 15 lines of assembly in a board-specific `linkcpuinit` override.
-2. **RAM is above 1 TiB.** DRAM starts at `0x100_0000_0000`. TamaGo's arm64 MMU sets up a 39-bit VA with a 40-bit physical range and flat mapping, which can't reach it. Either patch the MMU (48-bit VA, 4-level tables) or map RAM at a low virtual address. Flat mapping plus a 48-bit VA is the simpler patch. The DMA region (§3) must sit in RAM the Go heap doesn't own, exactly as `board/virt` does it.
-3. **AIC, not GIC.** `board/virt`'s idle routine and interrupt service use the GIC. On the M1, the `irq.Controller` adapter talks to AIC2, and the timer FIQ wakes WFI the same way.
+2. ✅ **RAM is above 1 TiB.** *Done: `kernel/pgtable` (4-level, 48-bit) plus an early identity map in `cpuinit`; the 4-level path runs daily on `board/virt`, RAM at 1 TB is first exercised on the Mac.* Background: DRAM starts at `0x100_0000_0000`. TamaGo's arm64 MMU sets up a 39-bit VA with a 40-bit physical range and flat mapping, which can't reach it. Either patch the MMU (48-bit VA, 4-level tables) or map RAM at a low virtual address. Flat mapping plus a 48-bit VA is the simpler patch. The DMA region (§3) must sit in RAM the Go heap doesn't own, exactly as `board/virt` does it.
+3. **AIC, not GIC.** *Not needed for the first boot:* `board/applem1` spins when idle and takes no interrupts. Needed for the keyboard (M2) and WFI idle: an AIC2 `irq.Controller` adapter, plus checking how the timer FIQ reaches EL1 under m1n1.
 4. **No PSCI.** `halt` and `make stop`'s power-off must use the watchdog or SMC instead (`Board.PowerOff`). The board already reads the PSCI conduit from the device tree; on the M1 the tree has no `/psci`, which the board will use as the cue to use the watchdog.
 5. ✅ **Image format.** *Done: `make image` (`tools/mkimage`) builds a raw arm64 Image, and QEMU boots it by default.* For the M1, link `board/applem1` at the RAM base m1n1 uses and set `-ram` to match.
 6. **16 KB IOMMU pages.** DART works in 16 KB pages, so DMA buffers must be 16 KB-aligned (`dma.Alloc(size, 16384)`) even if the CPU uses 4 KB pages.
@@ -351,6 +364,8 @@ Never write to the macOS container, the APFS stub internals, NOR flash or the Re
 This sets up option C: a bootable **godeep** entry in the startup picker plus an optional data partition, physically between Macintosh HD and Omarchy, leaving both untouched.
 
 > **godeep cannot boot on this Mac yet.** This prepares the place it will boot from. Running on the real hardware still needs the §4 blockers fixed and the §3 M1 adapters. Until then the new entry starts U-Boot and stops at its prompt, which is the expected result.
+
+**Easy way:** `tools/godeep-partition.sh` does all of this, much like the Omarchy installer. It checks the machine and shrinks Macintosh HD if there isn't already enough free space. Then it runs the Asahi installer with its menus answered for you: the OS list is cut down to a single godeep entry (the "UEFI environment only" boot chain, named `godeep`), so all you do is press Enter and type your passwords. After the reboot, `tools/godeep-partition.sh finish` adds GODEEPDATA and copies `bin/godeep-arm64.img` onto godeep's boot partition as `godeep.img`; rerun it whenever you rebuild. It also has `--dry-run`, `status` and `undo`, and every disk change asks you to type `godeep` first. The steps below are what it does, for reference or for doing it by hand.
 
 You run every command here yourself; nothing in this section was run by Claude.
 
@@ -470,15 +485,22 @@ The startup picker (hold the power button at boot) should show **Macintosh HD, O
 - **godeep** reaches the **U-Boot** prompt, or U-Boot's boot menu. That's success for now.
 - **Omarchy** still boots normally.
 
-### 6.8 Step 5 (future): put godeep on its ESP
+### 6.8 Step 5: put godeep on its ESP and boot it
 
-This becomes possible once godeep has an M1 board (`board/applem1`) and a `make image` target producing a raw arm64 Image (§4 #5):
+The Mac image now exists (§3.1, *untested on hardware*).
+
+**Easy way:** `tools/godeep-partition.sh finish`, or `tools/godeep-partition.sh install` to update godeep later. It builds `bin/godeep-applem1.img` if it's missing or stale, copies it to the godeep boot partition as `godeep.img` (keeping the previous one as `godeep.img.prev`), and writes `extlinux/extlinux.conf` so U-Boot boots it automatically after its countdown (`--no-autoboot` to skip). It also saves the manual U-Boot commands, with this Mac's partition number, as `GODEEP-BOOT.txt` on that partition.
+
+By hand: build it and copy it to the godeep ESP:
 
 ```sh
-sudo diskutil mount disk0s9                     # the godeep ESP
+make image BOARD=applem1                          # bin/godeep-applem1.img
+sudo diskutil mount disk0s9                     # the godeep ESP (EFI - GODEE…; check with status)
 cp bin/godeep-applem1.img /Volumes/EFI\ -\ GODEE*/godeep.img
 diskutil unmount disk0s9
 ```
+
+What to expect: the framebuffer clears to dark blue-grey, the boot banner and the `board:` line appear, then the autorun output (`lsdev` with this Mac's devices from m1n1's tree, then `ps`, `mem`, `uptime`). If the screen just stays on U-Boot's output, godeep stopped before its console came up: MMU setup, relocation or the E2H path. That's where a second computer with m1n1's hypervisor (§5 option A) shows exactly where. Hold the power button to get back.
 
 Boot the godeep entry and, at the U-Boot prompt:
 
@@ -635,7 +657,7 @@ For real-metal godeep, this order gives a visible result quickly:
 | **M0: foundation** ✅ | DMA + IOMMU interface, interrupt bridge, device manager, RTKit engine (§3) | — | **done** |
 | **M0.7: boot like Linux** ✅ | `make image`, EL2 → EL1 entry, device tree from `x0` → device list, PSCI conduit from the tree, `kernel/mmio`, first portable `drivers/` (§3.1) | `kernel/fdt`, `kernel/mmio` | **done**, tested in QEMU at EL1 and EL2 |
 | **M0.5: a place to boot** | the godeep stub, ESP and GODEEPDATA partition (§6); optionally the tethered-boot entry for m1n1 development | Asahi installer | none: just §6 |
-| **M1: hello on the laptop screen** | `board/applem1`: MMU patch, RAM + DMA layout, boot framebuffer console (text drawn with `x/image/font`), watchdog reboot | TamaGo arm64, generic timer, **godeep's EL2 entry, Image format and FDT device list (M0.7)**, `image/draw`, `x/image/font` | MMU patch, framebuffer console, WDT |
+| **M1: hello on the laptop screen** ◐ | `board/applem1`: self-relocation, 4-level MMU, RAM + DMA layout, framebuffer console, autorun of `lsdev`/`ps`/`mem`/`uptime` (§3.1). **Built; awaiting the first boot on the Mac** (§6.8). Left for later: watchdog reboot, WFI idle | TamaGo arm64, generic timer, godeep's EL2 entry, Image format and FDT device list (M0.7), `x/image/font` | done: relocation, `kernel/pgtable`, `drivers/simplefb`, `board/applem1` |
 | M2: interactive | AIC2 adapter (`irq.Controller`); keyboard via SPI-HID as a managed driver; the godeep shell on the built-in screen and keyboard | `kernel/irq`, `kernel/dev`, godeep `tty`, `sh` | AIC2 adapter, ADT parser, SPI, HID |
 | M3: coprocessors | ASC mailbox (`rtkit.Mailbox`) + DART (`dma.IOMMU`); verify the RTKit encodings; SMC (battery, lid, power button) as the first client | `kernel/rtkit`, `kernel/dma` | ASC mailbox, DART, SMC protocol |
 | M4: networking | DWC3 device mode + CDC-ECM, so godeep gets an IP over a USB-C cable; SSH into it | go-net/imx-usb CDC-ECM logic, `go-net`, gVisor netstack, `x/crypto/ssh` | DWC3 gadget driver |

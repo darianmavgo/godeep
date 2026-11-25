@@ -1,4 +1,4 @@
-//go:build tamago
+//go:build tamago && !applem1
 
 package main
 

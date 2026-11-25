@@ -6,6 +6,7 @@
 #   make qemu EL2=1        arm64, entered at EL2 like m1n1 does on a real Mac (TCG only)
 #   make qemu BOOT=elf     arm64 ELF instead of the Linux-style Image (no device tree)
 #   make image             arm64 Image (bin/godeep-arm64.img) for QEMU, m1n1, U-Boot booti
+#   make image BOARD=applem1   Image for this MacBook Pro (bin/godeep-applem1.img), see docs/TargetMyMac.md
 #   make stop              from another terminal: power godeep off cleanly (falls back to kill)
 #   make kill              from another terminal: kill QEMU immediately
 
@@ -18,11 +19,22 @@ TAMAGO_ENV = GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=$(ARCH) GOEX
 SERIAL = -display none -chardev stdio,id=con,mux=on,signal=off -serial chardev:con -monitor none -no-reboot
 
 ifeq ($(ARCH),arm64)
+BOARD       ?= virt
+# linkcpuinit: the board supplies the entry code (relocation, EL2 drop,
+#   device tree capture, early identity map)
+# linkhwinit0: and the MMU setup (kernel/pgtable: 4-level, 48-bit)
+ifeq ($(BOARD),applem1)
+# board/applem1: RAM at DRAM base (1 TB) + 4 GB, kernel 1 MB in (mem.go,
+# entry_arm64.s IMAGE_BASE = TEXT_START - 0x1000)
+TEXT_START  := 0x10100100000
+RAM_BASE    := 0x10100000000
+TAMAGO_TAGS ?= linkcpuinit,linkhwinit0,applem1
+else
 # board/virt. TEXT_START = RAM base (0x40000000) + 0x10000
 TEXT_START  := 0x40010000
 RAM_BASE    := 0x40000000
-# linkcpuinit: board/virt supplies the entry code (EL2 drop, device tree capture)
-TAMAGO_TAGS ?= linkcpuinit
+TAMAGO_TAGS ?= linkcpuinit,linkhwinit0
+endif
 QEMU        ?= qemu-system-aarch64
 # BOOT=image (default): Linux-style Image, QEMU passes the device tree in x0
 # like m1n1 and U-Boot do. BOOT=elf: the ELF, no device tree.
@@ -54,8 +66,13 @@ $(error ARCH must be arm64 or amd64)
 endif
 
 TAMAGO_LDFLAGS ?= -s -w -T $(TEXT_START) -R 0x1000
+ifeq ($(BOARD),applem1)
+KERNEL := bin/godeep-applem1.elf
+IMAGE  := bin/godeep-applem1.img
+else
 KERNEL := bin/godeep-$(ARCH).elf
 IMAGE  := bin/godeep-$(ARCH).img
+endif
 ifeq ($(ARCH)-$(BOOT),arm64-image)
 BOOTFILE := $(IMAGE)
 else
@@ -81,6 +98,7 @@ image: kernel
 	go run ./tools/mkimage -ram $(RAM_BASE) -o $(IMAGE) $(KERNEL)
 
 qemu: $(if $(filter $(BOOTFILE),$(IMAGE)),image,kernel)
+	@if [ "$(BOARD)" = applem1 ]; then echo "BOARD=applem1 runs on the Mac itself, not QEMU (docs/TargetMyMac.md)"; exit 1; fi
 	@echo "booting godeep $(ARCH)... (quit QEMU: Ctrl-A then X, or type halt)"
 	@mkdir -p bin
 	$(QEMU) $(QEMU_FLAGS) $(CONTROL) -kernel $(BOOTFILE)

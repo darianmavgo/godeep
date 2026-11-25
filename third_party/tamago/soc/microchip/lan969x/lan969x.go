@@ -1,0 +1,370 @@
+// Microchip LAN969x configuration and support
+// https://github.com/usbarmory/tamago
+//
+// Copyright (c) The TamaGo Authors. All Rights Reserved.
+//
+// Use of this source code is governed by the license
+// that can be found in the LICENSE file.
+
+// Package lan969x provides support to Go bare metal unikernels, written using
+// the TamaGo framework, on the Microchip LAN969x family of System-on-Chip
+// (SoC) application processors.
+//
+// The package implements initialization and drivers for Microchip LAN969x SoCs,
+// adopting the following reference specifications:
+//   - Microchip - LAN9694/LAN9696/LAN9698 Datasheet - DS00005048E (02-27-25)
+//
+// This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+// supported by the TamaGo framework for bare metal Go, see
+// https://github.com/usbarmory/tamago.
+package lan969x
+
+import (
+	"github.com/usbarmory/tamago/internal/reg"
+
+	"github.com/usbarmory/tamago/arm/gic"
+	"github.com/usbarmory/tamago/arm64"
+
+	"github.com/usbarmory/tamago/soc/microchip/analyzer"
+	"github.com/usbarmory/tamago/soc/microchip/fan"
+	"github.com/usbarmory/tamago/soc/microchip/flexcom"
+	"github.com/usbarmory/tamago/soc/microchip/gpio"
+	"github.com/usbarmory/tamago/soc/microchip/miim"
+	"github.com/usbarmory/tamago/soc/microchip/otpc"
+	"github.com/usbarmory/tamago/soc/microchip/qspi"
+	"github.com/usbarmory/tamago/soc/microchip/rgmii"
+	"github.com/usbarmory/tamago/soc/microchip/sdhci"
+	"github.com/usbarmory/tamago/soc/microchip/sgpio"
+	"github.com/usbarmory/tamago/soc/microchip/temp"
+	"github.com/usbarmory/tamago/soc/microchip/trng"
+	"github.com/usbarmory/tamago/soc/microchip/wdt"
+	"github.com/usbarmory/tamago/soc/microchip/xdmac"
+)
+
+// LAN969x part identifiers
+const (
+	LAN9691VAO = 0x9691
+	LAN9692VAO = 0x9692
+	LAN9693VAO = 0x9693
+	LAN9694    = 0x9694
+	LAN9694TSN = 0x9695
+	LAN9696    = 0x9696
+	LAN9696TSN = 0x9697
+	LAN9698    = 0x9698
+	LAN9698TSN = 0x9699
+	LAN9694RED = 0x969a
+	LAN9696RED = 0x969b
+	LAN9698RED = 0x969c
+)
+
+// Ports defines the number of available Ethernet ports
+const Ports = 30
+
+// Interrupts
+const (
+	// CPU Device Queue System
+	XTR_READY_IRQ = 42
+	INJ_READY_IRQ = 43
+
+	// Serial ports
+	FLEXCOM0_IRQ = 78
+	FLEXCOM1_IRQ = 79
+	FLEXCOM2_IRQ = 80
+	FLEXCOM3_IRQ = 81
+
+	// Extensible DMA Controller, Non-secure channels
+	XDMAC_IRQ = 76
+
+	// Secure Digital Host Controller Interface
+	SDMMC0_IRQ = 96
+)
+
+// Peripheral registers
+const (
+	// Analyzer
+	ANA_CL_BASE = 0xe2400000 // classifier
+	ANA_L3_BASE = 0xe2480000 // layer 3 handling and routing
+	ANA_L2_BASE = 0xe2800000 // layer 2 forwarding and learning
+	ANA_AC_BASE = 0xe2900000 // access control
+
+	// Assembler
+	ASM_BASE = 0xe3200000
+
+	// CPU system registers
+	CPU_BASE = 0xe00c0000
+
+	// DDR base address
+	DDR_BASE = 0x60000000
+
+	// Flexible RAM
+	FLEXRAM_START = 0x00100000
+	FLEXRAM_SIZE  = 0x00200000
+
+	// CPU Device Queue System
+	DEVCPU_QS = 0xe2030000
+
+	// RGMII interfaces
+	DEVRGMII0 = 0xe30e4000 // port 28
+	DEVRGMII1 = 0xe30e8000 // port 29
+
+	// Disassembler
+	DSM_BASE = 0xe30ec000
+
+	// Egress Access Control Lists
+	EACL_BASE = 0xe22c0000
+
+	// Serial ports
+	FLEXCOM0_BASE = 0xe0040000
+	FLEXCOM1_BASE = 0xe0044000
+	FLEXCOM2_BASE = 0xe0060000
+	FLEXCOM3_BASE = 0xe0064000
+
+	// General Configuration Block
+	GCB_BASE    = 0xe2010000
+	GCB_CHIP_ID = GCB_BASE + 0x00
+
+	// Fan controller
+	FAN_BASE = GCB_BASE + 0x348
+
+	// General Interrupt Controller
+	GIC_BASE = 0xe8c10000
+
+	// General Purpose I/O Control
+	GPIO_BASE = 0xe20100d4
+
+	// Hierarchical Scheduler Configuration
+	HSCH_BASE = 0xe2580000
+
+	// High-speed I/O
+	HSIO_BASE = 0xe3408000
+
+	// Learn block
+	LRN_BASE = 0xe2060000
+
+	// PHY Management Controller
+	MIIM0_BASE = 0xe20101a8
+	MIIM1_BASE = 0xe20101cc
+
+	// One Time Programmable Controller
+	OTPC_BASE = 0xe0021000
+
+	// DEVCPU Precision Timing Protocol Originator
+	PTP_BASE = 0xe2040000
+
+	// Queue Forwarding
+	QFWD_BASE = 0xe20b0000
+
+	// Quad SPI controller and memory-mapped aperture
+	QSPI0_BASE = 0xe0804000
+	QSPI0_MMAP = 0x20000000
+
+	// Queue System Configuration
+	QSYS_BASE = 0xe20a0000
+
+	// Rewriter
+	REW_BASE = 0xe2600000
+
+	// RGMII clock configuration
+	RGMII0_CFG = HSIO_BASE + 0x78
+	RGMII1_CFG = HSIO_BASE + 0x8c
+
+	// Secure Digital Host Controller Interface
+	SDMMC0_BASE = 0xe0830000
+
+	// Serial GPIO controller
+	SGPIO_BASE = GCB_BASE + 0x230
+
+	// Temperature sensor control
+	TEMP_SENSOR_BASE = 0xe2020100
+
+	// True Random Number Generator
+	TRNG_BASE = 0xe0048000
+
+	// Versatile Content Aware Processor
+	VCAP_SUPER_BASE = 0xe2080000
+
+	// Versatile OAM MEP Processor (VOP) block
+	VOP_BASE = 0xe2a00000
+
+	// Watchdog Timer
+	WDT_BASE = 0xe0090000
+
+	// Extensible DMA Controller
+	XDMAC_BASE = 0xe0068000
+)
+
+// Peripheral instances
+var (
+	// Analyzer
+	ANA = &analyzer.ANA{
+		AccessControl: ANA_AC_BASE,
+		Learn:         LRN_BASE,
+	}
+
+	// ARM64 core
+	ARM64 = &arm64.CPU{
+		// required before Init()
+		TimerOffset: 1,
+	}
+
+	// Fan controller
+	FAN = &fan.FAN{
+		Base: FAN_BASE,
+	}
+
+	// Serial port 1
+	FLEXCOM0 = &flexcom.FLEXCOM{
+		Index: 1,
+		Base:  FLEXCOM0_BASE,
+		IRQ:   FLEXCOM0_IRQ,
+	}
+
+	// Serial port 2
+	FLEXCOM1 = &flexcom.FLEXCOM{
+		Index: 2,
+		Base:  FLEXCOM1_BASE,
+		IRQ:   FLEXCOM1_IRQ,
+	}
+
+	// Serial port 3
+	FLEXCOM2 = &flexcom.FLEXCOM{
+		Index: 3,
+		Base:  FLEXCOM2_BASE,
+		IRQ:   FLEXCOM2_IRQ,
+	}
+
+	// Serial port 4
+	FLEXCOM3 = &flexcom.FLEXCOM{
+		Index: 4,
+		Base:  FLEXCOM3_BASE,
+		IRQ:   FLEXCOM3_IRQ,
+	}
+
+	// Generic Interrupt Controller
+	GIC = &gic.GIC{
+		Base: GIC_BASE,
+	}
+
+	// GPIO controller 1
+	GPIO = &gpio.GPIO{
+		Base: GPIO_BASE,
+	}
+
+	// PHY Management Controller 1
+	MIIM0 = &miim.MIIM{
+		Base: MIIM0_BASE,
+	}
+
+	// PHY Management Controller 2
+	MIIM1 = &miim.MIIM{
+		Base: MIIM1_BASE,
+	}
+
+	// One Time Programmable Controller
+	OTPC = &otpc.OTPC{
+		Base: OTPC_BASE,
+		Size: 16 * 1024,
+	}
+
+	// Quad SPI controller 0
+	QSPI0 = &qspi.QSPI{
+		Base:        QSPI0_BASE,
+		MMAP:        QSPI0_MMAP,
+		MMAPSize:    qspi0MMAPSize,
+		GCK:         CPU_BASE + gckConfigOffset + qspi0ClockID*4,
+		ParentClock: qspi0ParentClock,
+		TargetClock: qspi0TargetClock,
+	}
+
+	// RGMII interfaces
+	RGMII0 = &rgmii.RGMII{
+		Base:        DEVRGMII0,
+		ClockConfig: RGMII0_CFG,
+	}
+	RGMII1 = &rgmii.RGMII{
+		Base:        DEVRGMII1,
+		ClockConfig: RGMII1_CFG,
+	}
+
+	// Secure Digital Host Controller Interface
+	SDMMC0 = &sdhci.SDHCI{
+		Base:        SDMMC0_BASE,
+		IRQ:         SDMMC0_IRQ,
+		GCK:         CPU_BASE + gckConfigOffset + sdmmc0ClockID*4,
+		ParentClock: sdmmc0ParentClock,
+		TargetClock: sdmmc0TargetClock,
+	}
+
+	// Serial GPIO controller
+	SGPIO = &sgpio.SGPIO{
+		Base: SGPIO_BASE,
+	}
+
+	// Temperature sensor
+	TEMP = &temp.SENSOR{
+		Base: TEMP_SENSOR_BASE,
+	}
+
+	// True Random Number Generator
+	TRNG = &trng.TRNG{
+		Base: TRNG_BASE,
+	}
+
+	// Watchdog Timer
+	WDT = &wdt.WDT{
+		Base: WDT_BASE,
+	}
+
+	// Extensible DMA Controller
+	XDMAC = &xdmac.XDMAC{
+		Base: XDMAC_BASE,
+		IRQ:  XDMAC_IRQ,
+	}
+)
+
+// SiliconVersion returns the SoC silicon version information.
+func SiliconVersion() (sv, manufacturerID, partID, revisionID uint32) {
+	sv = reg.Read(GCB_CHIP_ID)
+
+	manufacturerID = (sv >> 1) & 0x7ff
+	partID = (sv >> 12) & 0xffff
+	revisionID = (sv >> 28) & 0xf
+
+	return
+}
+
+// Model returns the SoC model name.
+func Model() (model string) {
+	_, _, partID, _ := SiliconVersion()
+
+	switch partID {
+	case LAN9691VAO:
+		model = "LAN9691VAO"
+	case LAN9692VAO:
+		model = "LAN9692VAO"
+	case LAN9693VAO:
+		model = "LAN9693VAO"
+	case LAN9694:
+		model = "LAN9694"
+	case LAN9694TSN:
+		model = "LAN9694TSN"
+	case LAN9696:
+		model = "LAN9696"
+	case LAN9696TSN:
+		model = "LAN9696TSN"
+	case LAN9698:
+		model = "LAN9698"
+	case LAN9698TSN:
+		model = "LAN9698TSN"
+	case LAN9694RED:
+		model = "LAN9694RED"
+	case LAN9696RED:
+		model = "LAN9696RED"
+	case LAN9698RED:
+		model = "LAN9698RED"
+	default:
+		model = "unknown"
+	}
+
+	return
+}

@@ -1,0 +1,94 @@
+//go:build tamago && arm64 && applem1
+
+package applem1
+
+import (
+	"errors"
+	"fmt"
+	"unsafe"
+
+	"godeep/drivers/simplefb"
+	"godeep/kernel/dev"
+	"godeep/kernel/fdt"
+)
+
+// framebuffer finds m1n1's "simple-framebuffer" (under /chosen).
+func framebuffer(root *fdt.Node) (*simplefb.Framebuffer, error) {
+	var node *fdt.Node
+	root.Walk(func(n *fdt.Node) {
+		for _, c := range n.Strings("compatible") {
+			if c == "simple-framebuffer" && node == nil {
+				node = n
+			}
+		}
+	})
+	if node == nil {
+		return nil, errors.New("no simple-framebuffer in the device tree")
+	}
+	reg := node.Reg()
+	w, h, s := node.U32s("width"), node.U32s("height"), node.U32s("stride")
+	format := node.Strings("format")
+	if len(reg) == 0 || len(w) != 1 || len(h) != 1 || len(s) != 1 || len(format) == 0 {
+		return nil, errors.New("incomplete simple-framebuffer node")
+	}
+	return &simplefb.Framebuffer{
+		Pix:    unsafe.Slice((*byte)(unsafe.Pointer(uintptr(reg[0].Base))), reg[0].Size),
+		Width:  int(w[0]),
+		Height: int(h[0]),
+		Stride: int(s[0]),
+		Format: simplefb.Format(format[0]),
+	}, nil
+}
+
+// checkMemory verifies that godeep's fixed region (RAM + DMA) lies inside
+// the usable memory m1n1 reports and avoids every reserved range.
+func checkMemory(root *fdt.Node) string {
+	lo, hi := uint64(RAM_START), uint64(DMA_BASE+DMA_SIZE)
+	inside := false
+	root.Walk(func(n *fdt.Node) {
+		if n.Parent == root && len(n.Name) >= 6 && n.Name[:6] == "memory" {
+			for _, r := range n.Reg() {
+				if lo >= r.Base && hi <= r.Base+r.Size {
+					inside = true
+				}
+			}
+		}
+	})
+	if !inside {
+		return fmt.Sprintf("WARNING: memory %#x-%#x is outside the usable RAM the boot loader reported", lo, hi)
+	}
+	if rm := root.Find("/reserved-memory"); rm != nil {
+		for _, c := range rm.Children {
+			for _, r := range c.Reg() {
+				if r.Base < hi && r.Base+r.Size > lo {
+					return fmt.Sprintf("WARNING: memory overlaps reserved %s", c.Name)
+				}
+			}
+		}
+	}
+	return "memory layout OK"
+}
+
+// fromFDT lists enabled device-tree nodes that have registers.
+func fromFDT(root *fdt.Node) []dev.Node {
+	var out []dev.Node
+	root.Walk(func(n *fdt.Node) {
+		compat := n.Strings("compatible")
+		if n.Parent == nil || len(compat) == 0 || n.Parent.Path == "/cpus" {
+			return
+		}
+		if st := n.Strings("status"); len(st) > 0 && st[0] != "okay" && st[0] != "ok" {
+			return
+		}
+		reg := n.Reg()
+		if len(reg) == 0 {
+			return
+		}
+		node := dev.Node{Name: n.Name, Compatible: compat[0]}
+		for _, r := range reg {
+			node.Reg = append(node.Reg, dev.Range{Base: r.Base, Size: r.Size})
+		}
+		out = append(out, node)
+	})
+	return out
+}

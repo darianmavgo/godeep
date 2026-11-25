@@ -1,4 +1,4 @@
-//go:build tamago && arm64
+//go:build tamago && arm64 && !applem1
 
 // Package virt is the godeep board for QEMU's arm64 `virt` machine. On Apple
 // Silicon it runs under Hypervisor.framework (-accel hvf) at native speed.
@@ -52,11 +52,7 @@ func Init() {
 	CPU.InitGenericTimers(0, 0)
 	UART0.Init()
 
-	// The DMA region is outside the Go heap, so the MMU maps it as device
-	// memory by default. Make it normal (cacheable) memory: virt devices are
-	// cache-coherent.
-	CPU.ConfigureMMU(DMA_BASE, DMA_BASE+DMA_SIZE, 0,
-		arm64.MemoryAttributes|arm64.TTE_BLOCK|arm64.TTE_EXECUTE_NEVER)
+	// The DMA region is mapped as normal memory by mmu.go (Hwinit0).
 
 	// Wall clock from the PL031 RTC (seconds since 1970), before any Go
 	// timer exists: SetTime shifts the monotonic clock too.

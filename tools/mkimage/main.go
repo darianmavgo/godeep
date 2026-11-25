@@ -21,12 +21,17 @@ import (
 func main() {
 	ram := flag.Uint64("ram", 0x40000000, "RAM base the image is loaded relative to (2MB aligned)")
 	out := flag.String("o", "", "output Image file")
+	textOffset := flag.Int64("text-offset", -1, "override the header's text_offset (testing a kernel's self-relocation)")
 	flag.Parse()
 	if flag.NArg() != 1 || *out == "" {
 		fmt.Fprintln(os.Stderr, "usage: mkimage [-ram addr] -o out.img kernel.elf")
 		os.Exit(2)
 	}
 	img, info, err := build(flag.Arg(0), *ram)
+	if err == nil && *textOffset >= 0 {
+		binary.LittleEndian.PutUint64(img[8:], uint64(*textOffset))
+		info += fmt.Sprintf(" (text_offset overridden to %#x: loader will place it off its link address)", *textOffset)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "mkimage:", err)
 		os.Exit(1)

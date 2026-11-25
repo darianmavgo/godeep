@@ -1,4 +1,4 @@
-//go:build tamago && arm64
+//go:build tamago && arm64 && !applem1
 
 package virt
 

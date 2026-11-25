@@ -1,0 +1,42 @@
+// LAN969x 24-port EVB support for tamago/arm64
+// https://github.com/usbarmory/tamago
+//
+// Copyright (c) The TamaGo Authors. All Rights Reserved.
+//
+// Use of this source code is governed by the license
+// that can be found in the LICENSE file.
+
+// Package lan9696evb provides hardware initialization, automatically on
+// import, for the Microchip LAN969x 24-port EVB (ev23x71a).
+//
+// This package is only meant to be used with `GOOS=tamago GOARCH=arm64` as
+// supported by the TamaGo framework for bare metal Go, see
+// https://github.com/usbarmory/tamago.
+package lan9696evb
+
+import (
+	_ "unsafe"
+
+	"github.com/usbarmory/tamago/soc/microchip/flexcom"
+	"github.com/usbarmory/tamago/soc/microchip/lan969x"
+)
+
+// Peripheral instances
+var (
+	USART0 = &flexcom.USART{
+		Index: 1,
+		Base:  lan969x.FLEXCOM0_BASE,
+		IRQ:   lan969x.FLEXCOM0_IRQ,
+	}
+)
+
+// Init takes care of the lower level initialization triggered early in runtime
+// setup (post World start).
+//
+//go:linkname Init runtime/goos.Hwinit1
+func Init() {
+	lan969x.Init()
+
+	// initialize console
+	USART0.Init()
+}

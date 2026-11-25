@@ -1,2 +1,4 @@
 github.com/usbarmory/tamago v1.27.4 h1:dkAlzRJxVqeWT5wRH0TKu0jwYOPUUv06vYIEbGQ72QM=
 github.com/usbarmory/tamago v1.27.4/go.mod h1:b21U5w+p2GDthzkYOIIFN5xOxgwR3Yx22L4LBGRWjKg=
+golang.org/x/image v0.48.0 h1:1AvuPcuoOTJpA7s4VZ5umrb90T3So0rkB/bSGmxkxik=
+golang.org/x/image v0.48.0/go.mod h1:mmtg64iqJKGqEgy+r13dfybl85tmxUd2lMnmaiSdWYY=
