@@ -1,14 +1,46 @@
 # Targeting my Mac: hardware, Go drivers, and a place to boot godeep
 
-This doc covers everything about running godeep on the actual machine it's developed on, instead of in QEMU:
-1. **the hardware** in this Mac;
-2. **which existing Go drivers** can talk to each part;
-3. **godeep's driver foundation:** the four kernel pieces already built for this hardware, and what each still needs on the M1;
-4. **the TamaGo blockers** specific to this Mac;
-5. **how godeep would boot** here;
-6. **a step-by-step guide** to carving out a godeep boot entry and data partition next to macOS and Omarchy;
-7. **how to develop native drivers incrementally** while QEMU, TamaGo and firmware cover whatever isn't native yet;
-8. **the milestone order** for getting there.
+This doc covers everything about running godeep on the actual machine it's developed on, instead of in QEMU: the hardware, which Go drivers can talk to it, godeep's driver foundation, the remaining blockers, how godeep boots here, a guide to carving out a godeep partition, how to develop native drivers incrementally, and the milestone order.
+
+## Contents
+
+- [TL;DR](#tldr)
+- [1. Hardware inventory](#1-hardware-inventory)
+  - [Machine](#machine)
+  - [SoC, CPU, memory](#soc-cpu-memory)
+  - [Interrupts, timers, power and housekeeping](#interrupts-timers-power-and-housekeeping)
+  - [Storage](#storage)
+  - [Display, GPU, media](#display-gpu-media)
+  - [Networking and wireless](#networking-and-wireless)
+  - [USB, Thunderbolt, PCIe](#usb-thunderbolt-pcie)
+  - [Input, audio, camera, biometrics, power](#input-audio-camera-biometrics-power)
+- [2. Which Go code can talk to it](#2-which-go-code-can-talk-to-it)
+  - [CPU-level (where Go is strong)](#cpu-level-where-go-is-strong)
+  - [Peripherals](#peripherals)
+- [3. godeep's driver foundation (built, 2026-11-25)](#3-godeeps-driver-foundation-built-2026-11-25)
+  - [3.1 Booting like a Linux kernel (built, 2026-11-25)](#31-booting-like-a-linux-kernel-built-2026-11-25)
+  - [3.2 Decision: how godeep handles an EL2 entry (2026-11-25)](#32-decision-how-godeep-handles-an-el2-entry-2026-11-25)
+- [4. TamaGo blockers specific to this Mac](#4-tamago-blockers-specific-to-this-mac)
+- [5. How godeep would boot on this Mac](#5-how-godeep-would-boot-on-this-mac)
+- [6. Carving out a godeep partition next to Macintosh HD and Omarchy](#6-carving-out-a-godeep-partition-next-to-macintosh-hd-and-omarchy)
+  - [6.1 What you'll end up with](#61-what-youll-end-up-with)
+  - [6.2 Safety first](#62-safety-first)
+  - [6.3 Pre-flight checks](#63-pre-flight-checks)
+  - [6.4 Step 1: shrink Macintosh HD](#64-step-1-shrink-macintosh-hd)
+  - [6.5 Step 2: create the bootable godeep stub (Asahi installer)](#65-step-2-create-the-bootable-godeep-stub-asahi-installer)
+  - [6.6 Step 3 (optional): the GODEEPDATA partition](#66-step-3-optional-the-godeepdata-partition)
+  - [6.7 Step 4: verify](#67-step-4-verify)
+  - [6.8 Step 5 (future): put godeep on its ESP](#68-step-5-future-put-godeep-on-its-esp)
+  - [6.9 Undo: remove godeep and give the space back](#69-undo-remove-godeep-and-give-the-space-back)
+  - [6.10 Troubleshooting](#610-troubleshooting)
+- [7. Developing native drivers incrementally](#7-developing-native-drivers-incrementally)
+  - [7.1 The principle: one kernel, swappable boards, drivers behind interfaces](#71-the-principle-one-kernel-swappable-boards-drivers-behind-interfaces)
+  - [7.2 The development ladder for each driver](#72-the-development-ladder-for-each-driver)
+  - [7.3 Borrow what isn't native yet](#73-borrow-what-isnt-native-yet)
+  - [7.4 Proposed structure (small additions, not yet built)](#74-proposed-structure-small-additions-not-yet-built)
+  - [7.5 Definition of done for a native driver](#75-definition-of-done-for-a-native-driver)
+- [8. Recommendation and milestones](#8-recommendation-and-milestones)
+- [References](#references)
 
 **How the inventory was gathered (2026-11-25).** Everything came from the running machine through system tools; no web lookups were needed:
 - `system_profiler` (hardware, displays, memory, NVMe, storage, Wi-Fi, Bluetooth, Thunderbolt, card reader, audio, camera, power, SPI)
@@ -241,6 +273,36 @@ The first boot line says how godeep was entered, for example:
 board: qemu-virt; entered at EL2, dropped to EL1; linux,dummy-virt, device tree from boot loader (10 devices); PSCI via smc
 ```
 
+### 3.2 Decision: how godeep handles an EL2 entry (2026-11-25)
+
+**Decision: Option A, drop from EL2 to EL1** in `board/applem1`'s early assembly, before Go's runtime or the MMU starts. After the `eret`, TamaGo's stock EL1 runtime and MMU code runs unchanged. This is the simplest path for TamaGo and the same one `board/virt` already uses and tests.
+
+The sequence:
+1. Read `CurrentEL`. If it's EL2 (raw register value `0x8`, i.e. EL field = 2), continue; if EL1, skip to the Go entry.
+2. `HCR_EL2`: set bit 31 (`RW = 1`), so EL1 runs in 64-bit AArch64 mode.
+3. Turn EL2's stage-2 translation off: `VTTBR_EL2 = 0` (and `HCR_EL2.VM = 0`).
+4. `SPSR_EL2 = 0x3c5`: return to EL1h with D, A, I and F masked.
+5. `ELR_EL2 =` the Go entry address.
+6. `eret`. From the next instruction on, the CPU is at EL1 and TamaGo's code applies as-is.
+
+How that maps to today's implementation (`board/virt/entry_arm64.s`, tested with `make qemu EL2=1`):
+
+| Step | In `entry_arm64.s` today | Note |
+|---|---|---|
+| Check `CurrentEL` | yes: shifts the EL field out and compares with 2 (same test as raw `0x8`) | |
+| `HCR_EL2.RW = 1` | yes: writes `HCR_EL2 = 1<<31` | writing only bit 31 also clears `VM`, `IMO`/`FMO` (interrupts go to EL1) and all trap bits |
+| Stage 2 off | via `HCR_EL2.VM = 0` (the write above) | **`VTTBR_EL2 = 0` is not written yet.** Add it (one `msr`) so the decision is followed literally: belt and braces against firmware leaving a stale table pointer |
+| `SPSR_EL2 = 0x3c5` | yes | |
+| `ELR_EL2` = entry | yes: `·el1entry`, which captures the device tree and then starts TamaGo's runtime | |
+| `eret` | yes | |
+| extra setup it also does | `CNTHCTL_EL2 \|= EL1PCTEN\|EL1PCEN` (EL1 can use the physical timer and counter), `CNTVOFF_EL2 = 0`, `HSTR_EL2 = 0`, `CPTR_EL2 = 0x33ff` (no FP/SIMD traps), `ICC_SRE_EL2 = SRE\|Enable` (EL1 may use the GIC system registers) | needed on QEMU; on the M1 the GIC line doesn't apply (AIC2 is MMIO), and the timer and FP lines still matter |
+
+**Why not stay at EL2?** Running the kernel at EL2 (as Asahi's Linux does with VHE, `HCR_EL2.E2H`) would mean porting TamaGo's exception, MMU and timer code to EL2 registers, all for features godeep doesn't need: it hosts no VMs. Dropping to EL1 keeps godeep on TamaGo's tested path. If godeep ever wants to be a hypervisor, the EL2 vectors can be added then.
+
+**Action items:**
+- add `VTTBR_EL2 = 0` to the EL2 path in `board/virt/entry_arm64.s`, and retest with `make qemu EL2=1`;
+- `board/applem1` reuses the same entry code (only the FDT copy address and the GIC line change).
+
 **Lessons from building it that carry over to the M1:**
 - **Never read-modify-write a write-1-to-set/clear register.** TamaGo's GIC driver did exactly that on `GICD_ICENABLER`: disabling one interrupt disabled its whole bank, and the first keystroke silently disabled the power button. AIC2's mask registers have the same semantics, so its adapter must write single bits.
 - **`goos.Idle(until)` gets `until == 0` for "no timer pending",** not "due now". Treating it as due spun the CPU.
@@ -254,7 +316,7 @@ board: qemu-virt; entered at EL2, dropped to EL1; linux,dummy-virt, device tree 
 
 These must be fixed before godeep can print a single character on the real hardware:
 
-1. ✅ **Entry at EL2.** *Done (§3.1): `board/virt/entry_arm64.s` drops EL2 → EL1 and is tested at EL2 in QEMU. `board/applem1` reuses it, adding any Apple-specific EL2 setup m1n1's docs call for.* Background: m1n1 starts payloads at **EL2** (Asahi kernels run in EL2/VHE). `tamago/arm64` `cpuinit` handles EL1 or EL3 only: from EL2 it would execute EL3 register writes, which is an undefined-instruction fault. Add an EL2→EL1 drop (set `HCR_EL2.RW`, then `ERET` to EL1). That's about 15 lines of assembly in a board-specific `linkcpuinit` override.
+1. ✅ **Entry at EL2.** *Decided (§3.2: Option A, drop to EL1) and done (§3.1): `board/virt/entry_arm64.s` drops EL2 → EL1 and is tested at EL2 in QEMU. Small follow-up: write `VTTBR_EL2 = 0` explicitly. `board/applem1` reuses it.* Background: m1n1 starts payloads at **EL2** (Asahi kernels run in EL2/VHE). `tamago/arm64` `cpuinit` handles EL1 or EL3 only: from EL2 it would execute EL3 register writes, which is an undefined-instruction fault. Add an EL2→EL1 drop (set `HCR_EL2.RW`, then `ERET` to EL1). That's about 15 lines of assembly in a board-specific `linkcpuinit` override.
 2. **RAM is above 1 TiB.** DRAM starts at `0x100_0000_0000`. TamaGo's arm64 MMU sets up a 39-bit VA with a 40-bit physical range and flat mapping, which can't reach it. Either patch the MMU (48-bit VA, 4-level tables) or map RAM at a low virtual address. Flat mapping plus a 48-bit VA is the simpler patch. The DMA region (§3) must sit in RAM the Go heap doesn't own, exactly as `board/virt` does it.
 3. **AIC, not GIC.** `board/virt`'s idle routine and interrupt service use the GIC. On the M1, the `irq.Controller` adapter talks to AIC2, and the timer FIQ wakes WFI the same way.
 4. **No PSCI.** `halt` and `make stop`'s power-off must use the watchdog or SMC instead (`Board.PowerOff`). The board already reads the PSCI conduit from the device tree; on the M1 the tree has no `/psci`, which the board will use as the cue to use the watchdog.
