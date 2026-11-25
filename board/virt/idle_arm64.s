@@ -27,3 +27,9 @@ TEXT ·wfi(SB),NOSPLIT,$0
 	DSB	$15
 	WFI
 	RET
+
+// func read_midr() uint64
+TEXT ·read_midr(SB),NOSPLIT,$0-8
+	MRS	MIDR_EL1, R0
+	MOVD	R0, ret+0(FP)
+	RET

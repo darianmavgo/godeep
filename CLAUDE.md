@@ -59,7 +59,12 @@ In QEMU, ^C goes to godeep (it kills the foreground program). Quit QEMU with `Ct
   - `proc`: process table. Each Proc tags its goroutines with pprof labels `pid`/`proc`; children inherit them. `Snapshot()` parses `runtime.Stack(all)`, which in Go 1.27 prints labels in each goroutine header, to attribute every goroutine to a PID (this is what `ps` uses). `Kthread` = kernel goroutine (pid 0).
   - `tty`: line discipline, run as its own kernel goroutine: echo, editing, typeahead, ^C → `Interrupts()` channel
   - `prog`: registry of built-in programs (registered from `init()`, read-only after boot)
-  - planned: cap, ipc, vfs, dev, klog
+  - `dma`: DMA allocator over a region outside the Go heap + `IOMMU` interface (`Identity`; Apple DART to do)
+  - `irq`: interrupt bridge. The board acks and calls `Dispatch`; the line is masked until the driver calls `line.Done()` (oneshot)
+  - `dev`: device manager. Each driver is a process `drv/<name>` under `devmgr`, with dependencies (`Needs`), readiness (`Ready`/`Get`) and restart-on-crash
+  - `rtkit`: Apple RTKit coprocessor protocol over a `Mailbox` interface (encodings unverified on hardware)
+  - See `docs/DriverModel.md` for the driver rules and these four pieces
+  - planned: cap, ipc, vfs, klog
 - `board/*`: the only places with platform code, behind build tags
   - `board/virt` (`tamago && arm64`): **written by us**, since TamaGo has no arm64 QEMU-virt board. It provides the TamaGo runtime hooks via `//go:linkname`: `RamStart`/`RamSize`/`RamStackOffset`, `Hwinit1`, `Nanotime`, `Printk`, `InitRNG`/`GetRandomData`. It also has a PL011 UART driver, a GICv3 + virtual-timer idle governor, and PSCI power-off.
   - `board/microvm` (`tamago && amd64`): wraps TamaGo's `board/qemu/microvm`
@@ -74,7 +79,9 @@ In QEMU, ^C goes to godeep (it kills the foreground program). Quit QEMU with `Ct
 - There are no global mutable namespaces. Authority comes only from capabilities passed to a Proc.
 - Prefer channels and ownership (one goroutine owns the state) over shared memory with mutexes.
 - Platform-specific code lives only in `board/*`, behind `//go:build tamago` / `!tamago`.
-- New core code needs host unit tests. Use `go.uber.org/goleak` for anything that spawns goroutines.
+- New core code needs host unit tests, run repeatedly with the race detector (`go test -race -count=50`). Repetition found most of the bugs so far.
+- Drivers: one goroutine owns the device; register with `dev.Register` from `init()`; implement `Run(ctx, d)`; call `d.Ready(svc)`; service interrupts with `<-line.C` then `line.Done()`.
+- Device registers: single 32-bit `atomic.Load/StoreUint32` accesses (HVF can't decode paired MMIO). Never read-modify-write a write-1-to-set/clear register.
 
 ## Constraints to remember
 
@@ -83,7 +90,10 @@ arm64 / `board/virt`:
 - **The RNG is seeded from the boot-time counter: not secure entropy.** Add virtio-rng before trusting `crypto/rand`.
 - **Device access under HVF must be single 32/64-bit loads/stores** (e.g. `atomic.Load/StoreUint32`). Paired or vector accesses to MMIO can't be decoded by the hypervisor.
 - TamaGo has no arm64 SMP bring-up, so it's `-smp 1`, and `GOMAXPROCS` is 1.
-- `RamSize` in `board/virt/mem.go` must not exceed QEMU `-m` (4G).
+- Memory: Go heap = first 3.5 GB (`RamSize`); DMA region = last 512 MB of `-m 4G` at `0x1_2000_0000`, mapped as normal memory in `Init`.
+- Don't use TamaGo's `GIC.DisableInterrupt`: it read-modify-writes `GICD_ICENABLER` and disables the whole bank. `board/virt` writes the single bit.
+- `goos.Idle(until)`: `until == 0` means "no timer", not "due now".
+- **QEMU 11.1.x HVF WFI bug:** after the first device (SPI) interrupt, WFI returns immediately and the idle VM spins at 100%. TCG is fine and the guest state is clean. Under HVF (`MIDR` implementer `0x61`) the UART is polled (`UARTMode`) to avoid it. To measure idle cost: `ps -o %cpu= -p $(cat bin/qemu-arm64.pid)`. Debug counters must not add Go timers or keystrokes, since both change idle behaviour.
 - **Power button:** QEMU `system_powerdown` (sent by `make stop` over QMP) raises PL061 GPIO line 3 (`0x09030000`). `board/virt/power.go` polls it, and `kernel.Boot` then kills every process (`Table.Shutdown`, 2 s grace) and calls PSCI off. This works with the default `-machine virt` (no `acpi=off` needed when booting with `-kernel`). amd64 has no power-button handler, so `make stop` falls back to SIGTERM there.
 
 amd64 / `board/microvm`:

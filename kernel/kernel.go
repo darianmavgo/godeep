@@ -19,7 +19,7 @@ import (
 	"godeep/programs/sh"
 )
 
-const Version = "0.0.3"
+const Version = "0.1.0"
 
 // How long processes get to exit after a shutdown request.
 const shutdownGrace = 2 * time.Second

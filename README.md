@@ -136,6 +136,11 @@ uptime    time since boot
 mem       memory and scheduler stats
 exit      exit this shell (init starts a new one)
 halt      power off
+date      wall-clock time
+lsdev     devices, their drivers and state
+irqstat   interrupt lines and counts
+irqlat    irqlat [N]: measure interrupt-to-goroutine latency
+dmastat   DMA memory usage
 
 PROGRAM   USAGE
 countdown countdown [N]: count down from N using two goroutines
@@ -238,6 +243,22 @@ Look at PID 0:
 - **`tty`** reads that channel and assembles lines for the shell.
 
 Drivers in godeep are just goroutines.
+
+Device drivers go one step further: each one is a **process**. `devmgr` starts one `drv/<name>` per device once its dependencies are ready, and restarts it if it crashes. Try:
+
+```
+godeep$ lsdev
+DEVICE  COMPATIBLE              STATE  PID  RESTARTS  IRQ  REG        INFO
+gpio0   arm,pl061               ready  4    0         39   0x9030000
+ptimer  arm,armv8-ptimer-probe  ready  7    0         30   -
+rtc     arm,pl031               ready  5    0         34   0x9010000  2026-11-25T21:12:41Z
+virtio  virtio,mmio-bus         ready  -    0         -    0xa000000  no devices attached
+godeep$ irqlat 200
+timer deadline -> driver goroutine, 200 samples:
+  min 96.291µs  median 319.708µs  avg 333.972µs  p99 933.791µs  max 1.233208ms
+```
+
+`irqstat` shows interrupt counts, and `dmastat` shows the DMA memory region. The design is in `docs/DriverModel.md`.
 
 `ps -g 3` shows only PID 3's goroutines.
 
@@ -521,7 +542,7 @@ Development loop: write code, run `make test`, try it with `make hosted`, then c
 | `-accel hvf` error (e.g. `HV_UNSUPPORTED`, `HV_DENIED`) | HVF needs an Apple Silicon Mac and a QEMU with the hypervisor entitlement (Homebrew's has it). Elsewhere, use `make qemu ACCEL=tcg`. |
 | `make qemu ARCH=amd64` is slow to boot | Expected: your Mac emulates the x86 CPU. Use the default arm64 target for daily work. |
 | amd64: QEMU stops after `Booting from ROM..` with no output | The microvm VM needs **at least 3 GB RAM** (`-m 3G`, already in the Makefile). With less, the kernel's stack lands in missing memory. |
-| The VM uses a full CPU core while idle | The idle hook isn't installed. Check that `board/virt` sets `goos.Idle = idle` and that QEMU uses `gic-version=3`. |
+| The VM uses a full CPU core while idle | Under HVF this is a QEMU 11.1.x bug that fires after a device interrupt; godeep avoids it by polling the UART there (see `docs/DriverModel.md`). Otherwise, check that `board/virt` sets `goos.Idle = idle` and that QEMU uses `gic-version=3`. |
 | ^C quit QEMU instead of stopping my program | You ran QEMU by hand without `signal=off`. Use `make qemu`. |
 | Can't exit QEMU | **Ctrl-A**, then **X**, or type `halt`. From another terminal: `make stop` (or `make kill`). |
 | `make stop` says "no response from the guest" | Expected on `ARCH=amd64`: godeep doesn't handle the x86 (ACPI) power button yet, so it falls back to SIGTERM. On arm64 it means godeep is hung; the fallback still stops QEMU. |
@@ -547,3 +568,5 @@ arm64 follow-ups:
 Design notes:
 - [`ReUsingGVisor.md`](ReUsingGVisor.md): networking, filesystems and which "syscalls" are worth building
 - [`GoGpuSupport.md`](GoGpuSupport.md): options for display and GPU compute
+- [`docs/DriverModel.md`](docs/DriverModel.md): driver rules, DMA, interrupt bridge, device manager, RTKit
+- [`docs/TargetMyMac.md`](docs/TargetMyMac.md): this Mac's hardware, Go driver coverage, the driver-foundation status, and how to carve out a godeep boot entry + data partition next to macOS and Omarchy (§6)
