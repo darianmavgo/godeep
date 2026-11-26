@@ -16,10 +16,14 @@ import (
 // set by cpuinit (entry_arm64.s)
 var bootFDT, bootEL, bootE2H uint64
 
-// Autorun is typed into the shell at boot: there's no keyboard driver yet.
-// The last lines show, after a few idle seconds, the idle loop's wake-up
-// rate and the watchdog's countdown.
-var Autorun = "lsdev\rps\rmem\ruptime\rsleep 5\rlsdev idle watchdog\r"
+// Autorun is typed into the shell at boot, before anything from the
+// keyboard. The last lines show, after a few idle seconds, the idle loop's
+// wake-up rate, the watchdog's countdown, and how far the keyboard driver
+// got (hid-transport@0), so a boot that can't type still reports.
+var Autorun = "lsdev\rps\rmem\ruptime\rsleep 5\rlsdev idle watchdog hid\r"
+
+// Typeahead from the keyboard beyond this is dropped (counted in lsdev).
+const keyBuffer = 256
 
 var console *simplefb.Console
 
@@ -81,11 +85,12 @@ func NewBoard() kernel.Board {
 		devices = append(devices, "no device tree from the boot loader")
 	}
 
-	in := make(chan byte, len(Autorun))
+	// One input stream: autorun first, then the keyboard driver's bytes.
+	// Never closed.
+	in := make(chan byte, len(Autorun)+keyBuffer)
 	for i := 0; i < len(Autorun); i++ {
 		in <- Autorun[i]
 	}
-	// never closed: the shell waits for more input after autorun
 
 	b := kernel.Board{
 		Info: fmt.Sprintf("board: %s; entered at %s; %d devices from the device tree; %s; %s",
@@ -98,6 +103,9 @@ func NewBoard() kernel.Board {
 	}
 	if root != nil {
 		b.Devices = fromFDT(root)
+		if kbd, ok := keyboard(root, in); ok {
+			b.Devices = withNode(b.Devices, kbd)
+		}
 	}
 	b.Devices = append(b.Devices, dev.Node{Name: "idle", Compatible: idleCompatible})
 	return b

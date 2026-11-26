@@ -171,7 +171,7 @@ func cmdRun(args []string) error {
 	return syscall.Exec(path, argv, os.Environ())
 }
 
-// prepare writes shim.bin and boot.dtb.
+// prepare writes shim.bin, boot.dtb and regs.bin.
 func prepare(c *config) ([]string, error) {
 	if c.kernelAddr%(2<<20) != 0 {
 		return nil, fmt.Errorf("-kernel-addr %#x is not 2 MB aligned", c.kernelAddr)
@@ -198,12 +198,13 @@ func prepare(c *config) ([]string, error) {
 		return nil, err
 	}
 	shimPath, dtbPath := filepath.Join(c.out, "shim.bin"), filepath.Join(c.out, "boot.dtb")
-	for path, data := range map[string][]byte{shimPath: shim, dtbPath: dtb} {
+	regsPath := filepath.Join(c.out, "regs.bin")
+	for path, data := range map[string][]byte{shimPath: shim, dtbPath: dtb, regsPath: regsImage()} {
 		if err := os.WriteFile(path, data, 0o644); err != nil {
 			return nil, err
 		}
 	}
-	return []string{shimPath, dtbPath}, nil
+	return []string{shimPath, dtbPath, regsPath}, nil
 }
 
 // patchShim fills the shim's four trailing parameter words (shim.asm).
@@ -283,7 +284,7 @@ func deviceTree(c *config) ([]byte, error) {
 
 	// Apple-style devices so lsdev has a Mac-like list. Nothing in godeep
 	// touches them yet, and QEMU has nothing at these addresses, except the
-	// watchdog (fakeWdt, RAM).
+	// watchdog (fakeWdt, RAM) and the keyboard path (keyboard.go, RAM).
 	b.Begin("soc")
 	b.PropStrings("compatible", "simple-bus")
 	b.PropU32("#address-cells", 2)
@@ -306,6 +307,7 @@ func deviceTree(c *config) ([]byte, error) {
 		b.PropRegs(2, 2, fdt.Range{Base: d.base, Size: d.size})
 		b.End()
 	}
+	keyboardNodes(&b)
 	b.End()
 
 	// QEMU only: the console mirror.
@@ -436,7 +438,7 @@ func cmdCheck(args []string) error {
 	image := fs.String("image", "bin/godeep-applem1.img", "kernel Image")
 	qemu := fs.String("qemu", "qemu-system-aarch64", "QEMU binary")
 	timeout := fs.Duration("timeout", 90*time.Second, "how long to wait for the shell")
-	want := fs.String("want", "board:,memory layout OK,uptime,wake-ups/s,bites in", "comma-separated strings the serial output must contain")
+	want := fs.String("want", "board:,memory layout OK,uptime,wake-ups/s,bites in,power domains (0 switched on)", "comma-separated strings the serial output must contain")
 	fs.Parse(args)
 	if _, err := prepare(&c); err != nil {
 		return err
@@ -590,6 +592,7 @@ func loaderArgs(c *config, image string) []string {
 	return []string{
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "shim.bin"), uint64(shimAddr)),
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "boot.dtb"), uint64(fdtAddr)),
+		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "regs.bin"), uint64(fakeRegs)),
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", image, c.kernelAddr),
 		"-device", fmt.Sprintf("loader,addr=%#x,cpu-num=0", uint64(shimAddr)),
 	}

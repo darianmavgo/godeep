@@ -34,6 +34,9 @@ type Node struct {
 	Reg        []Range  // MMIO windows
 	IRQ        []int    // interrupt IDs at the board's controller
 	Needs      []string // devices that must be ready first
+	// Config holds driver-specific settings the board resolved (e.g. from
+	// the device tree), or an error saying why it couldn't; nil if none.
+	Config any
 }
 
 // Driver handles every Node with a matching Compatible.

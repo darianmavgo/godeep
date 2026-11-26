@@ -215,3 +215,74 @@ func (n *Node) GICInterrupts() []int {
 	}
 	return out
 }
+
+// Phandle returns the node's phandle (0 if it has none).
+func (n *Node) Phandle() uint32 {
+	for _, p := range []string{"phandle", "linux,phandle"} {
+		if v := n.U32s(p); len(v) == 1 {
+			return v[0]
+		}
+	}
+	return 0
+}
+
+// Root returns the root of the tree n belongs to.
+func (n *Node) Root() *Node {
+	for n.Parent != nil {
+		n = n.Parent
+	}
+	return n
+}
+
+// ByPhandle finds the node with phandle h in n's tree, or nil.
+func (n *Node) ByPhandle(h uint32) *Node {
+	if h == 0 {
+		return nil
+	}
+	var found *Node
+	n.Root().Walk(func(x *Node) {
+		if found == nil && x.Phandle() == h {
+			found = x
+		}
+	})
+	return found
+}
+
+// Ref is one entry of a phandle list: the node pointed to and its argument
+// cells (e.g. a GPIO number and flags).
+type Ref struct {
+	Node *Node
+	Args []uint32
+}
+
+// Refs decodes a phandle-with-arguments list such as "spien-gpios",
+// "interrupts-extended" or "power-domains". The number of argument cells
+// comes from the target's cellsProp ("#gpio-cells", "#interrupt-cells",
+// "#power-domain-cells"); a target without it has none.
+func (n *Node) Refs(prop, cellsProp string) ([]Ref, error) {
+	v := n.U32s(prop)
+	var out []Ref
+	for i := 0; i < len(v); {
+		t := n.ByPhandle(v[i])
+		if t == nil {
+			return nil, fmt.Errorf("fdt: %s: %s: no node with phandle %#x", n.Path, prop, v[i])
+		}
+		c := int(t.cells(cellsProp, 0))
+		if i+1+c > len(v) {
+			return nil, fmt.Errorf("fdt: %s: %s: truncated (%s needs %d cells)", n.Path, prop, t.Path, c)
+		}
+		out = append(out, Ref{Node: t, Args: v[i+1 : i+1+c]})
+		i += 1 + c
+	}
+	return out, nil
+}
+
+// Compatible reports whether the node lists compat in "compatible".
+func (n *Node) Compatible(compat string) bool {
+	for _, c := range n.Strings("compatible") {
+		if c == compat {
+			return true
+		}
+	}
+	return false
+}

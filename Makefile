@@ -10,6 +10,7 @@
 #   make qemu-applem1      that same Mac image on QEMU sbsa-ref (RAM at 1 TB) via tools/fakem1n1,
 #                          handed over like m1n1 does (EL2, E2H=1, relocation, m1n1-style tree)
 #   make shot-applem1      (another terminal) save its framebuffer as bin/fakem1n1/screen.png
+#   make native            test, rehearse on QEMU, install on this Mac (DRY=1: dry run)
 #   make check-applem1     boot it headless and check the shell comes up, then check the
 #                          fault screen at stages 1 and 3 (about a minute; TCG)
 #   make stop              from another terminal: power godeep off cleanly (falls back to kill)
@@ -86,7 +87,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: test hosted kernel image qemu qemu-applem1 shot-applem1 check-applem1 stop kill clean
+.PHONY: test hosted kernel image qemu qemu-applem1 shot-applem1 check-applem1 native stop kill clean
 
 test:
 	go vet ./...
@@ -126,6 +127,18 @@ check-applem1:
 	bin/fakem1n1-check check
 	bin/fakem1n1-check check -fault 1 -o bin/fakem1n1/fault1
 	bin/fakem1n1-check check -fault 3 -o bin/fakem1n1/fault3
+
+# The Mac itself: host tests, build bin/godeep-applem1.img, rehearse it on
+# QEMU (check-applem1), then install it on the godeep boot partition so m1n1
+# boots it directly. The install asks you to type "godeep" and for your
+# sudo password, so run it in a terminal. DRY=1 shows the install steps
+# without changing anything.
+native:
+	@$(MAKE) -s test
+	@$(MAKE) -s image BOARD=applem1
+	@echo "built bin/godeep-applem1.img"
+	@$(MAKE) -s check-applem1
+	tools/godeep-partition.sh install $(if $(DRY),--dry-run)
 
 stop:
 	@tools/qemu-stop.sh

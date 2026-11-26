@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"godeep/drivers/apple/spihid"
 	"godeep/drivers/apple/wdt"
 	"godeep/kernel/dev"
 	"godeep/kernel/mmio"
@@ -24,6 +25,7 @@ func init() {
 		dev.Register(d)
 	}
 	dev.Register(dev.Driver{Compatible: idleCompatible, Run: runIdleStats})
+	dev.Register(spihid.Driver(window))
 }
 
 // stopWatchdog keeps the screen as it is: on halt, and on a fault or panic

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"godeep/drivers/apple/spihid"
 	"godeep/drivers/simplefb"
 	"godeep/kernel/dev"
 	"godeep/kernel/fdt"
@@ -91,4 +92,40 @@ func fromFDT(root *fdt.Node) []dev.Node {
 		out = append(out, node)
 	})
 	return out
+}
+
+// keyboard returns the internal keyboard's device node, configured from the
+// tree (or carrying the error that explains why it can't be), with its
+// bytes going to keys. ok is false if the tree has no SPI HID transport.
+func keyboard(root *fdt.Node, keys chan<- byte) (n dev.Node, ok bool) {
+	var t *fdt.Node
+	root.Walk(func(x *fdt.Node) {
+		if t == nil && x.Compatible(spihid.Compatible) {
+			t = x
+		}
+	})
+	if t == nil {
+		return n, false
+	}
+	n = dev.Node{Name: t.Name, Compatible: spihid.Compatible}
+	cfg, err := spihid.ConfigFromFDT(t)
+	if err != nil {
+		n.Config = err
+		return n, true
+	}
+	cfg.Keys = keys
+	n.Config = cfg
+	n.Reg = []dev.Range{{Base: cfg.SPI, Size: 0x4000}}
+	return n, true
+}
+
+// withNode replaces the node of the same name in nodes, or appends it.
+func withNode(nodes []dev.Node, n dev.Node) []dev.Node {
+	for i := range nodes {
+		if nodes[i].Name == n.Name {
+			nodes[i] = n
+			return nodes
+		}
+	}
+	return append(nodes, n)
 }

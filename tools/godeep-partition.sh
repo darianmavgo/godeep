@@ -454,7 +454,9 @@ boot_help() {
 		say "  2. Choose ${bold}godeep${off}. m1n1 starts U-Boot; boot godeep by hand (below)."
 	fi
 	say "  3. Expected: the screen clears, the godeep banner and a \"board:\" line appear, then"
-	say "     lsdev, ps, mem and uptime run by themselves (there's no keyboard driver yet)."
+	say "     lsdev, ps, mem and uptime run by themselves; after 5 s, ${bold}lsdev idle watchdog hid${off}"
+	say "     shows the idle loop, the watchdog and the keyboard driver. Then type on the"
+	say "     built-in keyboard (try ${bold}help${off}, ${bold}reboot${off})."
 	say ""
 	if [ "$DIRECT" = 1 ]; then
 		say "  If U-Boot's text or Omarchy appears, you didn't boot the godeep entry: m1n1 on it no"
@@ -470,7 +472,9 @@ boot_help() {
 		say "  If the screen stays on U-Boot's output, godeep stopped before its console came up"
 		say "  (docs/TargetMyMac.md §6.8)."
 	fi
-	say "  This is godeep's first run on real hardware: untested there."
+	say "  The keyboard, WFE idle and watchdog are untested on hardware: if typing doesn't"
+	say "  work, photograph the ${bold}hid-transport@0${off} row (it says how far the driver got)."
+	say "  If the Mac reboots by itself ~30 s in, the watchdog fired: godeep stopped scheduling."
 	say "  Hold the power button any time to get back to macOS."
 	say "  After changing godeep, rerun ${bold}tools/godeep-partition.sh install${off} to update it."
 }
