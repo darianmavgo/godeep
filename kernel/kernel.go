@@ -134,7 +134,7 @@ func Boot(ctx context.Context, b Board) error {
 			cd.net = pn
 		}
 		cd.run = func(ctx context.Context, line string) {
-			s := tab.Spawn(ctx, 0, proc.Spec{Name: "sh", Stdout: env.TTY, Main: sh.Main(env, "-c", line)})
+			s := tab.Spawn(ctx, 0, proc.Spec{Name: "sh", Args: []string{"-c", line}, Stdout: env.TTY, Main: sh.Main(env)})
 			s.Wait(ctx)
 		}
 		cd.start(ctx, tab)
