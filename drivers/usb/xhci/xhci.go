@@ -97,6 +97,7 @@ const (
 	trbStatus      = 4
 	trbLink        = 6
 	trbEnableSlot  = 9
+	trbDisableSlot = 10
 	trbAddress     = 11
 	trbConfigureEP = 12
 	trbEvaluate    = 13
@@ -167,13 +168,19 @@ func Run(ctx context.Context, d *dev.Device, c Config) error {
 	h := &hc{r: c.Regs, dma: c.DMA, keys: c.Keys, svc: &Service{}, names: c.Names,
 		reads: make(chan *readReq), sends: make(chan *sendReq), down: make(chan struct{})}
 	if d != nil {
-		h.publish = d.Replace
+		h.publish, h.remove = d.Replace, d.Remove
 	}
 	defer h.free()
 	defer close(h.down) // disks: ErrStopped
 	defer func() {      // USB NICs stop with the controller (netd sees ErrDown)
 		for _, n := range h.nics {
-			close(n.down)
+			n.stop()
+		}
+		for _, k := range h.disks { // their names go to the next run's devices
+			h.names.release(k.name)
+		}
+		for _, n := range h.nics {
+			h.names.release(n.name)
 		}
 	}()
 	if err := h.init(ctx); err != nil {
@@ -207,35 +214,48 @@ func Run(ctx context.Context, d *dev.Device, c Config) error {
 
 // Names hands out device-manager names for what controllers publish
 // ("usbdisk0", "usbnet0"): unique across controllers that share it (or
-// whose names collide: the next free number is taken), and the same again
-// when a controller runs anew, so whoever follows a name (netd) gets the
-// device a replugged cable brought back.
+// whose names collide: the next free number is taken). A name stays taken
+// while its device is plugged in; when a controller runs anew, or a device
+// comes back, it gets the lowest name it had before, so whoever follows a
+// name (netd) finds the device a replugged cable brought back.
 type Names struct {
 	mu    sync.Mutex
-	owned map[string][]string // by prefix, in publish order
+	owned map[string][]string // by prefix, in order of first use
+	inUse map[string]bool
 }
 
-// publish publishes node as this run's idx-th device named prefix<N>.
-func (n *Names) publish(add func(dev.Node) bool, prefix string, idx int, node dev.Node) string {
+// publish publishes node under the lowest free name prefix<N>.
+func (n *Names) publish(add func(dev.Node) bool, prefix string, node dev.Node) string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.owned == nil {
-		n.owned = map[string][]string{}
+		n.owned, n.inUse = map[string][]string{}, map[string]bool{}
 	}
-	if own := n.owned[prefix]; idx < len(own) {
-		node.Name = own[idx]
-		if add != nil {
-			add(node)
+	for _, name := range n.owned[prefix] {
+		if !n.inUse[name] {
+			node.Name = name
+			if add != nil {
+				add(node)
+			}
+			n.inUse[name] = true
+			return name
 		}
-		return node.Name
 	}
 	for i := 0; ; i++ {
 		node.Name = fmt.Sprintf("%s%d", prefix, i)
 		if add == nil || add(node) {
 			n.owned[prefix] = append(n.owned[prefix], node.Name)
+			n.inUse[node.Name] = true
 			return node.Name
 		}
 	}
+}
+
+// release frees a name for the next device.
+func (n *Names) release(name string) {
+	n.mu.Lock()
+	delete(n.inUse, name)
+	n.mu.Unlock()
 }
 
 // Service is the driver's service: lsdev lines and the HID devices'
@@ -347,6 +367,12 @@ type device struct {
 	mps0       int
 	desc       usb.DeviceDesc
 	tt         tt // the high-speed hub's transaction translator a low/full-speed device is behind
+
+	// What the device brought, so an unplug takes it away again.
+	hub     *hub
+	names   []string // published device-manager entries
+	sources []input.Source
+	kbds    []*usb.BootKeyboard
 }
 
 // tt names a transaction translator: the slot of the high-speed hub that
@@ -390,6 +416,7 @@ type hc struct {
 	hubs        []*hub
 	disks       []*Disk
 	publish     func(dev.Node) bool // publishes discovered devices (disks, NICs): dev.Device.Replace
+	remove      func(string) bool   // forgets an unplugged one: dev.Device.Remove
 	names       *Names
 	down        chan struct{} // closed when Run returns
 	reads       chan *readReq // mass-storage reads, served by this goroutine
@@ -577,7 +604,8 @@ func (h *hc) scanPorts(ctx context.Context) {
 		}
 		if v&PORT_CCS == 0 {
 			if _, ok := h.devs[port]; ok {
-				delete(h.devs, port) // unplugged (its slot and endpoints are abandoned)
+				h.detach(ctx, h.devs[port])
+				delete(h.devs, port)
 				h.svc.addLine(fmt.Sprintf("port %d: disconnected", port))
 			}
 			continue
@@ -1017,6 +1045,7 @@ func (h *hc) hidEndpoint(ctx context.Context, d *device, it usb.Interface, e usb
 		k.Events = events
 		k.Emit = h.emit
 		h.kbds = append(h.kbds, k)
+		d.kbds = append(d.kbds, k)
 		h.svc.mu.Lock()
 		if h.svc.layout != nil {
 			k.SetLayout(h.svc.layout)
@@ -1031,6 +1060,7 @@ func (h *hc) hidEndpoint(ctx context.Context, d *device, it usb.Interface, e usb
 	h.eps = append(h.eps, ep)
 	h.svc.mu.Lock()
 	h.svc.sources = append(h.svc.sources, events)
+	d.sources = append(d.sources, events)
 	h.svc.mu.Unlock()
 	h.queueIn(ep)
 	return nil
@@ -1079,4 +1109,78 @@ func sleep(ctx context.Context, d time.Duration) error {
 	case <-t.C:
 		return nil
 	}
+}
+
+// detach takes away everything an unplugged device brought (and, for a
+// hub, everything behind it): its endpoints stop being polled, its NICs
+// report netdev.ErrDown and its disks ErrStopped, their device-manager
+// entries go and their names are free again, its keyboards and input
+// sources leave the service, and its slot is disabled. (Its DMA buffers
+// are kept until the controller stops.)
+func (h *hc) detach(ctx context.Context, d *device) {
+	if d == nil || d.slot == 0 {
+		return
+	}
+	if d.hub != nil {
+		for _, kid := range d.hub.kids {
+			h.detach(ctx, kid)
+		}
+		h.hubs = without(h.hubs, d.hub)
+	}
+	keep := h.eps[:0]
+	for _, ep := range h.eps {
+		if ep.slot != d.slot {
+			keep = append(keep, ep)
+		}
+	}
+	h.eps = keep
+	nics := h.nics[:0]
+	for _, n := range h.nics {
+		if n.d == d {
+			n.stop()
+		} else {
+			nics = append(nics, n)
+		}
+	}
+	h.nics = nics
+	disks := h.disks[:0]
+	for _, k := range h.disks {
+		if k.d == d {
+			k.stop()
+		} else {
+			disks = append(disks, k)
+		}
+	}
+	h.disks = disks
+	for _, name := range d.names {
+		if h.remove != nil {
+			h.remove(name)
+		}
+		h.names.release(name)
+	}
+	for _, k := range d.kbds {
+		h.kbds = without(h.kbds, k)
+	}
+	h.svc.mu.Lock()
+	for _, k := range d.kbds {
+		h.svc.kbds = without(h.svc.kbds, k)
+	}
+	for _, src := range d.sources {
+		h.svc.sources = without(h.svc.sources, src)
+	}
+	h.svc.mu.Unlock()
+	if _, err := h.command(ctx, 0, 0, trbDisableSlot<<10|uint32(d.slot)<<24); err == nil {
+		binary.LittleEndian.PutUint64(h.dcbaa.Bytes[8*d.slot:], 0)
+	}
+	d.slot = 0
+}
+
+func without[T comparable](s []T, x T) []T {
+	out := s[:0]
+	for _, v := range s {
+		if v != x {
+			out = append(out, v)
+		}
+	}
+	return out
 }

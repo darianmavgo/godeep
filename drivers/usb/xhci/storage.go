@@ -46,6 +46,9 @@ const (
 type Disk struct {
 	h         *hc
 	d         *device
+	name      string
+	gone      chan struct{} // closed when unplugged
+	once      sync.Once
 	in, out   *bulkEP
 	cmd       *dma.Buffer // CBW and CSW
 	data      *dma.Buffer
@@ -112,6 +115,8 @@ func (k *Disk) do(ctx context.Context, lba uint64, p []byte, write bool) error {
 	case k.readReqs <- r:
 	case <-k.down:
 		return ErrStopped
+	case <-k.gone:
+		return ErrStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -119,7 +124,7 @@ func (k *Disk) do(ctx context.Context, lba uint64, p []byte, write bool) error {
 }
 
 func (h *hc) newDisk(ctx context.Context, d *device, it usb.Interface) error {
-	k := &Disk{h: h, d: d, readReqs: h.reads, down: h.down}
+	k := &Disk{h: h, d: d, readReqs: h.reads, down: h.down, gone: make(chan struct{})}
 	for _, e := range it.Endpoints {
 		var typ int
 		switch {
@@ -181,9 +186,9 @@ func (h *hc) newDisk(ctx context.Context, d *device, it usb.Interface) error {
 	if k.wp {
 		k.info += ", write-protected"
 	}
-	idx := len(h.disks)
 	h.disks = append(h.disks, k)
-	h.names.publish(h.publish, "usbdisk", idx, dev.Node{Compatible: DiskCompatible, Config: k})
+	k.name = h.names.publish(h.publish, "usbdisk", dev.Node{Compatible: DiskCompatible, Config: k})
+	d.names = append(d.names, k.name)
 	return nil
 }
 
@@ -372,3 +377,6 @@ func DiskDriver() dev.Driver {
 		return nil
 	}}
 }
+
+// stop marks the disk unplugged.
+func (k *Disk) stop() { k.once.Do(func() { close(k.gone) }) }

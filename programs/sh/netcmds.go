@@ -70,9 +70,7 @@ func getCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return n.Dial(ctx, "tcp", addr) },
 	}
-	if clk := rtc(env); clk != nil { // certificates are checked against the real date
-		tr.TLSClientConfig = &tls.Config{Time: clk.Now}
-	}
+	tr.TLSClientConfig = &tls.Config{Time: wallNow(env)} // certificates against the real date
 	c := &http.Client{Timeout: 30 * time.Second, Transport: tr}
 	req, err := http.NewRequestWithContext(ctx, "GET", args[0], nil)
 	if err != nil {

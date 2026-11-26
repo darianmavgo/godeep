@@ -94,6 +94,10 @@ func (d *Device) Add(n Node) bool { return d.m.add(n) }
 // another kind under that name is left alone (false).
 func (d *Device) Replace(n Node) bool { return d.m.replace(n) }
 
+// Remove stops a device this driver published and forgets it (a USB disk
+// or adapter that was unplugged). False if there's no such device.
+func (d *Device) Remove(name string) bool { return d.m.remove(name) }
+
 func (m *Manager) add(n Node) bool {
 	m.mu.Lock()
 	if _, ok := m.entries[n.Name]; ok || m.devmgr == nil {
@@ -112,6 +116,24 @@ func (m *Manager) add(n Node) bool {
 	m.mu.Unlock()
 	if ok {
 		mgr.Go(func(ctx context.Context) { m.supervise(ctx, mgr, drv, e) })
+	}
+	return true
+}
+
+func (m *Manager) remove(name string) bool {
+	m.mu.Lock()
+	e, ok := m.entries[name]
+	delete(m.entries, name)
+	m.mu.Unlock()
+	if !ok {
+		return false
+	}
+	e.mu.Lock()
+	pid := e.pid
+	e.replaced = false
+	e.mu.Unlock()
+	if pid != 0 {
+		m.tab.Kill(pid)
 	}
 	return true
 }

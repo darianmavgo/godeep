@@ -18,15 +18,16 @@ import (
 // nicWait is how long netd waits for a network device to appear; dhcpWait
 // how long it tries DHCP before falling back to the static setup.
 const (
-	nicWait  = 10 * time.Second
-	dhcpWait = 8 * time.Second
+	nicWait   = 10 * time.Second
+	dhcpWait  = 8 * time.Second
+	dhcpRetry = 30 * time.Second
 )
 
 // startNet starts "netd": it waits for the first device whose service is a
 // netdev.NIC, runs the TCP/IP stack on it, configures it (cfg if it has an
 // address; else DHCP, then fallback if DHCP fails), and resolves the
 // returned PendingNet with it (or with the error saying why there is none).
-func startNet(ctx context.Context, tab *proc.Table, mgr *dev.Manager, cfg, fallback netstack.Config, wait time.Duration, log io.Writer) *cap.PendingNet {
+func startNet(ctx context.Context, tab *proc.Table, mgr *dev.Manager, cfg netstack.Config, wait time.Duration, log io.Writer) *cap.PendingNet {
 	switch {
 	case wait == 0:
 		wait = nicWait
@@ -63,11 +64,13 @@ func startNet(ctx context.Context, tab *proc.Table, mgr *dev.Manager, cfg, fallb
 				if ctx.Err() != nil {
 					return nil
 				}
-				fmt.Fprintf(log, "netd: DHCP failed (%v); using %s\n", err, fallback.Addr)
-				if err := st.Configure(fallback, "static (DHCP failed)"); err != nil {
+				fallback := netstack.LinkLocal(nic.MAC())
+				fmt.Fprintf(log, "netd: DHCP failed (%v); using link-local %s, DHCP retried every %v\n", err, fallback.Addr, dhcpRetry)
+				if err := st.Configure(fallback, "link-local (DHCP failed)"); err != nil {
 					pn.Resolve(nil, err)
 					return err
 				}
+				p.Go(func(ctx context.Context) { retryDHCP(ctx, st, log) })
 			}
 		}
 		pn.Resolve(st, nil)
@@ -142,20 +145,36 @@ func (f *followNIC) Recv(ctx context.Context) ([]byte, error) {
 	}
 }
 
-// rebind waits for a NIC other than old (the restarted driver's).
+// rebind waits for a NIC other than old: the restarted driver's under the
+// same name, or, when that device is gone (an unplugged USB adapter), the
+// next NIC that shows up under any name.
 func (f *followNIC) rebind(ctx context.Context, old netdev.NIC) error {
 	for {
 		if f.nic() != old {
 			return nil // the other pump already rebound
 		}
-		svc, err := f.mgr.Get(ctx, f.name)
-		if err != nil {
-			return err
+		var next netdev.NIC
+		f.mu.Lock()
+		want := f.name
+		f.mu.Unlock()
+		name := want
+		for _, s := range f.mgr.List() {
+			n, ok := s.Service.(netdev.NIC)
+			if !ok || s.State != dev.Ready || n == old {
+				continue
+			}
+			if s.Name == want { // the same device back: preferred
+				next, name = n, s.Name
+				break
+			}
+			if next == nil {
+				next, name = n, s.Name
+			}
 		}
-		if n, ok := svc.(netdev.NIC); ok && n != old {
+		if next != nil {
 			f.mu.Lock()
 			if f.cur == old {
-				f.cur = n
+				f.cur, f.name = next, name
 			}
 			f.mu.Unlock()
 			return nil
@@ -194,6 +213,31 @@ func renew(ctx context.Context, st *netstack.Stack, lease netstack.Lease, log io
 			lease, wait = l, l.Time/2
 		default:
 			lease, wait = l, l.Time/2
+		}
+	}
+}
+
+// retryDHCP keeps asking for a lease while the stack runs on its
+// link-local fallback (a cable plugged into a network later); the first
+// lease replaces the fallback and is renewed from then on.
+func retryDHCP(ctx context.Context, st *netstack.Stack, log io.Writer) {
+	for {
+		t := time.NewTimer(dhcpRetry)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		dctx, cancel := context.WithTimeout(ctx, dhcpWait)
+		lease, err := st.DHCP(dctx)
+		cancel()
+		if err == nil {
+			fmt.Fprintf(log, "netd: DHCP answered at last: %s\n", lease.Addr)
+			if lease.Time > 0 {
+				renew(ctx, st, lease, log)
+			}
+			return
 		}
 	}
 }

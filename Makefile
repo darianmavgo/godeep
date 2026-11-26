@@ -121,7 +121,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: wasm push hot check-usbnet check-pcie check-iommu test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
+.PHONY: wasm push hot check-usbnet check-pcie check-iommu check-hotplug check-linklocal test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
 
 # ---- SSH keys (development) ----
 # bin/ssh keeps them across builds: host_ed25519 is godeep's host key,
@@ -264,11 +264,15 @@ check-virt: wasm
 	  -step 'umount dev=>' \
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 dmesg=>sshd: listening,logged in' \
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 pprof heap > bin/check-heap.pb.gz && go tool pprof -top bin/check-heap.pb.gz=>flat%' \
-	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. -ninep 127.0.0.1:5641=bin/ninep-check \
+	  -step 'ntp 10.0.2.2:2123=>clock corrected' \
+	  -step 'date=>2030,ntp 10.0.2.2:2123' \
+	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. -ninep 127.0.0.1:5641=bin/ninep-check -ntp 127.0.0.1:2123 \
 	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(QEMU_NET) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
 	@$(MAKE) -s check-usbnet
 	@$(MAKE) -s check-pcie
 	@$(MAKE) -s check-iommu
+	@$(MAKE) -s check-hotplug
+	@$(MAKE) -s check-linklocal
 
 # USB Ethernet (CDC ECM) as the only network: QEMU's usb-net on the xHCI,
 # DHCP and SSH over it. The Mac's USB-C gadget link will look like this
@@ -337,6 +341,43 @@ check-iommu:
 	  -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-hub,bus=xhci.0,port=3 \
 	  -drive if=none,id=stick,file=$(DISK),format=raw,readonly=on -device usb-storage,bus=xhci.0,port=3.1,drive=stick \
 	  -netdev user,id=u0,hostfwd=tcp:127.0.0.1:2225-:22 -device usb-net,netdev=u0,bus=xhci.0 \
+	  -kernel $(BOOTFILE)
+
+# USB hot-plug: a stick and the USB Ethernet adapter pulled and plugged back
+# over QMP. Unplugged devices leave lsblk/lsdev; back, they get their old
+# names (usbdisk0, usbnet0) and netd carries on over the adapter.
+check-hotplug:
+	@$(MAKE) -s image $(DISK)
+	go run ./tools/qemucheck -log bin/qemucheck-hotplug.log -qmp bin/qmp-hotplug.sock \
+	  -step 'cat usbdisk0p2:/hello.txt=>hello from godeep' \
+	  -step 'ifconfig=>dhcp from 10.0.2.2' \
+	  -step 'qmp:{"execute":"device_del","arguments":{"id":"stick"}}' \
+	  -step 'lsblk=>!usbdisk0' \
+	  -step 'cat usbdisk0p2:/hello.txt=>no such volume' \
+	  -step 'qmp:{"execute":"device_add","arguments":{"driver":"usb-storage","id":"stick","bus":"xhci.0","port":"2","drive":"stick"}}' \
+	  -step 'cat usbdisk0p2:/hello.txt=>hello from godeep' \
+	  -step 'qmp:{"execute":"device_del","arguments":{"id":"nic"}}' \
+	  -step 'lsdev usbnet=>!usbnet0' \
+	  -step 'qmp:{"execute":"device_add","arguments":{"driver":"usb-net","id":"nic","bus":"xhci.0","port":"3","netdev":"u0"}}' \
+	  -step 'lsdev usbnet=>usbnet0,ready' \
+	  -step 'local:ssh -i $(SSH_DIR)/id_ed25519 -p 2226 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR root@127.0.0.1 lsdev usbnet0=>tx' \
+	  -- $(QEMU) $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -device qemu-xhci,id=xhci \
+	  -blockdev driver=file,node-name=stickfile,filename=$(DISK),read-only=on -blockdev driver=raw,node-name=stick,file=stickfile,read-only=on \
+	  -device usb-storage,id=stick,bus=xhci.0,port=2,drive=stick \
+	  -netdev user,id=u0,hostfwd=tcp:127.0.0.1:2226-:22 -device usb-net,id=nic,bus=xhci.0,port=3,netdev=u0 \
+	  -qmp unix:bin/qmp-hotplug.sock,server=on,wait=off \
+	  -kernel $(BOOTFILE)
+
+# No DHCP on the wire (a NIC on a socket nobody's on: like a cable to a
+# computer without a DHCP server): netd falls back to a link-local address.
+check-linklocal:
+	@$(MAKE) -s image
+	go run ./tools/qemucheck -log bin/qemucheck-linklocal.log \
+	  -step 'ifconfig=>169.254.,link-local (DHCP failed)' \
+	  -step 'dmesg=>DHCP retried every' \
+	  -- $(QEMU) $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -netdev socket,id=n0,listen=127.0.0.1:2291 -device virtio-net-device,netdev=n0 \
 	  -kernel $(BOOTFILE)
 
 $(DISK_RW): $(DISK)

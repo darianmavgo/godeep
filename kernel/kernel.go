@@ -67,8 +67,10 @@ type Board struct {
 	// device manager finds, configured with NetConfig.
 	Net cap.Net
 	// NetConfig is the stack's address setup. Zero: DHCP, falling back to
-	// QEMU's user network (netstack.QEMUUser) if no server answers.
+	// a link-local address (netstack.LinkLocal) while DHCP keeps trying.
 	NetConfig netstack.Config
+	// NTPServer is where ntpd gets the date ("": pool.ntp.org; "off": none).
+	NTPServer string
 	// LogLabel: save the kernel log to the writable FAT32 partition with
 	// this label (godeep/log.txt; "": don't).
 	LogLabel string
@@ -104,7 +106,21 @@ func Boot(ctx context.Context, b Board) error {
 	env.Log = klog.New(env.TTY, 0)
 	env.Log.Record([]byte(banner))
 	if env.Net == nil {
-		env.Net = startNet(ctx, tab, mgr, b.NetConfig, netstack.QEMUUser, b.NetWait, env.Log)
+		pn := startNet(ctx, tab, mgr, b.NetConfig, b.NetWait, env.Log)
+		env.Net = pn
+		clock := &wallClock{mgr: mgr, net: pn, kick: make(chan string, 1)}
+		env.Clock = clock
+		if server := b.NTPServer; server != "off" {
+			if server == "" {
+				server = "pool.ntp.org"
+			}
+			tab.Spawn(ctx, 0, proc.Spec{Name: "ntpd", Main: func(ctx context.Context, p *proc.Proc) error {
+				clock.ntpd(ctx, server, env.Log)
+				return nil
+			}})
+		}
+	} else {
+		env.Clock = &wallClock{mgr: mgr}
 	}
 	if con.Input != nil {
 		startInput(ctx, tab, mgr, con.Input)
@@ -113,6 +129,15 @@ func Boot(ctx context.Context, b Board) error {
 	if b.LogLabel != "" {
 		saver = &logSaver{label: b.LogLabel, mgr: mgr, fs: env.FS, log: env.Log}
 		startLogd(ctx, tab, saver)
+		cd := &confd{label: b.LogLabel, mgr: mgr, fs: env.FS, log: env.Log, clock: clockOf(env)}
+		if pn, ok := env.Net.(*cap.PendingNet); ok {
+			cd.net = pn
+		}
+		cd.run = func(ctx context.Context, line string) {
+			s := tab.Spawn(ctx, 0, proc.Spec{Name: "sh", Stdout: env.TTY, Main: sh.Main(env, "-c", line)})
+			s.Wait(ctx)
+		}
+		cd.start(ctx, tab)
 	}
 	halt := make(chan struct{})
 	var haltOnce sync.Once
@@ -151,4 +176,9 @@ func Boot(ctx context.Context, b Board) error {
 		return err
 	}
 	return nil
+}
+
+func clockOf(env sh.Env) *wallClock {
+	c, _ := env.Clock.(*wallClock)
+	return c
 }

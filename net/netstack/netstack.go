@@ -68,6 +68,7 @@ type Stack struct {
 	mu     sync.Mutex
 	cfg    Config
 	source string // "static" or "dhcp, lease ..."
+	pinned bool   // a static setup DHCP must not replace (Pin)
 
 	rxFrames, txFrames, rxBytes, txBytes, rxErrors, txErrors atomic.Uint64
 }
@@ -131,6 +132,20 @@ func (st *Stack) Configure(cfg Config, source string) error {
 }
 
 // Config returns the current setup.
+// Pin configures cfg and keeps it: later DHCP leases (renewals, retries)
+// no longer change the interface.
+func (st *Stack) Pin(cfg Config, source string) error {
+	if err := st.Configure(cfg, source); err != nil {
+		return err
+	}
+	st.mu.Lock()
+	st.pinned = true
+	st.mu.Unlock()
+	return nil
+}
+
+func (st *Stack) isPinned() bool { st.mu.Lock(); defer st.mu.Unlock(); return st.pinned }
+
 func (st *Stack) Config() Config { st.mu.Lock(); defer st.mu.Unlock(); return st.cfg }
 
 // RunRX delivers received frames to the stack until ctx is done.

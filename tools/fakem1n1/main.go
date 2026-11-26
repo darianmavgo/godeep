@@ -445,8 +445,8 @@ func cmdCheck(args []string) error {
 	qemu := fs.String("qemu", "qemu-system-aarch64", "QEMU binary")
 	timeout := fs.Duration("timeout", 90*time.Second, "how long to wait for the shell")
 	want := fs.String("want", "board:,memory layout OK,entropy: 72 bytes,AIC2: 64 IRQs, 1 dies,keyboard backlight 0%,uptime,wake-ups/s,bites in,power domains (0 switched on)", "comma-separated strings the serial output must contain")
-	typed := fs.String("type", "help\r", "then typed on the serial console (input check; empty: skip)")
-	reply := fs.String("reply", "BUILTIN", "what the typed input must produce")
+	typed := fs.String("type", "kbdlight 30\r", "then typed on the serial console (input check; empty: skip)")
+	reply := fs.String("reply", "keyboard backlight 30%", "what the typed input must produce")
 	fs.Parse(args)
 	if _, err := prepare(&c); err != nil {
 		return err

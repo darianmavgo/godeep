@@ -17,10 +17,11 @@
 //	keys:TEXT     type TEXT on QEMU's keyboard (USB) through QMP; \r is Enter
 //	qmp:JSON      send a QMP command, e.g. an input-send-event with mouse moves
 //	local:CMD=>EXPECTED[,...]  run CMD on this machine (sh -c), retrying until its
-//	              output has every EXPECTED string (e.g. ssh into the guest)
+//	              output has every EXPECTED string ("!S": lacks S) (e.g. ssh into the guest)
 package main
 
 import (
+	"encoding/binary"
 	"bufio"
 	"encoding/json"
 	"errors"
@@ -52,7 +53,14 @@ func main() {
 	qmpPath := flag.String("qmp", "", "QMP unix socket of the QEMU being run (for keys: and qmp: steps)")
 	httpServe := flag.String("http", "", "ADDR=DIR: serve DIR over HTTP on ADDR while the check runs (the guest reaches 127.0.0.1 as 10.0.2.2)")
 	ninepServe := flag.String("ninep", "", "ADDR=DIR: serve DIR over 9P2000.L TCP on ADDR while the check runs (read-write)")
+	ntpServe := flag.String("ntp", "", "ADDR: answer SNTP on UDP ADDR with the fixed date "+fakeNTPDate.Format(time.RFC3339)+" (proves the guest takes its date from NTP)")
 	flag.Parse()
+	if *ntpServe != "" {
+		if err := serveNTP(*ntpServe); err != nil {
+			fmt.Fprintln(os.Stderr, "qemucheck:", err)
+			os.Exit(1)
+		}
+	}
 	if flag.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "usage: qemucheck -step 'cmd=>want' ... -- qemu args")
 		os.Exit(2)
@@ -238,7 +246,7 @@ func run(st steps, argv []string, timeout time.Duration, logPath, qmpPath string
 			got := seen[from:]
 			missing := ""
 			for _, w := range strings.Split(want, ",") {
-				if w != "" && !strings.Contains(got, w) {
+				if !matches(got, w) {
 					missing = w
 					break
 				}
@@ -285,7 +293,7 @@ func hostStep(command, want string, timeout time.Duration) error {
 		out, err := exec.Command("sh", "-c", command).CombinedOutput()
 		missing := ""
 		for _, w := range strings.Split(want, ",") {
-			if w != "" && !strings.Contains(string(out), w) {
+			if !matches(string(out), w) {
 				missing = w
 				break
 			}
@@ -410,4 +418,45 @@ func qcode(r rune) (code string, shift bool) {
 		return "semicolon", true
 	}
 	return "", false
+}
+
+// matches reports whether out satisfies one wanted string: it contains w,
+// or, for "!w", doesn't.
+func matches(out, w string) bool {
+	if n, ok := strings.CutPrefix(w, "!"); ok && n != "" {
+		return !strings.Contains(out, n)
+	}
+	return w == "" || strings.Contains(out, w)
+}
+
+// fakeNTPDate is what -ntp answers: obviously not today.
+var fakeNTPDate = time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+
+// serveNTP answers SNTP requests with fakeNTPDate (stratum 2).
+func serveNTP(addr string) error {
+	c, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return err
+	}
+	go func() {
+		buf := make([]byte, 128)
+		for {
+			n, from, err := c.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if n < 48 {
+				continue
+			}
+			r := make([]byte, 48)
+			r[0], r[1] = 4<<3|4, 2
+			copy(r[24:32], buf[40:48]) // origin = their transmit time
+			sec := uint32(fakeNTPDate.Unix() + 2208988800)
+			for _, off := range []int{32, 40} {
+				binary.BigEndian.PutUint32(r[off:], sec)
+			}
+			c.WriteTo(r, from)
+		}
+	}()
+	return nil
 }

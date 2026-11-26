@@ -118,27 +118,37 @@ func dmastat(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 }
 
 func date(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
-	now := time.Now()
-	if clk := rtc(env); clk != nil {
-		now = clk.Now()
+	now, src := time.Now(), "system clock"
+	if env.Clock != nil {
+		now, src = env.Clock.Now(), env.Clock.Source()
 	}
-	fmt.Fprintln(env.TTY, now.UTC().Format("Mon Jan 2 15:04:05 UTC 2006"))
+	fmt.Fprintf(env.TTY, "%s (%s)\n", now.UTC().Format("Mon Jan 2 15:04:05 UTC 2006"), src)
 	return nil
 }
 
-// rtc returns a ready real-time clock device (the Mac's SMC RTC), or nil
-// when the system clock is the wall clock (QEMU, hosted).
-func rtc(env Env) dev.Clock {
-	if env.Dev == nil {
-		return nil
+// wallNow is the date TLS checks certificates against.
+func wallNow(env Env) func() time.Time {
+	if env.Clock == nil {
+		return time.Now
 	}
-	for _, s := range env.Dev.List() {
-		if c, ok := s.Service.(dev.Clock); ok && s.State == dev.Ready && s.Name == "rtc" {
-			if t := c.Now(); !t.IsZero() {
-				return c
-			}
-		}
+	return env.Clock.Now
+}
+
+// ntp [SERVER]: sync the wall clock now.
+func ntpCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
+	if env.Clock == nil {
+		return errors.New("no wall clock on this board")
 	}
+	server := "pool.ntp.org"
+	if len(args) > 0 {
+		server = args[0]
+	}
+	off, err := env.Clock.Sync(ctx, server)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(env.TTY, "clock corrected by %v: %s (%s)\n", off.Round(time.Millisecond),
+		env.Clock.Now().UTC().Format("Mon Jan 2 15:04:05 UTC 2006"), env.Clock.Source())
 	return nil
 }
 
@@ -153,8 +163,8 @@ func kbdlight(_ context.Context, env Env, _ *proc.Proc, args []string) error {
 		if !ok || s.State != dev.Ready {
 			continue
 		}
-		if len(args) > 1 {
-			n, err := strconv.Atoi(strings.TrimSuffix(args[1], "%"))
+		if len(args) > 0 {
+			n, err := strconv.Atoi(strings.TrimSuffix(args[0], "%"))
 			if err != nil {
 				return errors.New("usage: kbdlight [0-100]")
 			}

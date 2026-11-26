@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -63,6 +64,8 @@ func (ecmFraming) rxSize() int                     { return ecmBuf }
 type NIC struct {
 	h     *hc
 	d     *device
+	name  string
+	once  sync.Once
 	fr    framing
 	mac   [6]byte
 	out   *bulkEP
@@ -125,6 +128,9 @@ func (n *NIC) Devices() []string {
 	}
 	return []string{s}
 }
+
+// stop takes the adapter down (unplugged, or its controller stopped).
+func (n *NIC) stop() { n.once.Do(func() { close(n.down) }) }
 
 // deliver queues a received frame for Recv (a copy: b is the DMA buffer).
 func (n *NIC) deliver(b []byte) {
@@ -282,7 +288,7 @@ func NICDriver() dev.Driver {
 
 // addNIC publishes a USB Ethernet adapter (any framing) as usbnet<N>.
 func (h *hc) addNIC(n *NIC) {
-	idx := len(h.nics)
 	h.nics = append(h.nics, n)
-	h.names.publish(h.publish, "usbnet", idx, dev.Node{Compatible: NICCompatible, Config: n})
+	n.name = h.names.publish(h.publish, "usbnet", dev.Node{Compatible: NICCompatible, Config: n})
+	n.d.names = append(n.d.names, n.name)
 }

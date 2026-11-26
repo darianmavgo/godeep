@@ -38,9 +38,19 @@ type Env struct {
 	FS    *vfs.NS        // volumes: ram, disks and partitions
 	Log   *klog.Log      // the kernel log (dmesg); nil: none
 	WASM  *wasm.Cache    // optional compiled-module cache for WASI programs
+	// Clock is the wall clock (NTP, an RTC, or the system clock); nil: the
+	// system clock.
+	Clock WallClock
 	// Halt asks the kernel for a clean shutdown: every process (drivers
 	// included) stops, then the board powers off. nil: halt exits at once.
 	Halt func()
+}
+
+// WallClock is the kernel's date source.
+type WallClock interface {
+	Now() time.Time
+	Source() string
+	Sync(ctx context.Context, server string) (time.Duration, error)
 }
 
 type builtin struct {
@@ -77,6 +87,7 @@ func init() {
 		"dmastat":  {"DMA memory usage", dmastat},
 		"date":     {"wall-clock time", date},
 		"kbdlight": {"kbdlight [0-100]: show or set the keyboard backlight", kbdlight},
+		"ntp":      {"ntp [SERVER]: set the date from an NTP server (default pool.ntp.org)", ntpCmd},
 		"lsblk":    {"disks, partitions and their filesystems", lsblk},
 		"evtest":   {"evtest [SECONDS]: input devices and their events (^C stops)", evtest},
 		"ls":       {"ls VOLUME:PATH: list a directory (e.g. ls nvme0p1:/, ls ram:/)", ls},
@@ -190,7 +201,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "ntp", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")

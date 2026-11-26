@@ -63,6 +63,7 @@ func (h *hc) newHub(ctx context.Context, d *device, it usb.Interface) error {
 		return fmt.Errorf("hub descriptor: %v", err)
 	}
 	hb := &hub{h: h, d: d, ports: int(b[2]), kids: map[int]*device{}, buf: buf}
+	d.hub = hb
 	var ttt uint32
 	if d.speed == usb.High && len(b) >= 5 { // wHubCharacteristics bits 6:5
 		ttt = uint32(binary.LittleEndian.Uint16(b[3:]) >> 5 & 3)
@@ -122,7 +123,8 @@ func (hb *hub) scan(ctx context.Context) {
 		}
 		where := fmt.Sprintf("%s.%d", hb.d.where, p)
 		if st&portConnection == 0 {
-			if _, ok := hb.kids[p]; ok {
+			if kid, ok := hb.kids[p]; ok {
+				h.detach(ctx, kid)
 				delete(hb.kids, p)
 				h.svc.addLine(where + ": disconnected")
 			}

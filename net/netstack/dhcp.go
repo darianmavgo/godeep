@@ -136,6 +136,9 @@ func (st *Stack) DHCP(ctx context.Context) (Lease, error) {
 	}
 	l := Lease{Server: ack.server, Time: ack.lease, Config: Config{
 		Addr: netip.PrefixFrom(ack.yiaddr, ack.prefix), Gateway: ack.router, DNS: ack.dns}}
+	if st.isPinned() {
+		return l, errors.New("dhcp: the interface is pinned to a static setup")
+	}
 	if err := st.Configure(l.Config, fmt.Sprintf("dhcp from %s, lease %v", l.Server, l.Time)); err != nil {
 		return Lease{}, err
 	}

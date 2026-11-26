@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"godeep/drivers/usb"
+	"godeep/kernel/dev"
 )
 
 func TestNCMRoundTrip(t *testing.T) {
@@ -82,5 +83,33 @@ func TestChildTT(t *testing.T) {
 	}
 	if got := (tt{3, 4}).slotWord(); got != 0x0403 {
 		t.Fatalf("slot word %#x", got)
+	}
+}
+
+// Names: the lowest free name, kept while in use, reused once released;
+// a name another controller holds is skipped.
+func TestNames(t *testing.T) {
+	taken := map[string]bool{"usbnet1": true} // another controller's
+	add := func(n dev.Node) bool {
+		if taken[n.Name] {
+			return false
+		}
+		taken[n.Name] = true
+		return true
+	}
+	var n Names
+	a := n.publish(add, "usbnet", dev.Node{})
+	b := n.publish(add, "usbnet", dev.Node{})
+	if a != "usbnet0" || b != "usbnet2" {
+		t.Fatalf("got %s %s", a, b)
+	}
+	n.release(a)
+	if c := n.publish(add, "usbnet", dev.Node{}); c != "usbnet0" {
+		t.Fatalf("after release: %s", c)
+	}
+	n.release(b)
+	n.release("usbnet0")
+	if c := n.publish(add, "usbnet", dev.Node{}); c != "usbnet0" {
+		t.Fatalf("a new run: %s", c)
 	}
 }
