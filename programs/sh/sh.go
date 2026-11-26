@@ -52,6 +52,7 @@ func init() {
 		"dmastat": {"DMA memory usage", dmastat},
 		"date":    {"wall-clock time", date},
 		"lsblk":   {"disks, partitions and their filesystems", lsblk},
+		"evtest":  {"evtest [SECONDS]: input devices and their events (^C stops)", evtest},
 		"ls":      {"ls DISK:PATH: list a directory (read-only; e.g. ls nvme0p1:/)", ls},
 		"cat":     {"cat DISK:PATH...: print files (e.g. cat nvme0p2:/hello.txt)", cat},
 	}
@@ -127,7 +128,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "ls", "cat", "exit", "halt", "reboot"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "ls", "cat", "evtest", "exit", "halt", "reboot"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")

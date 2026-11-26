@@ -20,6 +20,7 @@ This doc covers everything about running godeep on the actual machine it's devel
 - [3. godeep's driver foundation (built, 2026-11-25)](#3-godeeps-driver-foundation-built-2026-11-25)
   - [3.1 Booting like a Linux kernel (built, 2026-11-25)](#31-booting-like-a-linux-kernel-built-2026-11-25)
   - [3.2 Decision: how godeep handles an EL2 entry (2026-11-25)](#32-decision-how-godeep-handles-an-el2-entry-2026-11-25)
+  - [3.3 After the first native boot: keyboard, idle, watchdog, storage (built 2026-11-25, keyboard and trackpad confirmed on the Mac 2026-11-26)](#33-after-the-first-native-boot-keyboard-idle-watchdog-storage-built-2026-11-25-keyboard-and-trackpad-confirmed-on-the-mac-2026-11-26)
 - [4. TamaGo blockers specific to this Mac](#4-tamago-blockers-specific-to-this-mac)
 - [5. How godeep would boot on this Mac](#5-how-godeep-would-boot-on-this-mac)
 - [6. Carving out a godeep partition next to Macintosh HD and Omarchy](#6-carving-out-a-godeep-partition-next-to-macintosh-hd-and-omarchy)
@@ -30,7 +31,7 @@ This doc covers everything about running godeep on the actual machine it's devel
   - [6.5 Step 2: create the bootable godeep stub (Asahi installer)](#65-step-2-create-the-bootable-godeep-stub-asahi-installer)
   - [6.6 Step 3 (optional): the GODEEPDATA partition](#66-step-3-optional-the-godeepdata-partition)
   - [6.7 Step 4: verify](#67-step-4-verify)
-  - [6.8 Step 5 (future): put godeep on its ESP](#68-step-5-future-put-godeep-on-its-esp)
+  - [6.8 Step 5: put godeep on its ESP and boot it](#68-step-5-put-godeep-on-its-esp-and-boot-it)
   - [6.9 Undo: remove godeep and give the space back](#69-undo-remove-godeep-and-give-the-space-back)
   - [6.10 Troubleshooting](#610-troubleshooting)
 - [7. Developing native drivers incrementally](#7-developing-native-drivers-incrementally)
@@ -58,6 +59,7 @@ The serial number is deliberately left out of this file, since the repo may be s
 - **Existing Go driver coverage on bare metal is thin.** The *CPU* side works: TamaGo's arm64 boot, MMU and timers, plus Go's assembly-accelerated crypto and SIMD. Almost every peripheral has no Go driver; the reference code is Asahi Linux (C/Rust) and its bootloader m1n1 (C/Python).
 - **godeep now has its driver foundation** (§3): a DMA allocator with an IOMMU interface, an interrupt bridge, a device manager, and an RTKit coprocessor protocol engine. They're tested on the host and running on QEMU. On the M1 the remaining work narrows to three small hardware adapters: an AIC2 interrupt-controller driver, a DART IOMMU driver and an ASC mailbox driver. Every other M1 driver builds on those.
 - **godeep now boots like a Linux kernel** (§3.1): a raw arm64 Image (`make image`), entry at **EL2** with a drop to EL1, and its device list read from the **device tree** the boot loader passes in `x0`. That's exactly what m1n1 does on this Mac, and it's tested in QEMU (`make qemu EL2=1`). Of the §4 blockers, two are done; the MMU patch and AIC2 remain.
+- **Status (2026-11-26): godeep is interactive on this Mac.** First boot 2026-11-25 (m1n1 → godeep, shell output on the built-in display, `screens/IMG_2341.JPG`). Second boot 2026-11-26 (`screens/IMG_2342.JPG`, §3.3): the **internal keyboard** types into the shell (SPI-HID, polled, so no interrupt controller needed), the **trackpad** is in multitouch mode, **WFE idle** sleeps instead of spinning, and the **watchdog** is armed and petted. `make native` tests, rehearses on QEMU and installs. On QEMU, godeep now reads disks: **PCIe → NVMe → GPT → FAT32/ext4**, the stack the Mac's SSD will use once its Apple-specific layer exists.
 - **Through QEMU (today's setup)**, godeep uses this Mac's CPU natively via HVF and reaches everything else through virtio. That remains the practical target.
 - **For bare metal, this Mac is well placed.** The Omarchy install means Asahi's **m1n1** bootloader is already set up. §6 shows how to add a separate **godeep** boot entry and data partition between Macintosh HD and Omarchy without touching either. The first milestone is "godeep prints its shell on the laptop screen" via the framebuffer the firmware already set up, which needs **no display driver at all**.
 
@@ -197,13 +199,13 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 | **DART IOMMU** | **godeep `kernel/dma`**: allocator outside the Go heap (16 KB alignment, ownership, stats) + the `dma.IOMMU` interface drivers already call | ◐ | Only the DART page tables and registers are left: implement `Map`/`Unmap`. Reference: Linux `apple-dart.c`, m1n1 `dart.c` | S–M |
 | **RTKit coprocessors** | **godeep `kernel/rtkit`**: handshake, endpoint discovery, power states, shared-buffer requests (via `kernel/dma`), crash detection, per-endpoint channels | ◐ | Left: the ASC mailbox hardware driver (implements `rtkit.Mailbox`), and checking the message encodings on real hardware. Reference: Linux `apple-mailbox.c`, `drivers/soc/apple/rtkit*.c`, m1n1 `rtkit.c` | S |
 | SMC (battery, sensors, lid, power button) | rides on `kernel/rtkit` | ✗ | The SMC protocol on top of an RTKit endpoint. Asahi `macsmc` | S–M |
-| **Keyboard / trackpad** (HID over SPI) | `drivers/apple/spi` + `drivers/apple/spihid` | ◐ | Keyboard built, **polled** like U-Boot's `apple_spi_kbd.c` (no AIC needed): reads the keyboard's ready line (nub GPIO 6), falls back to blind reads. US layout, Ctrl, Caps Lock, repeat. Trackpad not yet. Awaiting the Mac | M |
+| **Keyboard / trackpad** (HID over SPI) | `drivers/apple/spi` + `drivers/apple/spihid` + `kernel/input` | ◐ | Both built, **polled** like U-Boot's `apple_spi_kbd.c` (no AIC needed): reads the ready line (nub GPIO 6), falls back to blind reads. Keyboard: US layout, Ctrl, Caps Lock, repeat. Trackpad (after Asahi's `hid-magicmouse.c`): one set-report switches multitouch on, one finger moves, two scroll, click; `evtest` shows it. Awaiting the Mac | M |
 | **SSD** (ANS2) | `drivers/nvme` (command layer) + `kernel/rtkit` + `kernel/dma` | ◐ | NVMe queues, identify, reads and PRP lists are built and run on QEMU virt (`make check-virt`). Left: ANS2's differences (linear submission, NVMMU/TCBs), SART, RTKit boot. Linux `drivers/nvme/host/apple.c` | M |
 | Filesystems on the SSD | `kernel/block` (GPT), `fs/ext4`, `fs/fat` | ◐ | Built, read-only, tested on real mkfs images and on QEMU. Waits for the SSD driver to read the Omarchy partition; never write to APFS | M |
 | PCIe root complex | `tamago/soc/intel/pci` is x86 port I/O, doesn't apply | ✗ | Linux `pcie-apple.c`. m1n1 can bring the links up before handing over | M |
 | SD reader (GL9755, SDHCI) | `tamago/soc/nxp/usdhc` (different controller, same SD protocol) | ◐ | Linux `sdhci-pci-gli.c`; reuse the SD command logic from usdhc | M |
 | **USB-C in device mode** (gadget) | `usbarmory/go-net/imx-usb` (on top of `go-net`): CDC-ECM Ethernet-over-USB, written for NXP's controller | ◐ | Needs a Go DWC3 *device-mode* driver (Linux `dwc3`). Then the existing CDC-ECM + gVisor stack gives **networking over a USB-C cable**. m1n1 uses the same port this way | M–L |
-| USB host (DWC3 xHCI) | none | ✗ | Linux `xhci`, `dwc3`; large | L |
+| USB host (DWC3 xHCI) | `drivers/usb/xhci` + `drivers/usb` | ◐ | The xHCI host driver (polled; HID boot keyboards and mice, root ports) runs on QEMU (`make check-virt` types and moves the mouse through QMP). Left for the Mac: DWC3 host-mode setup, the Type-C PHY (ATC) and the CD321x port controller; hubs; mass storage | L |
 | USB-C PD controller (CD3217) | none | ✗ | Linux `tipd` driver; needed to switch port roles and modes | M |
 | Thunderbolt / USB4 | none | ✗ | Asahi work in progress | XL |
 | **Wi-Fi** (BCM4387) | none | ✗ | Linux `brcmfmac` plus the firmware blobs the Asahi installer copies from macOS | XL |
@@ -211,7 +213,7 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 | Network stack (TCP/IP) | **gVisor netstack via `usbarmory/go-net`** | ✅ | Works on any frame source: USB gadget Ethernet, virtio-net in QEMU | — |
 | Display controller (DCP) | none (would ride on `kernel/rtkit`) | ✗ | Asahi DCP driver. Use the boot framebuffer instead | XL |
 | External displays / HDMI | none | ✗ | DCP + Parade DP855 + Type-C alt modes | XL |
-| GPU (AGX) | none | ✗ | Asahi's Rust `drm/asahi` + Mesa. See `../GoGpuSupport.md` | XL+ |
+| GPU (AGX) | none | ✗ | Asahi's Rust `drm/asahi` + Mesa. See `GoGpuSupport.md` | XL+ |
 | Neural Engine | none | ✗ | Reverse-engineered, unofficial | XL+ |
 | Video encode/decode, JPEG, scaler | none | ✗ | Partial Asahi work | L–XL |
 | Speakers, headphones, mics | none (audio coprocessor would ride on `kernel/rtkit`) | ✗ | Asahi `macaudio`, `mca`, `admac`, TAS2764, CS42L84 drivers | L |
@@ -242,7 +244,7 @@ Design and rules are in [`DriverModel.md`](DriverModel.md).
 |---|---|---|---|---|
 | DMA memory + IOMMU | `kernel/dma` | buffers outside the Go heap with stable physical addresses, 16 KB alignment for DART, single ownership (double free panics), stats; `dma.IOMMU` so drivers hand devices an IOVA | 512 MB region at `0x1_2000_0000` (`dmastat`); `dma.Identity` IOMMU | **DART** implementing `Map`/`Unmap` |
 | Interrupt bridge | `kernel/irq` | interrupts arrive as channel events; the line stays masked until the driver calls `Done` (oneshot, safe for level-triggered lines); per-line counts and service time | GICv3: power button + timer probe (`irqstat`, `irqlat`) | **AIC2** implementing `irq.Controller` + its ack loop |
-| Device manager | `kernel/dev` | each driver is a process `drv/<name>` supervised by `devmgr`: dependency ordering (`Needs`), readiness (`Ready`/`Get`), restart with backoff when any driver goroutine panics | 4 drivers: PL061 power button, PL031 RTC, virtio-mmio scanner, timer probe (`lsdev`) | **ADT parser** producing `dev.Node`s from m1n1's device tree |
+| Device manager | `kernel/dev` | each driver is a process `drv/<name>` supervised by `devmgr`: dependency ordering (`Needs`), readiness (`Ready`/`Get`), restart with backoff when any driver goroutine panics | PL061 power button, PL031 RTC, virtio-mmio scanner, timer probe; PCIe host + NVMe added by the PCIe driver at run time (`lsdev`) | **ADT parser** producing `dev.Node`s from m1n1's device tree |
 | RTKit coprocessors | `kernel/rtkit` | version handshake (11–12), endpoint map, starting system endpoints, IOP power states, the firmware's shared-buffer requests (allocated from `kernel/dma`, mapped through the IOMMU), crash detection, one channel per application endpoint | protocol engine tested against a fake coprocessor (out-of-order messages, crash, old firmware); QEMU has no RTKit device | **ASC mailbox** driver implementing `rtkit.Mailbox`; **verify the message encodings** on the real Mac (they follow Asahi's `rtkit.c`) |
 
 **Measured on this Mac (QEMU + HVF):**
@@ -323,6 +325,44 @@ How that maps to today's implementation (`board/virt/entry_arm64.s`, tested with
 - **QEMU 11.1.x HVF WFI bug.** After the first device interrupt, idle vCPUs spin (QEMU issue 959). Guest state is clean, and TCG and real hardware are unaffected. `board/virt` polls the UART under HVF to avoid it.
 - **Running tests 50× under the race detector found most of the real bugs.** Keep doing it for M1 drivers.
 
+### 3.3 After the first native boot: keyboard, idle, watchdog, storage (built 2026-11-25, keyboard and trackpad confirmed on the Mac 2026-11-26)
+
+**Second native boot (2026-11-26, `screens/IMG_2342.JPG`): keyboard and trackpad work.** What the autorun's `lsdev idle watchdog hid` showed, about 5 s after boot:
+
+| Row | On the Mac | Reading |
+|---|---|---|
+| `hid-transport@0` | `ready pin`, 10 power domains (0 switched on), 0 pins muxed, 8 MHz, 121 packets (20 keyboard, CRC ok 121), 0 empty, 9 keys (0 dropped), 0 restarts | The ready line works, so no blind-read fallback. m1n1 had already powered the domains and muxed the pins, so godeep had nothing to switch. Every packet passed CRC |
+| trackpad (same row) | `98 reports`, `multitouch on: 1 sent, status ok`, `booted packets 1, 1 replies` | The multitouch write was accepted on the first try |
+| `idle` | WFE + event stream every 683 µs: 53.5% idle, 796 wake-ups/s | WFE sleeps (a spinning core would show millions of wake-ups). The 53.5% is averaged since boot, over the autorun output scrolling a 3456×2234 framebuffer in software. **To check:** `lsdev idle` after a quiet minute should be well above 90% |
+| `watchdog@2922b0000` | armed, 30s timeout, bites in 25.003s | Armed and petted. `ps` at 22.9 s showed every process running. **To check:** that it stays up past 30 s |
+
+Typing worked: `Darian is Hickman` → `Darian: command not found`, `ls` → its usage line, then `ps` (7 processes, `drv/hid-transport@0` and `drv/idle` among them).
+
+**How it was built (2026-11-25).** QEMU can't emulate Apple hardware, so each piece is host-tested against a model of the hardware (exact register sequences), wired up and exercised on QEMU sbsa-ref through `tools/fakem1n1` (RAM-backed stand-ins for the Apple registers), and reports what it did in `lsdev`, so one photo of the screen says how far it got.
+
+| Piece | Where | What it does | How to read it on the Mac |
+|---|---|---|---|
+| **Idle** | `board/applem1/idle.go` | WFE woken by the generic timer's **event stream** (`CNTKCTL_EL1.EVNTEN`, ~0.7 ms): needs no interrupt controller and no Apple timer-FIQ setup. The core sleeps to the next Go timer instead of spinning | `idle` row: ~1,500 wake-ups/s means WFE sleeps; millions means it spins (QEMU TCG's WFE never sleeps) |
+| **Watchdog** | `drivers/apple/wdt` (after Linux `apple_wdt.c`) | WD1 armed at 30 s, petted every 10 s: a kernel that stops scheduling reboots. `reboot` resets through it (`dev.Rebooter`). Stopped on `halt` and on fault screens, so they stay readable | `watchdog@2922b0000` row: `armed, 30s timeout, bites in …` |
+| **Keyboard** | `drivers/apple/{pmgr,gpio,spi,spihid}` (after U-Boot's polled `apple_spi_kbd.c`, Linux `spi-apple.c`, `pinctrl-apple-gpio.c`, `apple-pmgr-pwrstate.c`) | from the tree: power domains (8, parents first), spi3 pin mux, SPI at 8 MHz, spien pulse 1-0-1; then polls the keyboard's ready line (nub GPIO 6) every 5 ms, or reads blind every 10 ms if it never asserts within 3 s. Decodes 256-byte packets into keys: US layout, Shift, Caps Lock, Ctrl (Ctrl-C kills the foreground program), arrows, repeat. Bytes go into the console after autorun | `hid-transport@0` row: mode (`ready pin` / `blind reads`), power domains switched on, pins muxed, packets (keyboard, CRC ok), empty reads, keys. A `first other packet` hex dump appears if packets aren't keyboard reports |
+| `kernel/fdt` phandles | `Refs`, `ByPhandle`, `TranslateAddr` | resolves `power-domains`, `*-gpios`, `interrupts-extended`, `pinctrl-0`, `clocks` | — |
+| `dev.Node.Config` | `kernel/dev` | board-resolved driver settings, or the error that prevented them (shown in `lsdev` instead of lost) | `failed` rows carry the reason |
+| **Trackpad** | `drivers/apple/spihid` (`trackpad.go`), `kernel/input` | after the booted packet (or 1 s), one write: the multitouch set-report (device 2, report 0x02 = 01, with both CRCs; the device answers `ac 27 68 d5`). Reports: 6-byte mouse header, 38-byte touch header, 30-byte contacts, reassembled across packets. One finger → pointer motion, two → wheel, click → button 0, every contact → touch events | `hid-transport@0` row: `trackpad: N reports (multitouch), multitouch on: 1 sent, status ok`; `evtest` prints the events. `first unrecognized trackpad report` shows hex if the format differs |
+| `make native` | Makefile | host tests → `bin/godeep-applem1.img` → `check-applem1` → `tools/godeep-partition.sh install` (asks to type `godeep`, and for sudo) | — |
+
+Also from this round: on QEMU, typing now reaches the Mac image's shell (`drivers/arm/pl011` polls the serial port into the same input channel), and `check-applem1` types `help` and expects the shell's answer.
+
+**Built on QEMU virt, for the Mac's SSD later.** `make check-virt` boots headless under HVF and reads both partitions of an NVMe disk from the shell:
+
+| Layer | Package | Status |
+|---|---|---|
+| PCIe | `drivers/pci` | ECAM host bridge: scans bus 0, sizes and assigns BARs from `ranges`, enables decoding and bus mastering, adds each function as a device named by class (`nvme0`), compatible `pciclass,CCSSPP`. Apple's root complex needs its own bring-up, then this applies |
+| NVMe | `drivers/nvme` | polled; admin + one I/O queue pair in the DMA region, identify, reads with PRP lists, split at MDTS; one goroutine owns the controller. This is the command layer ANS2 shares (§2) |
+| Block | `kernel/block` | `block.Device`, GPT (CRC-checked) and MBR, a cached `io.ReaderAt` |
+| Filesystems | `fs/fat`, `fs/ext4` (over `fs/rofs`) | read-only `io/fs.FS`: FAT12/16/32 with long names; ext2/3/4 with extents, block maps, 64-bit, htree, symlinks. Tested on images made by `mke2fs`/`mkfs.fat` and with `testing/fstest` |
+| Shell | `lsblk`, `ls DISK:PATH`, `cat DISK:PATH` | no mount table: `cat nvme0p2:/hello.txt` |
+| USB | `drivers/usb/xhci`, `drivers/usb` | polled xHCI: controller, rings, port reset, addressing, descriptors, HID boot keyboard (types into the console) and mouse (`evtest`). For the Mac's USB-C ports once their Apple-specific setup exists |
+
 ---
 
 ## 4. TamaGo blockers specific to this Mac
@@ -331,8 +371,8 @@ These must be fixed before godeep can print a single character on the real hardw
 
 1. ✅ **Entry at EL2.** *Decided (§3.2: Option A, drop to EL1) and done (§3.1): `board/virt/entry_arm64.s` drops EL2 → EL1 and is tested at EL2 in QEMU. Small follow-up: write `VTTBR_EL2 = 0` explicitly. `board/applem1` reuses it.* Background: m1n1 starts payloads at **EL2** (Asahi kernels run in EL2/VHE). `tamago/arm64` `cpuinit` handles EL1 or EL3 only: from EL2 it would execute EL3 register writes, which is an undefined-instruction fault. Add an EL2→EL1 drop (set `HCR_EL2.RW`, then `ERET` to EL1). That's about 15 lines of assembly in a board-specific `linkcpuinit` override.
 2. ✅ **RAM is above 1 TiB.** *Done: `kernel/pgtable` (4-level, 48-bit) plus an early identity map in `cpuinit`; the 4-level path runs daily on `board/virt`, RAM at 1 TB is first exercised on the Mac.* Background: DRAM starts at `0x100_0000_0000`. TamaGo's arm64 MMU sets up a 39-bit VA with a 40-bit physical range and flat mapping, which can't reach it. Either patch the MMU (48-bit VA, 4-level tables) or map RAM at a low virtual address. Flat mapping plus a 48-bit VA is the simpler patch. The DMA region (§3) must sit in RAM the Go heap doesn't own, exactly as `board/virt` does it.
-3. **AIC, not GIC.** *Not needed for the first boot:* `board/applem1` idles in WFE (timer event stream) and takes no interrupts. Needed for the keyboard (M2) and WFI idle on a timer deadline: an AIC2 `irq.Controller` adapter, plus checking how the timer FIQ reaches EL1 under m1n1.
-4. **No PSCI.** `halt` and `make stop`'s power-off must use the watchdog or SMC instead (`Board.PowerOff`). The board already reads the PSCI conduit from the device tree; on the M1 the tree has no `/psci`, which the board will use as the cue to use the watchdog.
+3. **AIC, not GIC.** *Not needed yet:* `board/applem1` idles in WFE (timer event stream), and the keyboard is polled (§3.3). AIC2 (an `irq.Controller` adapter, plus checking how the timer FIQ reaches EL1 under m1n1) replaces the polling and allows WFI on a timer deadline: fewer wake-ups, deeper sleep.
+4. **No PSCI.** ◐ *Reboot done:* `reboot` resets through the watchdog (§3.3). Power-off needs SMC (M3); until then `halt` stops godeep with the screen kept, and you hold the power button.
 5. ✅ **Image format.** *Done: `make image` (`tools/mkimage`) builds a raw arm64 Image, and QEMU boots it by default.* For the M1, link `board/applem1` at the RAM base m1n1 uses and set `-ram` to match.
 6. **16 KB IOMMU pages.** DART works in 16 KB pages, so DMA buffers must be 16 KB-aligned (`dma.Alloc(size, 16384)`) even if the CPU uses 4 KB pages.
 
@@ -403,7 +443,7 @@ The space comes from shrinking Macintosh HD's container, which is 75% unallocate
 
 New partitions get the next free *entry numbers* (`disk0s8`, `disk0s9`, …) even though they sit physically between `s2` and `s3`. Always go by **name and size**, never by number alone.
 
-**Choosing the size.** The godeep stub (2.5 GB) and its ESP (0.5 GB) need about 3 GB. The rest becomes GODEEPDATA, for godeep's future disk driver and filesystem work (`../ReUsingGVisor.md` §5) and as a drop box shared with macOS and Omarchy. 12 GB gives about 9 GB of data space. Use 4 GB if you only want the boot entry.
+**Choosing the size.** The godeep stub (2.5 GB) and its ESP (0.5 GB) need about 3 GB. The rest becomes GODEEPDATA, for godeep's future disk driver and filesystem work (`ReUsingGVisor.md` §5) and as a drop box shared with macOS and Omarchy. 12 GB gives about 9 GB of data space. Use 4 GB if you only want the boot entry.
 
 ### 6.2 Safety first
 
@@ -487,7 +527,7 @@ The startup picker (hold the power button at boot) should show **Macintosh HD, O
 
 ### 6.8 Step 5: put godeep on its ESP and boot it
 
-The Mac image now exists (§3.1). It boots to the shell under QEMU with an m1n1-style hand-off (`make check-applem1`, below), and booted on this Mac on 2026-11-25: m1n1 → godeep at EL2, autorun `lsdev`/`ps`/`mem`/`uptime` on the built-in display (`screens/IMG_2341.JPG`).
+The Mac image now exists (§3.1). It boots to the shell under QEMU with an m1n1-style hand-off (`make check-applem1`, below), and booted on this Mac on 2026-11-25: m1n1 → godeep at EL2, autorun `lsdev`/`ps`/`mem`/`uptime` on the built-in display (`screens/IMG_2341.JPG`). The second boot on 2026-11-26 had a working keyboard and trackpad (`screens/IMG_2342.JPG`, §3.3).
 
 **Easy way:** `tools/godeep-partition.sh finish`, or `tools/godeep-partition.sh install` to update godeep later. It builds `bin/godeep-applem1.img` if it's missing or stale, copies it to the godeep boot partition as `godeep.img` (keeping the previous one as `godeep.img.prev`), and **makes m1n1 boot godeep directly, without U-Boot**.
 
@@ -499,7 +539,9 @@ Check a `boot.bin` by hand: `go run ./tools/m1n1boot -info boot.bin` reports whe
 
 **Rehearse in QEMU first: `make check-applem1`.** QEMU's `sbsa-ref` machine has RAM at 1 TB, the same base as this Mac's DRAM, so the *same* `bin/godeep-applem1.img` runs there unmodified. `tools/fakem1n1` hands it over the way m1n1 does: entry at EL2 with E2H=1, loaded away from its link address (so it self-relocates), and an m1n1-style device tree with the panel's 3456×2234 `x2r10g10b10` framebuffer. The check boots to the shell and saves the screen as a PNG. It also forces a fault at stages 1 and 3 and checks that the red fault screen appears. `make qemu-applem1` runs the same thing interactively. Its first run found a bug that would have stopped every native boot: TamaGo's heap address limit ended exactly at 1 TB (third_party/tamago/GODEEP_PATCHES.md, patch 3).
 
-What to expect on the Mac: the framebuffer clears to dark blue-grey, the boot banner and the `board:` line appear (it says `entered at EL2 (VHE, E2H=1)`), then the autorun output (`lsdev` with this Mac's devices from m1n1's tree, then `ps`, `mem`, `uptime`). If U-Boot's text or another OS appears, you didn't boot the godeep entry.
+What to expect on the Mac: the framebuffer clears to dark blue-grey, the boot banner and the `board:` line appear (it says `entered at EL2 (VHE, E2H=1)`), then the autorun output (`lsdev` with this Mac's devices from m1n1's tree, then `ps`, `mem`, `uptime`). About 5 s later, `lsdev idle watchdog hid` prints three rows that say whether idle sleeps, the watchdog is armed, and how far the keyboard got (§3.3); then type. If the Mac reboots by itself about 30 s in, the watchdog fired: godeep stopped scheduling. If U-Boot's text or another OS appears, you didn't boot the godeep entry.
+
+**One command does it all:** `make native` runs the host tests, builds the image, rehearses it on QEMU, then installs it (asks you to type `godeep`, and for sudo).
 
 **If it stops before the console**, read the top-left corner of the screen. godeep draws a numbered square for each boot stage it reaches, on m1n1's framebuffer:
 
@@ -608,7 +650,7 @@ QEMU analogs for rung 3 (same role, same godeep plumbing, different registers):
 | ANS2 NVMe | virtio-blk (submission/completion queues in DMA memory, doorbells, interrupts) |
 | DWC3 USB gadget + CDC-ECM | virtio-net (frames in and out of the gVisor stack) |
 | SMC (battery, lid, power button) | PL061 power button + PL031 RTC (events and a clock through the same service interfaces) |
-| Boot framebuffer | `ramfb` / virtio-gpu (`../GoGpuSupport.md`) |
+| Boot framebuffer | `ramfb` / virtio-gpu (`GoGpuSupport.md`) |
 
 ### 7.3 Borrow what isn't native yet
 
@@ -620,27 +662,27 @@ While a block has no native driver, something else covers it. Each row says what
 | CPU boot, MMU, timer, caches | **TamaGo `arm64`** (with the §4 patches) | stays: this *is* the native driver |
 | TCP/IP, TLS, SSH | **gVisor netstack via `go-net`**, `x/crypto/ssh` | stays: only the NIC underneath changes |
 | Screen | **firmware framebuffer** that iBoot/m1n1 already set up | DCP driver (maybe never: the framebuffer is enough) |
-| Console | framebuffer text out; **Samsung debug UART** in/out via a second Mac or the m1n1 proxy | SPI-HID keyboard (M2) |
+| Console | framebuffer text out; autorun as input; **Samsung debug UART** in/out via a second Mac or the m1n1 proxy | SPI-HID keyboard and trackpad (M2, polled: works on the Mac since 2026-11-26) |
 | PCIe links, some clocks and power domains | **m1n1** brings them up before jumping to godeep | native PMGR/PCIe drivers, when needed |
 | Networking on the Mac | **USB-C gadget Ethernet**, reusing `go-net/imx-usb`'s CDC-ECM logic on a new DWC3 driver; meanwhile the m1n1 proxy link | Wi-Fi (maybe never) |
-| Files and storage | **GODEEPDATA** (§6.6) read by Omarchy/macOS; **9P over the USB network** from the Mac (`../ReUsingGVisor.md` §5) | native NVMe (M5) |
+| Files and storage | **GODEEPDATA** (§6.6) read by Omarchy/macOS; **9P over the USB network** from the Mac (`ReUsingGVisor.md` §5) | native NVMe (M5): block layer, FAT/ext4 and the NVMe command layer are built on QEMU |
 | Entropy | **`/chosen/random-seed`** from iBoot/m1n1 seeding the DRBG | stays (no hardware RNG reachable on M1 Pro) |
-| Power off / reboot | **watchdog** reboot | SMC power-off (M3) |
+| Power off / reboot | **watchdog** reboot (built) | SMC power-off (M3) |
 
 Two strategies from this table matter most:
 - **Lean on the firmware.** iBoot and m1n1 already initialized the display, memory, PCIe and more. Using that state instead of re-initializing it removes whole drivers from the critical path. Linux on Apple Silicon started the same way.
 - **Get a network early (M4), then use the Mac as a peripheral.** Once godeep has an IP over a USB-C cable, files (9P), logs, `pprof` and even storage can come from the Mac until native drivers exist. That turns one hard driver (DWC3) into access to everything.
 
-### 7.4 Proposed structure (small additions, not yet built)
+### 7.4 Proposed structure (small additions, mostly built)
 
 These keep native drivers testable on the host and shareable between boards:
 
 | Addition | Purpose |
 |---|---|
 | ✅ `kernel/mmio`: a `Regs` interface (`Read32`/`Write32` at an offset) with a real implementation (single atomic 32-bit accesses) and a **recording fake** that can assert or replay traces | rung 2; enforces the "no read-modify-write of W1S/W1C registers" lesson in one place. *Built.* |
-| ◐ `drivers/<vendor>/<device>`: driver code as ordinary Go packages, no build tags | host tests run on every driver; boards only wire them up. *Started: `drivers/arm/{pl061,pl031}`, `drivers/virtio/mmio`, `drivers/apple/wdt`. Next: `drivers/apple/{aic,dart,asc,smc,nvme,spihid,uart}`, `drivers/virtio/{rng,blk,net}`* |
-| `board/applem1`: build-tagged `tamago && arm64 && applem1`; device list from the **FDT** m1n1 builds from the ADT (via `kernel/fdt`, as `board/virt` already does); registers the Apple drivers | the third board, next to `board/virt` |
-| Service interfaces as needed: `dev.Block`, `dev.NIC`, `dev.Framebuffer`, `dev.Keyboard` | consumers (filesystems, netstack, shell) never depend on a specific driver |
+| ◐ `drivers/<vendor>/<device>`: driver code as ordinary Go packages, no build tags | host tests run on every driver; boards only wire them up. *Built: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/mmio`, `drivers/pci`, `drivers/nvme`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`. Next: `drivers/apple/{asc,smc,ans,dart,aic,uart}`, `drivers/virtio/{rng,net}`* |
+| ✅ `board/applem1`: build-tagged `tamago && arm64 && applem1`; device list from the **FDT** m1n1 builds from the ADT (via `kernel/fdt`); registers the Apple drivers | the third board, next to `board/virt` |
+| ◐ Service interfaces as needed: ✅ `block.Device` (`kernel/block`), ✅ `dev.Rebooter`; later `dev.NIC`, `dev.Framebuffer`. (The keyboard feeds the console's byte channel instead of a service.) | consumers (filesystems, netstack, shell) never depend on a specific driver |
 | `make test` stays host-only; `make qemu` (✅ Image + device tree) and `make qemu EL2=1` (✅ m1n1-style entry) run the rung-3 checks; a `make m1-guest` target wraps m1n1's `run_guest.py` | one command per rung |
 
 ### 7.5 Definition of done for a native driver
@@ -669,13 +711,14 @@ For real-metal godeep, this order gives a visible result quickly:
 | **M0: foundation** ✅ | DMA + IOMMU interface, interrupt bridge, device manager, RTKit engine (§3) | — | **done** |
 | **M0.7: boot like Linux** ✅ | `make image`, EL2 → EL1 entry, device tree from `x0` → device list, PSCI conduit from the tree, `kernel/mmio`, first portable `drivers/` (§3.1) | `kernel/fdt`, `kernel/mmio` | **done**, tested in QEMU at EL1 and EL2 |
 | **M0.5: a place to boot** | the godeep stub, ESP and GODEEPDATA partition (§6); optionally the tethered-boot entry for m1n1 development | Asahi installer | none: just §6 |
-| **M1: hello on the laptop screen** ✅ | `board/applem1`: self-relocation, 4-level MMU, RAM + DMA layout, framebuffer console, autorun of `lsdev`/`ps`/`mem`/`uptime` (§3.1). **Booted on the Mac 2026-11-25** (§6.8, `screens/IMG_2341.JPG`). Then: WFE idle and watchdog/`reboot` (built, awaiting the Mac) | TamaGo arm64, generic timer, godeep's EL2 entry, Image format and FDT device list (M0.7), `x/image/font` | done: relocation, `kernel/pgtable`, `drivers/simplefb`, `board/applem1` |
-| **M2: interactive** ◐ | Keyboard via SPI-HID as a managed driver, polled (no AIC): the godeep shell on the built-in screen and keyboard. **Built; awaiting the Mac.** Then AIC2 (`irq.Controller`) to replace polling and spinning-free WFI | `kernel/irq`, `kernel/dev`, `kernel/fdt` phandles, godeep `tty`, `sh` | done: `drivers/apple/{pmgr,gpio,spi,spihid}`; next: AIC2 |
-| M3: coprocessors | ASC mailbox (`rtkit.Mailbox`) + DART (`dma.IOMMU`); verify the RTKit encodings; SMC (battery, lid, power button) as the first client | `kernel/rtkit`, `kernel/dma` | ASC mailbox, DART, SMC protocol |
+| **M1: hello on the laptop screen** ✅ | `board/applem1`: self-relocation, 4-level MMU, RAM + DMA layout, framebuffer console, autorun of `lsdev`/`ps`/`mem`/`uptime` (§3.1). **Booted on the Mac 2026-11-25** (§6.8, `screens/IMG_2341.JPG`). Then WFE idle and watchdog/`reboot`, confirmed on the Mac 2026-11-26 | TamaGo arm64, generic timer, godeep's EL2 entry, Image format and FDT device list (M0.7), `x/image/font` | done: relocation, `kernel/pgtable`, `drivers/simplefb`, `board/applem1` |
+| **M2: interactive** ◐ | Keyboard via SPI-HID as a managed driver, polled (no AIC): the godeep shell on the built-in screen and keyboard. **Works on the Mac (2026-11-26, `screens/IMG_2342.JPG`)**: typing, and the trackpad in multitouch mode. Then AIC2 (`irq.Controller`) to replace polling and spinning-free WFI | `kernel/irq`, `kernel/dev`, `kernel/fdt` phandles, godeep `tty`, `sh` | done: `drivers/apple/{pmgr,gpio,spi,spihid}`; next: AIC2 |
+| **M3: coprocessors** (next) | ASC mailbox (`rtkit.Mailbox`) + DART (`dma.IOMMU`); verify the RTKit encodings; SMC (battery, lid, power button, power-off) as the first client | `kernel/rtkit`, `kernel/dma` | ASC mailbox, DART, SMC protocol |
 | M4: networking | DWC3 device mode + CDC-ECM, so godeep gets an IP over a USB-C cable; SSH into it | go-net/imx-usb CDC-ECM logic, `go-net`, gVisor netstack, `x/crypto/ssh` | DWC3 gadget driver |
-| M5: storage | ANS2 NVMe on RTKit + SART, read-only; mount the Omarchy ext4 partition; use GODEEPDATA | `kernel/rtkit`, `kernel/dma`, a Go ext4 reader | NVMe queues, FAT32 |
+| **M5: storage** ◐ | ANS2 NVMe on RTKit + SART, read-only; read the Omarchy ext4 partition; use GODEEPDATA | `kernel/rtkit`, `kernel/dma` | done on QEMU (§3.3): `drivers/nvme` command layer, `kernel/block` (GPT), `fs/fat`, `fs/ext4`, `lsblk`/`ls`/`cat`; next: ANS2's differences, SART, RTKit boot (after M3) |
 | M6: everything else | SMP, Wi-Fi, audio | — | large |
 
+- **Order from here (2026-11-26):** the keyboard, trackpad, idle and watchdog work on the Mac. Two checks are left from that boot: steady-state idle (`lsdev idle` after a quiet minute) and the watchdog past 30 s. Then the second-computer loop (`docs/Using2Computers.md`, starting with `drivers/apple/uart`), M3 (mailbox, RTKit check, SMC), then M5's Apple layer, which connects the storage stack already running on QEMU to the real SSD. AIC2 when polling's cost matters. Without a second computer for m1n1's hypervisor, each native test is a reboot and a photo, so every driver reports its progress in `lsdev`.
 - **M0.5 needs no code.** Do it whenever you're ready (§6).
 - **M1** is a weekend-sized experiment once you have a boot path. It's worth doing just to see the gopher-made shell on the XDR display.
 - **M3** is where the foundation pays off: every RTKit device after it is "a protocol on an endpoint channel".
@@ -690,4 +733,4 @@ For real-metal godeep, this order gives a visible result quickly:
 - Linux / Asahi kernel drivers named in the tables above (`drivers/irqchip/irq-apple-aic.c`, `drivers/mailbox/apple-mailbox.c`, `drivers/soc/apple/rtkit*.c`, `drivers/nvme/host/apple.c`, `drivers/iommu/apple-dart.c`, `drivers/pci/controller/pcie-apple.c`, …)
 - TamaGo: `arm64` (boot, MMU, timers), `arm64/gic`, `soc/nxp/usdhc`; usbarmory `go-net` (incl. `go-net/imx-usb`)
 - `diskutil apfs resizeContainer`, `diskutil addPartition`, `diskutil apfs deleteContainer` (`diskutil <verb>` with no arguments prints usage)
-- godeep: [`DriverModel.md`](DriverModel.md) (the §3 foundation), `board/virt` (the QEMU arm64 board an M1 board would sit next to), `../GoGpuSupport.md`, `../ReUsingGVisor.md`
+- godeep: [`DriverModel.md`](DriverModel.md) (the §3 foundation), `board/virt` (the QEMU arm64 board an M1 board would sit next to), `GoGpuSupport.md`, `ReUsingGVisor.md`

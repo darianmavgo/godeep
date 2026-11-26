@@ -1,9 +1,6 @@
 package spihid
 
-import (
-	"encoding/binary"
-	"time"
-)
+import "encoding/binary"
 
 // Packet framing (Asahi spi-hid-apple-core.c, U-Boot apple_spi_kbd.c).
 // Every SPI read returns one 256-byte packet:
@@ -21,15 +18,16 @@ import (
 const (
 	PacketSize = 256
 
-	FlagRead   = 0x20
-	FlagWrite  = 0x40
-	DevMngt    = 0x0
-	DevKbd     = 0x1
-	DevTP      = 0x2
-	MsgReport  = 0x10
-	reportLen  = 10
-	reportID   = 1
-	dataOffset = 8
+	FlagRead     = 0x20
+	FlagWrite    = 0x40
+	DevMngt      = 0x0
+	DevKbd       = 0x1
+	DevTP        = 0x2
+	MsgReport    = 0x10
+	MsgSetReport = 0x52
+	reportLen    = 10
+	reportID     = 1
+	dataOffset   = 8
 )
 
 // Packet is a decoded transfer packet.
@@ -67,20 +65,14 @@ func Empty(b []byte) bool {
 	return b[0] == 0 || b[0] == 0xff
 }
 
-// KeyboardReport returns the 10-byte keyboard report in p, if it is one.
+// KeyboardReport returns the 10-byte keyboard report in a single-packet
+// message, if it is one.
 func (p Packet) KeyboardReport() ([]byte, bool) {
-	if p.Flags != FlagRead || p.Device != DevKbd || len(p.Data) < dataOffset+reportLen {
+	m, ok := ParseMessage(p.Flags, p.Device, p.Data)
+	if !ok {
 		return nil, false
 	}
-	msg := p.Data
-	if msg[0] != MsgReport || binary.LittleEndian.Uint16(msg[6:]) != reportLen {
-		return nil, false
-	}
-	r := msg[dataOffset : dataOffset+reportLen]
-	if r[0] != reportID {
-		return nil, false
-	}
-	return r, true
+	return m.KeyboardReport()
 }
 
 // CRC16 is CRC-16/ARC: polynomial 0x8005 reflected (0xa001), initial 0.
@@ -99,125 +91,102 @@ func CRC16(b []byte) uint16 {
 	return crc
 }
 
-// Key repeat, like a typical console.
-const (
-	RepeatDelay = 500 * time.Millisecond
-	RepeatRate  = 33 * time.Millisecond
-)
-
-// Decoder turns successive keyboard reports into console bytes: newly
-// pressed keys produce their bytes (US layout), the last one held repeats.
-type Decoder struct {
-	Emit func([]byte)
-
-	down     [6]byte
-	caps     bool
-	held     byte // usage code repeating, 0 if none
-	heldMods byte
-	next     time.Time
+// Message is a decoded message: the packet's flags and device, the header
+// bytes, and the payload.
+type Message struct {
+	Flags, Device       byte
+	Type, Sub, Sub2, ID byte
+	Payload             []byte
 }
 
-// Report feeds one 10-byte keyboard report.
-func (d *Decoder) Report(r []byte, now time.Time) {
-	mods := r[1]
-	var cur [6]byte
-	copy(cur[:], r[3:9])
-	if cur[0] == 0x01 { // ErrorRollOver: too many keys; keep the old state
-		return
+// ParseMessage decodes a message (8-byte header, payload, CRC) from b.
+func ParseMessage(flags, device byte, b []byte) (Message, bool) {
+	if len(b) < dataOffset {
+		return Message{}, false
 	}
-	pressed := byte(0)
-	for _, k := range cur {
-		if k == 0 || contains(d.down, k) {
-			continue
-		}
-		if k == 0x39 { // Caps Lock
-			d.caps = !d.caps
-			continue
-		}
-		if b := Translate(k, mods, d.caps); len(b) > 0 {
-			d.Emit(b)
-			pressed = k
-		}
+	n := int(binary.LittleEndian.Uint16(b[6:]))
+	if dataOffset+n > len(b) {
+		return Message{}, false
 	}
-	switch {
-	case pressed != 0:
-		d.held, d.heldMods, d.next = pressed, mods, now.Add(RepeatDelay)
-	case !contains(cur, d.held):
-		d.held = 0
-	default:
-		d.heldMods = mods
-	}
-	d.down = cur
+	return Message{Flags: flags, Device: device, Type: b[0], Sub: b[1], Sub2: b[2], ID: b[3],
+		Payload: b[dataOffset : dataOffset+n]}, true
 }
 
-// Tick emits repeats of the held key that are due by now.
-func (d *Decoder) Tick(now time.Time) {
-	if d.held == 0 || now.Before(d.next) {
-		return
+// KeyboardReport returns the 10-byte keyboard report in m, if it is one.
+// (U-Boot's checks: read, keyboard, report, length 10, report id 1.)
+func (m Message) KeyboardReport() ([]byte, bool) {
+	if m.Flags != FlagRead || m.Device != DevKbd || m.Type != MsgReport || m.Sub != DevKbd ||
+		len(m.Payload) != reportLen || m.Payload[0] != reportID {
+		return nil, false
 	}
-	if b := Translate(d.held, d.heldMods, d.caps); len(b) > 0 {
-		d.Emit(b)
-	}
-	d.next = now.Add(RepeatRate)
+	return m.Payload, true
 }
 
-func contains(a [6]byte, k byte) bool {
-	for _, x := range a {
-		if x == k && k != 0 {
-			return true
-		}
+// TrackpadReport returns a trackpad input report's payload, if m is one.
+func (m Message) TrackpadReport() ([]byte, bool) {
+	if m.Flags != FlagRead || m.Device != DevTP || m.Type != MsgReport {
+		return nil, false
 	}
-	return false
+	return m.Payload, true
 }
 
-// Modifier bits.
-const (
-	ModLCtrl  = 1 << 0
-	ModLShift = 1 << 1
-	ModLAlt   = 1 << 2
-	ModLGUI   = 1 << 3
-	ModRCtrl  = 1 << 4
-	ModRShift = 1 << 5
-	ModRAlt   = 1 << 6
-	ModRGUI   = 1 << 7
-)
+// Booted is what the device sends once after power-on.
+var Booted = []byte{0xa0, 0x80, 0x00, 0x00}
 
-// US layout, HID usages 0x1e..0x38: unshifted and shifted.
-const (
-	plain   = "1234567890\r\x1b\x7f\t -=[]\\#;'`,./"
-	shifted = "!@#$%^&*()\r\x1b\x7f\t _+{}|~:\"~<>?"
-)
+// StatusOK is the 4 bytes the device answers a write with.
+var StatusOK = []byte{0xac, 0x27, 0x68, 0xd5}
 
-// Translate maps a HID usage code and modifiers to console bytes. Ctrl+key
-// gives the control character (Ctrl-C = 0x03, which kills the foreground
-// program); arrows give ANSI sequences. Unmapped keys give nothing.
-func Translate(k, mods byte, caps bool) []byte {
-	shift := mods&(ModLShift|ModRShift) != 0
-	ctrl := mods&(ModLCtrl|ModRCtrl) != 0
-	switch {
-	case k >= 0x04 && k <= 0x1d: // a..z
-		c := 'a' + k - 0x04
-		if ctrl {
-			return []byte{c & 0x1f}
-		}
-		if shift != caps {
-			c -= 'a' - 'A'
-		}
-		return []byte{c}
-	case k >= 0x1e && k <= 0x38:
-		t := plain
-		if shift {
-			t = shifted
-		}
-		c := t[k-0x1e]
-		if k == 0x32 { // non-US # (not on this keyboard)
-			return nil
-		}
-		return []byte{c}
-	case k >= 0x4f && k <= 0x52: // right, left, down, up
-		return []byte{0x1b, '[', "CDBA"[k-0x4f]}
-	case k == 0x4c: // forward delete
-		return []byte{0x1b, '[', '3', '~'}
+// IsBooted reports whether p is the device's "booted" packet.
+func (p Packet) IsBooted() bool {
+	return p.Flags == FlagRead && p.Length == 4 && string(p.Data[:4]) == string(Booted)
+}
+
+// maxMessage bounds a reassembled message.
+const maxMessage = 0x800
+
+// assembler joins messages split over several packets (offset/remain), one
+// in progress per device.
+type assembler struct{ buf map[byte][]byte }
+
+func (a *assembler) add(p Packet) ([]byte, bool) {
+	if p.Offset == 0 && p.Remain == 0 {
+		return p.Data, true
 	}
-	return nil
+	if a.buf == nil {
+		a.buf = map[byte][]byte{}
+	}
+	n := min(int(p.Length), len(p.Data))
+	b := a.buf[p.Device]
+	if p.Offset == 0 {
+		b = b[:0]
+	}
+	if int(p.Offset) != len(b) || len(b)+n > maxMessage {
+		delete(a.buf, p.Device) // a piece is missing: drop the message
+		return nil, false
+	}
+	b = append(b, p.Data[:n]...)
+	if p.Remain != 0 {
+		a.buf[p.Device] = b
+		return nil, false
+	}
+	delete(a.buf, p.Device)
+	return b, true
+}
+
+// WritePacket builds a packet that sends a message to device (Asahi's
+// spihid_apple_request): header type/sub/sub2, a message id, the response
+// length expected, the payload, the message CRC, then the packet CRC.
+func WritePacket(device, typ, sub, sub2, id byte, rsplen uint16, payload []byte) []byte {
+	le := binary.LittleEndian
+	b := make([]byte, PacketSize)
+	b[0], b[1] = FlagWrite, device
+	le.PutUint16(b[6:], uint16(dataOffset+len(payload)+2))
+	m := b[dataOffset:]
+	m[0], m[1], m[2], m[3] = typ, sub, sub2, id
+	le.PutUint16(m[4:], rsplen)
+	le.PutUint16(m[6:], uint16(len(payload)))
+	copy(m[dataOffset:], payload)
+	le.PutUint16(m[dataOffset+len(payload):], CRC16(m[:dataOffset+len(payload)]))
+	le.PutUint16(b[PacketSize-2:], CRC16(b[:PacketSize-2]))
+	return b
 }

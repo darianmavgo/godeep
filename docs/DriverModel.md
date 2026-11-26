@@ -19,6 +19,7 @@ How drivers are structured, and the four kernel pieces every driver sits on. The
   - minimum 128-byte alignment (the M1's cache line);
   - use `align = 16384` for anything an Apple DART maps.
 - `Free` panics on double free, because two owners of a DMA buffer is a memory-corruption bug.
+- `Load32`/`Store32`: acquire/release access to words a device shares. Poll a completion's phase bit with `Load32` (a plain load can be hoisted out of the loop, or the rest of the entry read before the flag); hand an entry over with `Store32` after writing its body. The only `unsafe` outside `board/*` and `kernel/dev`.
 - `IOMMU` interface:
   - `Map(buf, dir) → iova`. Devices get the IOVA, never `Phys`.
   - `Identity` is the IOMMU for machines without one (QEMU virt).
@@ -58,7 +59,9 @@ Measured on this Mac:
   - **dependencies:** a driver starts only after everything in `Needs` is ready, and fails if a dependency fails;
   - **restart:** an error or panic in *any* of the driver's goroutines restarts it with exponential backoff, up to `MaxRestarts` (3), then marks it `failed`;
   - **lookup:** `Manager.Get(ctx, name)` waits for readiness. Consumers find services by interface (`dev.Clock`, `dev.LatencyProbe`, `dev.Lister`).
-- `lsdev` shows every device, its state, PID, restarts, IRQs, registers and service info.
+- `Node.Config` carries settings the board resolved for the driver (from the device tree: power domains, pins, a PCI function), or the **error** that prevented it. The driver returns that error, so `lsdev` shows why instead of the device silently missing.
+- **Bus drivers** add what they discover: `d.Add(Node)` registers a device and starts its driver under `devmgr`, like the boot-time ones (idempotent by name). `drivers/pci` adds one per function, compatible `pciclass,CCSSPP`, so drivers bind by class.
+- `lsdev [NAME...]` shows every device (or those whose name starts with NAME), its state, PID, restarts, IRQs, registers and service info.
 
 Drivers on QEMU virt today:
 
@@ -68,6 +71,25 @@ Drivers on QEMU virt today:
 | `rtc` | `arm,pl031` | wall clock; the board also seeds Go's clock from it at boot |
 | `virtio` | `virtio,mmio-bus` | lists attached virtio devices |
 | `ptimer` | `arm,armv8-ptimer-probe` | interrupt-latency probe |
+| `pcie@10000000` | `pci-host-ecam-generic` | scans the bus, assigns BARs, adds `nvme0` (and lists `net0`, QEMU's default NIC, no driver yet) |
+| `nvme0` | `pciclass,010802` | polled NVMe; publishes a `block.Device` for `lsblk`, `ls`, `cat` |
+| `xhci0` | `pciclass,0c0330` | polled USB host; HID boot keyboards type into the console, mice publish `input` events (`evtest`) |
+
+On the Mac image (`board/applem1`): `watchdog@2922b0000` (`apple,t6000-wdt`), `hid-transport@0` (`apple,spi-hid-transport`: the keyboard and trackpad), `idle` (the board's WFE idle statistics), and on QEMU only, `serial@…` (`arm,pl011` input).
+
+## Input
+
+Input drivers publish `input.Source`s (or `input.Sources` for a device with several, like Apple's keyboard + trackpad): events fan out through an `input.Broadcaster` that never blocks the driver (slow subscribers lose events, counted). Keyboards also type: they share `input.Keyboard`, which turns HID key state into console bytes on the channel the board hands them. There is no global event device; `evtest` finds sources among the device manager's services.
+
+## Polling, for now
+
+On the Mac there's no interrupt controller driver yet (AIC2), so drivers that would wait for an interrupt poll instead, and say so in `lsdev`:
+- the keyboard and trackpad: the SPI ready line (a GPIO) every 5 ms;
+- xHCI: the event ring and its fatal-error bit every 5 ms;
+- NVMe spins briefly on the completion's phase bit, then sleeps 50 µs between checks;
+- the board idles in WFE, woken by the timer's event stream about every 0.7 ms.
+
+The cost is wake-ups, not busy CPU: one register read per poll, on wake-ups that mostly happen anyway. Each driver is written so the switch is local: "is there work?" becomes `<-line.C` instead of a timer.
 
 ### 4. `kernel/rtkit`: Apple coprocessor protocol
 
@@ -96,7 +118,9 @@ Drivers on QEMU virt today:
 
 ## Where driver code lives
 
-- **`drivers/<vendor>/<device>`** holds portable packages with no build tags, so they're host-tested. They take a `func(base) mmio.Regs` and return a `dev.Driver`: `drivers/arm/pl061`, `drivers/arm/pl031`, `drivers/virtio/mmio`.
+- **`drivers/<vendor>/<device>`** holds portable packages with no build tags, so they're host-tested. They take a `func(base) mmio.Regs` and return a `dev.Driver`: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/mmio`, `drivers/pci`, `drivers/nvme`, `drivers/usb`, `drivers/usb/xhci`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`.
+  - Device-tree resolution that's specific to a driver lives with it and is host-tested (`spihid.ConfigFromFDT`, `pci.ConfigFromFDT`, `pmgr.FromFDT`); boards call it and put the result in `Node.Config`.
+  - Tests model the hardware: an `mmio.Fake` with `OnRead`/`OnWrite` hooks (power domains that turn on, FIFOs, an NVMe controller executing commands from DMA memory, an SPI keyboard and trackpad sending packets and receiving the multitouch write, an xHCI controller with a USB keyboard and mouse).
 - **`kernel/mmio`:** drivers use `Regs`.
   - On hardware it's a `Window`: single 32-bit atomic accesses.
   - In tests it's a `Fake` that models the device and records every access, so tests assert exact register sequences.
@@ -105,5 +129,5 @@ Drivers on QEMU virt today:
 
 ## Next drivers this enables
 
-- **QEMU virt:** virtio-rng (real entropy) and virtio-net. Both are DMA ring devices: `kernel/dma` + bridge + device manager.
-- **M1:** AIC2 (`irq.Controller`), DART (`dma.IOMMU`), ASC mailbox (`rtkit.Mailbox`), then SMC, the first RTKit client.
+- **QEMU virt:** virtio-rng (real entropy) and virtio-net (with gVisor's netstack). Next QEMU-testable and reusable on the Mac: USB hubs and mass storage on the xHCI driver, SDHCI.
+- **M1:** ASC mailbox (`rtkit.Mailbox`) and a hardware check of `kernel/rtkit`, then SMC (power-off, power button, lid, battery), the first RTKit client; then ANS2 (with SART) under `drivers/nvme`'s command layer; DART (`dma.IOMMU`); AIC2 (`irq.Controller`) to replace polling.

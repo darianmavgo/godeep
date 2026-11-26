@@ -1,7 +1,9 @@
-// Package spihid drives the internal keyboard of Apple Silicon laptops,
-// HID over SPI ("apple,spi-hid-transport"), by polling, after U-Boot's
-// apple_spi_kbd.c (U-Boot has no interrupts either). Only the keyboard is
-// handled; trackpad packets are counted and dropped.
+// Package spihid drives the internal keyboard and trackpad of Apple
+// Silicon laptops, HID over SPI ("apple,spi-hid-transport"), by polling,
+// after U-Boot's apple_spi_kbd.c (U-Boot has no interrupts either) for the
+// keyboard and Asahi's spi-hid-apple-core.c + hid-magicmouse.c for the
+// trackpad. Keys become console bytes; both devices publish input events
+// (input.Sources).
 //
 // Bring-up, all from the device tree (fdt.go): power on the SPI controller's
 // and the GPIO blocks' power domains, mux the SPI pins, set up the
@@ -14,6 +16,10 @@
 // If the line never asserts within ReadyTimeout of power-on (the keyboard
 // sends a "booted" packet then), the driver falls back to U-Boot's method:
 // a blind read every BlindInterval. lsdev shows which mode it's in.
+//
+// The trackpad needs one write: a set-report switching multitouch mode on,
+// sent once the device says it booted (or after MTDelay), and again if the
+// touch controller reports a reset.
 package spihid
 
 import (
@@ -28,6 +34,7 @@ import (
 	"godeep/drivers/apple/pmgr"
 	"godeep/drivers/apple/spi"
 	"godeep/kernel/dev"
+	"godeep/kernel/input"
 	"godeep/kernel/mmio"
 )
 
@@ -41,6 +48,11 @@ const (
 	PollInterval  = 5 * time.Millisecond
 	BlindInterval = 10 * time.Millisecond
 	ReadyTimeout  = 3 * time.Second
+	// Without a "booted" packet, switch multitouch on this long after
+	// power-on anyway.
+	MTDelay = time.Second
+	// Most multitouch set-reports sent (resets re-send).
+	maxMTWrites = 8
 	// Packets fetched per poll at most, so a stuck line can't hog the core.
 	maxBurst = 8
 	// Consecutive SPI failures before the driver gives up (and devmgr
@@ -67,6 +79,9 @@ type Config struct {
 	// Keys receives the typed bytes (sends never block: a full channel
 	// drops the byte, counted in lsdev).
 	Keys chan<- byte
+	// Trackpad: switch the trackpad to multitouch mode (one write to the
+	// device). Without it the driver only reads.
+	Trackpad bool
 }
 
 // Driver returns the keyboard driver. regs maps a register base to its
@@ -84,7 +99,7 @@ func Driver(regs func(base uint64) mmio.Regs) dev.Driver {
 }
 
 func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Config) error {
-	st := &Stats{}
+	st := &Stats{kbdEvents: &input.Broadcaster{Kind: "keyboard"}, tpEvents: &input.Broadcaster{Kind: "trackpad"}}
 	for _, dom := range c.Power {
 		sw, err := pmgr.On(ctx, regs(dom.Addr))
 		if err != nil {
@@ -122,8 +137,9 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 	}
 	poweredOn := time.Now()
 
-	k := &keyboard{ctx: ctx, c: c, ctl: ctl, st: st}
-	k.dec.Emit = k.emit
+	k := &transport{ctx: ctx, c: c, ctl: ctl, st: st}
+	k.kbd = input.Keyboard{Emit: k.emit, Events: st.kbdEvents}
+	k.tp = Trackpad{Events: st.tpEvents}
 	st.set(func() {
 		st.mode = "blind reads"
 		if c.Ready != nil {
@@ -162,24 +178,33 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 					return err
 				}
 			}
-			k.dec.Tick(now)
+			if c.Trackpad && k.mtWrites < maxMTWrites && (k.wantMT || k.mtWrites == 0 && now.Sub(poweredOn) > MTDelay) {
+				k.enableMT()
+			}
+			k.kbd.Tick(now)
 		}
 	}
 }
 
-type keyboard struct {
+// transport owns the SPI link to the keyboard and trackpad.
+type transport struct {
 	ctx      context.Context
 	c        Config
 	ctl      spi.Controller
 	st       *Stats
-	dec      Decoder
+	kbd      input.Keyboard
+	tp       Trackpad
+	asm      assembler
 	buf      [PacketSize]byte
 	sawReady bool
 	errors   int
+	msgID    byte
+	wantMT   bool // booted or reset: send the multitouch set-report
+	mtWrites int
 }
 
 // read fetches and handles one packet.
-func (k *keyboard) read() error {
+func (k *transport) read() error {
 	k.ctl.CS(true)
 	sleep(k.ctx, k.c.CSSetup)
 	err := k.ctl.Transfer(k.ctx, nil, k.buf[:])
@@ -200,25 +225,82 @@ func (k *keyboard) read() error {
 		return nil
 	}
 	p, _ := ParsePacket(k.buf[:])
-	r, isKbd := p.KeyboardReport()
+	now := time.Now()
 	k.st.set(func() {
 		k.st.packets++
 		if p.CRCOK {
 			k.st.crcOK++
 		}
-		if isKbd {
-			k.st.kbd++
+	})
+	if p.IsBooted() {
+		k.wantMT = true
+		k.st.set(func() { k.st.booted++ })
+		return nil
+	}
+	raw, done := k.asm.add(p)
+	if !done {
+		return nil
+	}
+	m, _ := ParseMessage(p.Flags, p.Device, raw)
+	if r, ok := m.KeyboardReport(); ok {
+		k.st.set(func() { k.st.kbd++ })
+		k.kbd.State(r[1], r[3:9], now)
+		return nil
+	}
+	if r, ok := m.TrackpadReport(); ok {
+		ok, reset := k.tp.Report(r, now)
+		if reset {
+			k.wantMT = true
+		}
+		k.st.set(func() {
+			k.st.tp++
+			k.st.tpTouch = k.tp.touchMode
+			if !ok && k.st.firstTP == "" {
+				k.st.firstTP = hex.EncodeToString(r[:min(len(r), 16)])
+			}
+		})
+		return nil
+	}
+	k.st.set(func() {
+		if p.Flags == FlagWrite {
+			k.st.replies++ // answers to our writes
 		} else if k.st.firstOther == "" {
 			k.st.firstOther = hex.EncodeToString(k.buf[:12])
 		}
 	})
-	if isKbd {
-		k.dec.Report(r, time.Now())
-	}
 	return nil
 }
 
-func (k *keyboard) emit(b []byte) {
+// enableMT sends the set-report that switches the trackpad to multitouch
+// mode: a write packet, then (chip select held) the 4-byte status.
+func (k *transport) enableMT() {
+	k.wantMT = false
+	k.mtWrites++
+	pkt := WritePacket(DevTP, MsgSetReport, mtEnable[0], 0, k.msgID, 2, mtEnable)
+	k.msgID++
+	status := make([]byte, 4)
+	k.ctl.CS(true)
+	sleep(k.ctx, k.c.CSSetup)
+	err := k.ctl.Transfer(k.ctx, pkt, nil)
+	if err == nil {
+		sleep(k.ctx, 200*time.Microsecond)
+		err = k.ctl.Transfer(k.ctx, nil, status)
+	}
+	sleep(k.ctx, k.c.CSHold)
+	k.ctl.CS(false)
+	sleep(k.ctx, k.c.CSInactive)
+	res := "status ok"
+	switch {
+	case err != nil:
+		res = err.Error()
+	case string(status) != string(StatusOK):
+		res = "status " + hex.EncodeToString(status)
+	}
+	n := k.mtWrites
+	k.st.set(func() { k.st.mtWrites, k.st.mtResult = n, res })
+}
+
+func (k *transport) emit(b []byte) {
 	sent, dropped := 0, 0
 	for _, x := range b {
 		select {
@@ -245,8 +327,15 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// Stats is the driver's service: lsdev shows it (dev.Lister).
+// Stats is the driver's service: lsdev shows it (dev.Lister), and the
+// keyboard's and trackpad's events come from it (input.Sources).
 type Stats struct {
+	kbdEvents, tpEvents *input.Broadcaster
+
+	booted, tp, replies, mtWrites int
+	tpTouch                       bool
+	firstTP, mtResult             string
+
 	mu                         sync.Mutex
 	domains, switched, muxed   int
 	hz                         uint64
@@ -263,6 +352,9 @@ func (s *Stats) set(f func()) {
 	f()
 }
 
+// InputSources implements input.Sources.
+func (s *Stats) InputSources() []input.Source { return []input.Source{s.kbdEvents, s.tpEvents} }
+
 func (s *Stats) note(n string) { s.set(func() { s.notes = append(s.notes, n) }) }
 
 // Devices reports bring-up and traffic, e.g. "ready pin; 7 power domains
@@ -276,6 +368,23 @@ func (s *Stats) Devices() []string {
 		fmt.Sprintf("%d power domains (%d switched on), %d pins muxed, %d MHz", s.domains, s.switched, s.muxed, s.hz/1e6),
 		fmt.Sprintf("%d packets (%d keyboard, crc ok %d), %d empty", s.packets, s.kbd, s.crcOK, s.empty),
 		fmt.Sprintf("%d keys (%d dropped)", s.keys, s.dropped),
+	}
+	tp := fmt.Sprintf("trackpad: %d reports", s.tp)
+	if s.tpTouch {
+		tp += " (multitouch)"
+	}
+	if s.mtWrites > 0 {
+		tp += fmt.Sprintf(", multitouch on: %d sent, %s", s.mtWrites, s.mtResult)
+	}
+	if s.booted > 0 {
+		tp += fmt.Sprintf(", booted packets %d", s.booted)
+	}
+	if s.replies > 0 {
+		tp += fmt.Sprintf(", %d replies", s.replies)
+	}
+	out = append(out, tp)
+	if s.firstTP != "" {
+		out = append(out, "first unrecognized trackpad report: "+s.firstTP)
 	}
 	if s.spiErrors > 0 {
 		out = append(out, fmt.Sprintf("%d SPI errors, last: %s", s.spiErrors, s.lastErr))

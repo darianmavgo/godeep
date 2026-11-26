@@ -114,6 +114,7 @@ func keyboard(root *fdt.Node, keys chan<- byte) (n dev.Node, ok bool) {
 		return n, true
 	}
 	cfg.Keys = keys
+	cfg.Trackpad = true // switch it to multitouch mode: one write to the device
 	n.Config = cfg
 	n.Reg = []dev.Range{{Base: cfg.SPI, Size: 0x4000}}
 	return n, true

@@ -62,6 +62,9 @@ QEMU_FLAGS  ?= -machine virt,gic-version=3$(MACHINE_EL2) -accel $(ACCEL) -cpu $(
 # An NVMe disk (read-only) with a FAT32 and an ext4 partition: lsblk, ls, cat.
 DISK        ?= bin/disk.img
 QEMU_DISK   := -drive if=none,id=disk0,file=$(DISK),format=raw,readonly=on -device nvme,serial=godeep0,drive=disk0
+# USB: an xHCI controller with a keyboard and a mouse (headless, they get
+# input from QMP input-send-event; see check-virt).
+QEMU_DISK   += -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
 QEMU_DEPS   := $(DISK)
 else ifeq ($(ARCH),amd64)
 # board/microvm, flags mirror usbarmory/tamago-example (TARGET=microvm).
@@ -115,8 +118,9 @@ qemu: $(if $(filter $(BOOTFILE),$(IMAGE)),image,kernel) $(QEMU_DEPS)
 	$(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(CONTROL) -kernel $(BOOTFILE)
 	@rm -f bin/qemu-$(ARCH).pid bin/qmp-$(ARCH).sock
 
-# QEMU virt, headless: boot, then read the NVMe disk's partitions through
-# PCIe, NVMe, GPT, FAT32 and ext4 from the shell (tools/qemucheck).
+# QEMU virt, headless: boot, read the NVMe disk's partitions through PCIe,
+# NVMe, GPT, FAT32 and ext4 from the shell, then type on the USB keyboard
+# and move the USB mouse through QMP (tools/qemucheck).
 check-virt:
 	@if [ "$(ARCH)" != arm64 ] || [ "$(BOARD)" = applem1 ]; then echo "check-virt is for ARCH=arm64 on QEMU virt"; exit 1; fi
 	@$(MAKE) -s image $(DISK)
@@ -127,7 +131,15 @@ check-virt:
 	  -step 'cat nvme0p2:/link-to-hello=>hello from godeep' \
 	  -step 'cat nvme0p1:/many/f123.txt=>file 123' \
 	  -step 'ls nvme0p1:/docs=>readme.md' \
-	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) -kernel $(BOOTFILE)
+	  -step 'lsdev xhci=>HID boot keyboard,HID boot mouse' \
+	  -step 'keys:help\r' -step 'wait:BUILTIN' \
+	  -step 'send:evtest 4' -step 'wait:listening' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"rel","data":{"axis":"x","value":10}},{"type":"rel","data":{"axis":"y","value":-5}}]}}' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":true,"button":"left"}}]}}' \
+	  -step 'wait:motion dx=10 dy=-5' -step 'wait:button 0 down' \
+	  -step 'lsdev xhci=>keys typed' \
+	  -qmp bin/qmp-check.sock \
+	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
 
 bin/disk.img: tools/mkdisk/main.go kernel/block/gptwrite.go $(wildcard fs/testdata/*.img.gz)
 	go run ./tools/mkdisk -o $@

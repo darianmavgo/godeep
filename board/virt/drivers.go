@@ -14,6 +14,7 @@ import (
 	"godeep/drivers/arm/pl061"
 	"godeep/drivers/nvme"
 	"godeep/drivers/pci"
+	"godeep/drivers/usb/xhci"
 	virtiommio "godeep/drivers/virtio/mmio"
 	"godeep/kernel/dev"
 	kmmio "godeep/kernel/mmio"
@@ -31,6 +32,7 @@ func init() {
 	dev.Register(virtiommio.Driver(window))
 	dev.Register(pci.Driver(window))
 	dev.Register(nvme.Driver(window))
+	dev.Register(xhci.Driver(window, consoleIn))
 	dev.Register(dev.Driver{Compatible: "arm,armv8-timer", Run: runPtimerProbe})
 	dev.Register(dev.Driver{Compatible: "arm,pl011", Run: func(ctx context.Context, d *dev.Device) error {
 		d.Ready(dev.Lister(lister{"board console (" + UARTMode + " mode)"}))

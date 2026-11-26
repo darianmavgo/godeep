@@ -126,14 +126,9 @@ func (c Controller) Transfer(ctx context.Context, tx, rx []byte) error {
 	c.R.Write32(CTRL, CTRL_RUN)
 	deadline := time.Now().Add(Timeout)
 	for ti < len(tx) || ri < len(rx) {
-		if n := int(c.R.Read32(FIFOSTAT)&FIFOSTAT_LEVEL_RX) >> 24; n > 0 {
-			for ; n > 0 && ri < len(rx); n-- {
-				rx[ri] = byte(c.R.Read32(RXDATA))
-				ri++
-			}
-			continue
-		}
-		fill()
+		// Every pass checks the deadline: the loop must never spin on a
+		// FIFO status that doesn't change (a stuck controller, or receive
+		// data reported during a send-only transfer).
 		if time.Now().After(deadline) {
 			c.R.Write32(CTRL, 0)
 			return fmt.Errorf("spi: timeout: sent %d/%d, received %d/%d", ti, len(tx), ri, len(rx))
@@ -142,6 +137,14 @@ func (c Controller) Transfer(ctx context.Context, tx, rx []byte) error {
 			c.R.Write32(CTRL, 0)
 			return err
 		}
+		if ri < len(rx) {
+			n := int(c.R.Read32(FIFOSTAT)&FIFOSTAT_LEVEL_RX) >> 24
+			for ; n > 0 && ri < len(rx); n-- {
+				rx[ri] = byte(c.R.Read32(RXDATA))
+				ri++
+			}
+		}
+		fill()
 	}
 	// The TX FIFO may still be shifting out: wait before CS is released.
 	for len(tx) > 0 && c.R.Read32(IF_XFER)&XFER_TXCOMPLETE == 0 {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"godeep/kernel/mmio"
 )
@@ -147,5 +148,24 @@ func TestClockDivClamp(t *testing.T) {
 	(Controller{f}).SetSpeed(24_000_000, 1)
 	if f.Get(CLKDIV) != CLKDIV_MAX {
 		t.Fatalf("CLKDIV %d", f.Get(CLKDIV))
+	}
+}
+
+// A send-only transfer must finish (or time out) even if the controller
+// reports receive data: that once spun the only core forever.
+func TestSendWithRXLevel(t *testing.T) {
+	f := mmio.NewFake()
+	f.Set(FIFOSTAT, 16<<24) // RX full, TX empty, forever
+	f.Set(IF_XFER, XFER_TXCOMPLETE)
+	f.OnWrite = func(f *mmio.Fake, off uint64, v uint32) bool { return off == IF_XFER } // W1C: ignore
+	done := make(chan error, 1)
+	go func() { done <- (Controller{f}).Transfer(context.Background(), make([]byte, 256), nil) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("send-only transfer never returned")
 	}
 }

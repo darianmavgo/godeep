@@ -26,10 +26,14 @@ func OnAppleHVF() bool { return read_midr()>>24&0xff == 0x61 }
 // mode is used everywhere else (TCG, future hosts and hardware).
 var UARTMode = "irq"
 
+// consoleIn is the console's input: the UART's bytes and, through the
+// xHCI driver (drivers.go), USB keyboards'.
+var consoleIn = make(chan byte, 256)
+
 // NewConsole returns the PL011 as the console. A kernel thread (pid 0,
 // "uart0") owns the UART and turns received bytes into channel sends.
 func NewConsole(b *irq.Bridge) kernel.Console {
-	in := make(chan byte, 256)
+	in := consoleIn
 	if OnAppleHVF() {
 		UARTMode = "poll"
 	}

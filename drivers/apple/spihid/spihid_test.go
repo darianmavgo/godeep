@@ -14,6 +14,7 @@ import (
 	"godeep/drivers/apple/spi"
 	"godeep/kernel/dev"
 	"godeep/kernel/fdt"
+	"godeep/kernel/input"
 	"godeep/kernel/mmio"
 	"godeep/kernel/proc"
 )
@@ -177,6 +178,12 @@ type machine struct {
 	running bool
 	spien   []bool
 	ready   bool // false: never assert the ready line
+	// writes from the driver: txcnt bytes being received, then a 4-byte
+	// status read
+	txcnt, rxcnt int
+	tx           []byte
+	writes       [][]byte
+	status       bool
 }
 
 func newMachine(ready bool) *machine {
@@ -198,12 +205,31 @@ func newMachine(ready bool) *machine {
 	m.spi.OnWrite = func(f *mmio.Fake, off uint64, v uint32) bool {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		if off == spi.CTRL {
+		switch off {
+		case spi.TXCNT:
+			m.txcnt = int(v)
+		case spi.RXCNT:
+			m.rxcnt = int(v)
+		case spi.TXDATA:
+			m.tx = append(m.tx, byte(v))
+			if len(m.tx) == m.txcnt {
+				m.writes = append(m.writes, m.tx)
+				m.tx, m.status = nil, true
+				f.Set(spi.IF_XFER, spi.XFER_TXCOMPLETE)
+			}
+		case spi.CTRL:
+			if v&(spi.CTRL_TX_RESET|spi.CTRL_RX_RESET) != 0 {
+				f.Set(spi.IF_XFER, 0)
+			}
 			m.running = v&spi.CTRL_RUN != 0
-			if m.running && m.cur == nil {
-				m.cur = make([]byte, PacketSize) // an empty read
-				if len(m.queue) > 0 {
+			if m.running && m.cur == nil && m.rxcnt > 0 {
+				switch {
+				case m.status && m.rxcnt == 4:
+					m.cur, m.status = append([]byte{}, StatusOK...), false
+				case len(m.queue) > 0:
 					m.cur, m.queue = m.queue[0], m.queue[1:]
+				default:
+					m.cur = make([]byte, PacketSize) // an empty read
 				}
 			}
 		}
@@ -214,7 +240,7 @@ func newMachine(ready bool) *machine {
 		defer m.mu.Unlock()
 		switch off {
 		case spi.FIFOSTAT:
-			if !m.running {
+			if !m.running || m.cur == nil {
 				return 0, true
 			}
 			return uint32(min(len(m.cur), spi.FifoDepth)) << 24, true
@@ -312,7 +338,7 @@ func TestTyping(t *testing.T) {
 	booted := make([]byte, PacketSize)
 	copy(booted, []byte{FlagRead, DevMngt, 0, 0, 0, 0, 4, 0, 0xa0, 0x80, 0, 0})
 	m.send(booted,
-		kbdPacket(ModLShift, 0x0b), kbdPacket(0), // H
+		kbdPacket(input.ModLShift, 0x0b), kbdPacket(0), // H
 		kbdPacket(0, 0x0c), kbdPacket(0), // i
 		kbdPacket(0, 0x28), kbdPacket(0)) // Enter
 	if got := readKeys(t, keys, 3); got != "Hi\r" {
@@ -338,7 +364,7 @@ func TestTyping(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"ready pin", "8 power domains (7 switched on)", "4 pins muxed", "8 MHz",
-		"7 packets (6 keyboard, crc ok 6)", "3 keys", "first other packet: 2000"} {
+		"7 packets (6 keyboard, crc ok 6)", "3 keys", "booted packets 1"} {
 		if !strings.Contains(info, want) {
 			t.Fatalf("lsdev info %q lacks %q", info, want)
 		}

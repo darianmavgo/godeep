@@ -1,0 +1,815 @@
+// Package xhci drives a USB 3 host controller (xHCI, PCI class 0c0330),
+// polled: controller reset and start, command and event rings, port reset,
+// device addressing, descriptors, configuration, and interrupt IN transfers
+// for HID boot keyboards and mice. Devices must be on root ports (no hub
+// support yet).
+//
+// QEMU emulates it (qemu-xhci, usb-kbd, usb-mouse). Apple Silicon's USB-C
+// ports are DWC3 controllers in xHCI host mode, so the same driver serves
+// them once the Apple-specific PHY and USB-C port controller are set up.
+//
+// One goroutine (the driver's) owns the controller: it enumerates, then
+// polls the event ring and the ports every PollInterval.
+package xhci
+
+import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"godeep/drivers/pci"
+	"godeep/drivers/usb"
+	"godeep/kernel/dev"
+	"godeep/kernel/dma"
+	"godeep/kernel/input"
+	"godeep/kernel/mmio"
+)
+
+// Compatible is the PCI class string for xHCI.
+const Compatible = "pciclass,0c0330"
+
+// Capability registers.
+const (
+	CAPLENGTH  = 0x00 // byte 0; HCIVERSION in bytes 2-3
+	HCSPARAMS1 = 0x04
+	HCSPARAMS2 = 0x08
+	HCCPARAMS1 = 0x10
+	DBOFF      = 0x14
+	RTSOFF     = 0x18
+)
+
+// Operational registers (from CAPLENGTH).
+const (
+	USBCMD  = 0x00
+	USBSTS  = 0x04
+	CRCR    = 0x18 // 64-bit
+	DCBAAP  = 0x30 // 64-bit
+	CONFIG  = 0x38
+	PORTSC0 = 0x400 // + 0x10 per port
+
+	CMD_RUN   = 1 << 0
+	CMD_RESET = 1 << 1
+	STS_HALT  = 1 << 0
+	STS_HSE   = 1 << 2 // host system error
+	STS_CNR   = 1 << 11
+)
+
+// PORTSC bits.
+const (
+	PORT_CCS = 1 << 0
+	PORT_PED = 1 << 1 // write 1 disables the port
+	PORT_PR  = 1 << 4
+	PORT_PP  = 1 << 9
+	PORT_CSC = 1 << 17
+	PORT_PEC = 1 << 18
+	PORT_WRC = 1 << 19
+	PORT_OCC = 1 << 20
+	PORT_PRC = 1 << 21
+	PORT_PLC = 1 << 22
+	PORT_CEC = 1 << 23
+
+	portChanges = PORT_CSC | PORT_PEC | PORT_WRC | PORT_OCC | PORT_PRC | PORT_PLC | PORT_CEC
+	portKeep    = PORT_PP | 7<<25 // power and wake enables: preserved on every write
+)
+
+// Interrupter 0 (from RTSOFF + 0x20).
+const (
+	IMAN   = 0x00
+	ERSTSZ = 0x08
+	ERSTBA = 0x10 // 64-bit
+	ERDP   = 0x18 // 64-bit; bit 3 (EHB) write-1-to-clear
+)
+
+// TRB types and completion codes.
+const (
+	trbNormal      = 1
+	trbSetup       = 2
+	trbData        = 3
+	trbStatus      = 4
+	trbLink        = 6
+	trbEnableSlot  = 9
+	trbAddress     = 11
+	trbConfigureEP = 12
+	trbEvaluate    = 13
+	trbTransferEv  = 32
+	trbCommandEv   = 33
+	trbPortEv      = 34
+
+	ccSuccess = 1
+	ccShort   = 13
+
+	trbCycle = 1 << 0
+	trbTC    = 1 << 1 // link: toggle cycle
+	trbISP   = 1 << 2
+	trbIOC   = 1 << 5
+	trbIDT   = 1 << 6
+	trbDirIn = 1 << 16
+)
+
+const (
+	ringTRBs     = 64
+	maxSlots     = 8
+	PollInterval = 5 * time.Millisecond
+	cmdTimeout   = 2 * time.Second
+)
+
+// Driver returns the xHCI driver. keys receives typed bytes from USB
+// keyboards (nil: keys only as events); regs maps BAR0.
+func Driver(regs func(base uint64) mmio.Regs, keys chan<- byte) dev.Driver {
+	return dev.Driver{Compatible: Compatible, Run: func(ctx context.Context, d *dev.Device) error {
+		f, ok := d.Config.(*pci.Function)
+		if !ok || f.BARs[0].Size == 0 {
+			return errors.New("xhci: no PCI function with a BAR0")
+		}
+		if d.DMA == nil {
+			return errors.New("xhci: the board has no DMA region")
+		}
+		h := &hc{r: regs(f.BARs[0].CPU), dma: d.DMA, keys: keys, svc: &Service{}}
+		defer h.free()
+		if err := h.init(ctx); err != nil {
+			return err
+		}
+		d.Ready(h.svc)
+		h.scanPorts(ctx)
+		t := time.NewTicker(PollInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				h.r.Write32(h.op+USBCMD, 0)
+				return nil
+			case now := <-t.C:
+				if err := h.poll(ctx, now); err != nil {
+					return err
+				}
+			}
+		}
+	}}
+}
+
+// Service is the driver's service: lsdev lines and the HID devices'
+// input sources.
+type Service struct {
+	mu            sync.Mutex
+	lines         []string
+	sources       []input.Source
+	keys, dropped int
+}
+
+func (s *Service) Devices() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := append([]string{}, s.lines...)
+	if s.keys > 0 || s.dropped > 0 {
+		out = append(out, fmt.Sprintf("%d keys typed (%d dropped)", s.keys, s.dropped))
+	}
+	return out
+}
+
+func (s *Service) InputSources() []input.Source {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]input.Source{}, s.sources...)
+}
+
+func (s *Service) addLine(l string) {
+	s.mu.Lock()
+	s.lines = append(s.lines, l)
+	s.mu.Unlock()
+}
+
+// ring is a producer ring (command or transfer): TRBs, the last a link back.
+type ring struct {
+	buf *dma.Buffer
+	enq int
+	pcs uint32
+}
+
+func newRing(a *dma.Allocator) (*ring, error) {
+	b, err := a.Alloc(ringTRBs*16, 64)
+	if err != nil {
+		return nil, err
+	}
+	binary.LittleEndian.PutUint64(b.Bytes[(ringTRBs-1)*16:], b.Phys)
+	return &ring{buf: b, pcs: 1}, nil
+}
+
+// push writes a TRB (the cycle bit last, with release ordering) and returns
+// its address.
+func (r *ring) push(param uint64, status, control uint32) uint64 {
+	off := r.enq * 16
+	binary.LittleEndian.PutUint64(r.buf.Bytes[off:], param)
+	binary.LittleEndian.PutUint32(r.buf.Bytes[off+8:], status)
+	r.buf.Store32(off+12, control&^trbCycle|r.pcs)
+	addr := r.buf.Phys + uint64(off)
+	r.enq++
+	if r.enq == ringTRBs-1 { // hand the link TRB over, then wrap
+		r.buf.Store32((ringTRBs-1)*16+12, trbLink<<10|trbTC|r.pcs)
+		r.enq, r.pcs = 0, r.pcs^1
+	}
+	return addr
+}
+
+// event is a TRB from the event ring.
+type event struct {
+	param       uint64
+	status, ctl uint32
+}
+
+func (e event) typ() int      { return int(e.ctl >> 10 & 0x3f) }
+func (e event) code() int     { return int(e.status >> 24) }
+func (e event) slot() int     { return int(e.ctl >> 24) }
+func (e event) ep() int       { return int(e.ctl >> 16 & 0x1f) }
+func (e event) residual() int { return int(e.status & 0xffffff) }
+
+// endpoint is a configured interrupt IN endpoint of a HID device.
+type endpoint struct {
+	slot, dci int
+	ring      *ring
+	buf       *dma.Buffer
+	size      int
+	pending   bool
+	handle    func([]byte, time.Time)
+}
+
+// device is an addressed USB device.
+type device struct {
+	slot, port int
+	speed      usb.Speed
+	in, out    *dma.Buffer // input and output (device) contexts
+	ep0        *ring
+	mps0       int
+	desc       usb.DeviceDesc
+}
+
+type hc struct {
+	r           mmio.Regs
+	dma         *dma.Allocator
+	keys        chan<- byte
+	svc         *Service
+	op, rt, db  uint64
+	ports       int
+	ctxSize     int
+	dcbaa       *dma.Buffer
+	scratch     []*dma.Buffer
+	cmd         *ring
+	evSeg, erst *dma.Buffer
+	evDeq       int
+	evCCS       uint32
+	devs        map[int]*device // by port
+	eps         []*endpoint
+	queued      []event // events read while waiting for something else
+	kbds        []*usb.BootKeyboard
+	allocs      []*dma.Buffer
+}
+
+func (h *hc) alloc(size, align int) (*dma.Buffer, error) {
+	b, err := h.dma.Alloc(size, align)
+	if err == nil {
+		h.allocs = append(h.allocs, b)
+	}
+	return b, err
+}
+
+func (h *hc) free() {
+	for _, b := range h.allocs {
+		b.Free()
+	}
+	h.allocs = nil
+}
+
+func (h *hc) write64(off, v uint64) {
+	h.r.Write32(off, uint32(v))
+	h.r.Write32(off+4, uint32(v>>32))
+}
+
+func (h *hc) waitOp(ctx context.Context, reg uint64, mask, want uint32, what string) error {
+	deadline := time.Now().Add(time.Second)
+	for h.r.Read32(h.op+reg)&mask != want {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("xhci: timeout waiting for %s", what)
+		}
+		if err := sleep(ctx, time.Millisecond); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *hc) init(ctx context.Context) error {
+	h.op = uint64(h.r.Read32(CAPLENGTH) & 0xff)
+	sp1, sp2, cp1 := h.r.Read32(HCSPARAMS1), h.r.Read32(HCSPARAMS2), h.r.Read32(HCCPARAMS1)
+	h.db, h.rt = uint64(h.r.Read32(DBOFF)&^3), uint64(h.r.Read32(RTSOFF)&^0x1f)
+	h.ports = int(sp1 >> 24)
+	slots := min(int(sp1&0xff), maxSlots)
+	h.ctxSize = 32
+	if cp1&(1<<2) != 0 {
+		h.ctxSize = 64
+	}
+	if cp1&1 == 0 {
+		return errors.New("xhci: controller can't address 64-bit memory")
+	}
+	h.devs = map[int]*device{}
+
+	if err := h.waitOp(ctx, USBSTS, STS_CNR, 0, "controller ready"); err != nil {
+		return err
+	}
+	h.r.Write32(h.op+USBCMD, 0)
+	if err := h.waitOp(ctx, USBSTS, STS_HALT, STS_HALT, "halt"); err != nil {
+		return err
+	}
+	h.r.Write32(h.op+USBCMD, CMD_RESET)
+	if err := h.waitOp(ctx, USBCMD, CMD_RESET, 0, "reset"); err != nil {
+		return err
+	}
+	if err := h.waitOp(ctx, USBSTS, STS_CNR, 0, "controller ready after reset"); err != nil {
+		return err
+	}
+	h.r.Write32(h.op+CONFIG, uint32(slots))
+
+	var err error
+	if h.dcbaa, err = h.alloc((maxSlots+1)*8, 64); err != nil {
+		return err
+	}
+	if n := int(sp2>>27&0x1f | sp2>>21&0x1f<<5); n > 0 { // scratchpad buffers
+		arr, err := h.alloc(n*8, 64)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			p, err := h.alloc(4096, 4096)
+			if err != nil {
+				return err
+			}
+			binary.LittleEndian.PutUint64(arr.Bytes[8*i:], p.Phys)
+		}
+		binary.LittleEndian.PutUint64(h.dcbaa.Bytes, arr.Phys)
+	}
+	h.write64(h.op+DCBAAP, h.dcbaa.Phys)
+
+	if h.cmd, err = newRing(h.dma); err != nil {
+		return err
+	}
+	h.allocs = append(h.allocs, h.cmd.buf)
+	h.write64(h.op+CRCR, h.cmd.buf.Phys|1)
+
+	if h.evSeg, err = h.alloc(ringTRBs*16, 64); err != nil {
+		return err
+	}
+	if h.erst, err = h.alloc(16, 64); err != nil {
+		return err
+	}
+	binary.LittleEndian.PutUint64(h.erst.Bytes, h.evSeg.Phys)
+	binary.LittleEndian.PutUint32(h.erst.Bytes[8:], ringTRBs)
+	h.evCCS = 1
+	ir := h.rt + 0x20
+	h.r.Write32(ir+ERSTSZ, 1)
+	h.write64(ir+ERDP, h.evSeg.Phys)
+	h.write64(ir+ERSTBA, h.erst.Phys)
+	h.r.Write32(ir+IMAN, 1) // polled: interrupts off, pending flag cleared
+
+	h.r.Write32(h.op+USBCMD, CMD_RUN)
+	if err := h.waitOp(ctx, USBSTS, STS_HALT, 0, "run"); err != nil {
+		return err
+	}
+	v := h.r.Read32(CAPLENGTH) >> 16
+	h.svc.addLine(fmt.Sprintf("xHCI %x.%02x, %d ports, %d slots", v>>8, v&0xff, h.ports, slots))
+	return nil
+}
+
+// nextEvent returns the next event TRB, if any, and moves the dequeue
+// pointer on.
+func (h *hc) nextEvent() (event, bool) {
+	off := h.evDeq * 16
+	ctl := h.evSeg.Load32(off + 12) // acquire: the cycle bit says the TRB is complete
+	if ctl&1 != h.evCCS {
+		return event{}, false
+	}
+	e := event{param: uint64(h.evSeg.Load32(off)) | uint64(h.evSeg.Load32(off+4))<<32,
+		status: h.evSeg.Load32(off + 8), ctl: ctl}
+	h.evDeq++
+	if h.evDeq == ringTRBs {
+		h.evDeq, h.evCCS = 0, h.evCCS^1
+	}
+	h.write64(h.rt+0x20+ERDP, h.evSeg.Phys+uint64(h.evDeq*16)|1<<3)
+	return e, true
+}
+
+// wait polls the event ring until match accepts an event; others are
+// queued for the main loop.
+func (h *hc) wait(ctx context.Context, what string, match func(event) bool) (event, error) {
+	deadline := time.Now().Add(cmdTimeout)
+	for spins := 0; ; spins++ {
+		if e, ok := h.nextEvent(); ok {
+			if match(e) {
+				return e, nil
+			}
+			h.queued = append(h.queued, e)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return event{}, fmt.Errorf("xhci: timeout waiting for %s", what)
+		}
+		if spins > 100 {
+			if err := sleep(ctx, 100*time.Microsecond); err != nil {
+				return event{}, err
+			}
+		}
+	}
+}
+
+// command runs a command and returns its completion's slot ID.
+func (h *hc) command(ctx context.Context, param uint64, status, ctl uint32) (int, error) {
+	addr := h.cmd.push(param, status, ctl)
+	h.r.Write32(h.db, 0)
+	e, err := h.wait(ctx, "a command", func(e event) bool { return e.typ() == trbCommandEv && e.param == addr })
+	if err != nil {
+		return 0, err
+	}
+	if e.code() != ccSuccess {
+		return 0, fmt.Errorf("xhci: command %d failed with code %d", ctl>>10&0x3f, e.code())
+	}
+	return e.slot(), nil
+}
+
+func (h *hc) portsc(port int) uint64 { return h.op + PORTSC0 + 0x10*uint64(port-1) }
+
+// scanPorts enumerates devices on ports that have one and none yet.
+func (h *hc) scanPorts(ctx context.Context) {
+	for port := 1; port <= h.ports; port++ {
+		v := h.r.Read32(h.portsc(port))
+		if v&portChanges != 0 { // acknowledge, preserving everything else
+			h.r.Write32(h.portsc(port), v&portKeep|v&portChanges)
+		}
+		if v&PORT_CCS == 0 {
+			if _, ok := h.devs[port]; ok {
+				delete(h.devs, port) // unplugged (its slot and endpoints are abandoned)
+				h.svc.addLine(fmt.Sprintf("port %d: disconnected", port))
+			}
+			continue
+		}
+		if _, ok := h.devs[port]; ok {
+			continue
+		}
+		if err := h.attach(ctx, port); err != nil {
+			h.devs[port] = &device{port: port} // don't retry every poll
+			h.svc.addLine(fmt.Sprintf("port %d: %v", port, err))
+		}
+	}
+}
+
+func (h *hc) poll(ctx context.Context, now time.Time) error {
+	if h.r.Read32(h.op+USBSTS)&STS_HSE != 0 {
+		return errors.New("xhci: host system error")
+	}
+	for {
+		e, ok := h.nextEvent()
+		if !ok {
+			break
+		}
+		h.queued = append(h.queued, e)
+	}
+	evs := h.queued
+	h.queued = nil
+	rescan := false
+	for _, e := range evs {
+		switch e.typ() {
+		case trbPortEv:
+			rescan = true
+		case trbTransferEv:
+			for _, ep := range h.eps {
+				if ep.slot == e.slot() && ep.dci == e.ep() && ep.pending {
+					ep.pending = false
+					if c := e.code(); c == ccSuccess || c == ccShort {
+						n := max(0, ep.size-e.residual())
+						ep.handle(ep.buf.Bytes[:n], now)
+					}
+				}
+			}
+		}
+	}
+	for _, ep := range h.eps {
+		if !ep.pending {
+			h.queueIn(ep)
+		}
+	}
+	for _, k := range h.kbds {
+		k.Tick(now)
+	}
+	if rescan {
+		h.scanPorts(ctx)
+	}
+	return nil
+}
+
+func (h *hc) queueIn(ep *endpoint) {
+	ep.ring.push(ep.buf.Phys, uint32(ep.size), trbNormal<<10|trbIOC|trbISP)
+	ep.pending = true
+	h.r.Write32(h.db+4*uint64(ep.slot), uint32(ep.dci))
+}
+
+// resetPort resets a USB 2 port (USB 3 ports enable themselves) and
+// returns its speed.
+func (h *hc) resetPort(ctx context.Context, port int) (usb.Speed, error) {
+	reg := h.portsc(port)
+	if v := h.r.Read32(reg); v&PORT_PED == 0 {
+		h.r.Write32(reg, v&portKeep|PORT_PR)
+		deadline := time.Now().Add(time.Second)
+		for {
+			v = h.r.Read32(reg)
+			if v&PORT_PRC != 0 && v&PORT_PR == 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				return 0, errors.New("port reset timed out")
+			}
+			if err := sleep(ctx, time.Millisecond); err != nil {
+				return 0, err
+			}
+		}
+		h.r.Write32(reg, v&portKeep|v&portChanges)
+	}
+	v := h.r.Read32(reg)
+	if v&PORT_PED == 0 {
+		return 0, errors.New("port not enabled after reset")
+	}
+	return usb.Speed(v >> 10 & 0xf), nil
+}
+
+// context offsets inside an input context (the input control context
+// comes first) and a device context.
+func (h *hc) inCtx(i int) int  { return (i + 1) * h.ctxSize } // 0 slot, 1 EP0, ...
+func (h *hc) outCtx(i int) int { return i * h.ctxSize }
+
+func put32(b []byte, off int, v uint32) { binary.LittleEndian.PutUint32(b[off:], v) }
+
+func (h *hc) attach(ctx context.Context, port int) error {
+	speed, err := h.resetPort(ctx, port)
+	if err != nil {
+		return err
+	}
+	slot, err := h.command(ctx, 0, 0, trbEnableSlot<<10)
+	if err != nil {
+		return err
+	}
+	d := &device{slot: slot, port: port, speed: speed, mps0: speed.DefaultMaxPacket0()}
+	if d.out, err = h.alloc(32*h.ctxSize, 64); err != nil {
+		return err
+	}
+	if d.in, err = h.alloc(33*h.ctxSize, 64); err != nil {
+		return err
+	}
+	if d.ep0, err = newRing(h.dma); err != nil {
+		return err
+	}
+	h.allocs = append(h.allocs, d.ep0.buf)
+	binary.LittleEndian.PutUint64(h.dcbaa.Bytes[8*slot:], d.out.Phys)
+
+	in := d.in.Bytes
+	put32(in, 4, 1<<0|1<<1) // add slot and EP0
+	put32(in, h.inCtx(0), uint32(speed)<<20|1<<27)
+	put32(in, h.inCtx(0)+4, uint32(port)<<16)
+	h.ep0Ctx(d)
+	if _, err := h.command(ctx, d.in.Phys, 0, trbAddress<<10|uint32(slot)<<24); err != nil {
+		return fmt.Errorf("address device: %w", err)
+	}
+
+	buf, err := h.alloc(512, 64)
+	if err != nil {
+		return err
+	}
+	b, err := h.control(ctx, d, usb.GetDescriptor(usb.DescDevice, 0, 8), buf)
+	if err != nil {
+		return fmt.Errorf("device descriptor: %w", err)
+	}
+	dd, err := usb.ParseDevice(b)
+	if err != nil {
+		return err
+	}
+	if dd.MaxPacket0 != d.mps0 && dd.MaxPacket0 > 0 { // evaluate context with the real size
+		d.mps0 = dd.MaxPacket0
+		clear(in)
+		put32(in, 4, 1<<1)
+		h.ep0Ctx(d)
+		if _, err := h.command(ctx, d.in.Phys, 0, trbEvaluate<<10|uint32(slot)<<24); err != nil {
+			return fmt.Errorf("evaluate context: %w", err)
+		}
+	}
+	if b, err = h.control(ctx, d, usb.GetDescriptor(usb.DescDevice, 0, 18), buf); err != nil {
+		return fmt.Errorf("device descriptor: %w", err)
+	}
+	if d.desc, err = usb.ParseDevice(b); err != nil {
+		return err
+	}
+	if b, err = h.control(ctx, d, usb.GetDescriptor(usb.DescConfig, 0, 9), buf); err != nil || len(b) < 4 {
+		return fmt.Errorf("configuration descriptor: %v", err)
+	}
+	total := min(int(binary.LittleEndian.Uint16(b[2:])), len(buf.Bytes))
+	if b, err = h.control(ctx, d, usb.GetDescriptor(usb.DescConfig, 0, total), buf); err != nil {
+		return fmt.Errorf("configuration descriptor: %w", err)
+	}
+	cfg, err := usb.ParseConfig(b)
+	if err != nil {
+		return err
+	}
+	h.devs[port] = d
+	if _, err := h.control(ctx, d, usb.Setup{Request: usb.ReqSetConfiguration, Value: uint16(cfg.Value)}, nil); err != nil {
+		return fmt.Errorf("set configuration: %w", err)
+	}
+
+	var kinds []string
+	for _, it := range cfg.Interfaces {
+		kind := it.BootKind()
+		if kind == "" || it.Alt != 0 {
+			continue
+		}
+		for _, e := range it.Endpoints {
+			if !e.IsInterruptIn() {
+				continue
+			}
+			if err := h.hidEndpoint(ctx, d, it, e, kind); err != nil {
+				return fmt.Errorf("%s: %w", kind, err)
+			}
+			kinds = append(kinds, kind)
+			break
+		}
+	}
+	what := "no driver for its interfaces"
+	if len(kinds) > 0 {
+		what = "HID boot " + strings.Join(kinds, ", ")
+	}
+	h.svc.addLine(fmt.Sprintf("port %d: %04x:%04x, %s, slot %d: %s", port, d.desc.Vendor, d.desc.Product, speed, slot, what))
+	return nil
+}
+
+func (h *hc) ep0Ctx(d *device) {
+	c := h.inCtx(1)
+	in := d.in.Bytes
+	put32(in, c+4, 3<<1|4<<3|uint32(d.mps0)<<16) // CErr 3, control endpoint
+	binary.LittleEndian.PutUint64(in[c+8:], d.ep0.buf.Phys+uint64(d.ep0.enq*16)|uint64(d.ep0.pcs))
+	put32(in, c+16, 8) // average TRB length
+}
+
+// control runs a control transfer on EP0 and returns the bytes read.
+func (h *hc) control(ctx context.Context, d *device, s usb.Setup, buf *dma.Buffer) ([]byte, error) {
+	setup := uint64(s.RequestType) | uint64(s.Request)<<8 | uint64(s.Value)<<16 | uint64(s.Index)<<32 | uint64(s.Length)<<48
+	in := s.RequestType&0x80 != 0
+	trt := uint32(0)
+	if s.Length > 0 {
+		trt = 2
+		if in {
+			trt = 3
+		}
+	}
+	d.ep0.push(setup, 8, trbSetup<<10|trbIDT|trt<<16)
+	var dataTRB uint64
+	if s.Length > 0 {
+		dir := uint32(0)
+		if in {
+			dir = trbDirIn
+		}
+		dataTRB = d.ep0.push(buf.Phys, uint32(s.Length), trbData<<10|dir|trbISP|trbIOC)
+	}
+	statusDir := uint32(trbDirIn)
+	if s.Length > 0 && in {
+		statusDir = 0
+	}
+	status := d.ep0.push(0, 0, trbStatus<<10|statusDir|trbIOC)
+	h.r.Write32(h.db+4*uint64(d.slot), 1)
+
+	n := int(s.Length)
+	if dataTRB != 0 {
+		e, err := h.wait(ctx, "control data", func(e event) bool {
+			return e.typ() == trbTransferEv && e.slot() == d.slot && e.ep() == 1 && (e.param == dataTRB || e.param == status)
+		})
+		if err != nil {
+			return nil, err
+		}
+		if c := e.code(); c != ccSuccess && c != ccShort {
+			return nil, fmt.Errorf("transfer failed with code %d", c)
+		}
+		if e.param == dataTRB {
+			n -= e.residual()
+		} else {
+			return buf.Bytes[:n], nil // the status stage completed first: nothing short
+		}
+	}
+	e, err := h.wait(ctx, "control status", func(e event) bool {
+		return e.typ() == trbTransferEv && e.slot() == d.slot && e.ep() == 1 && e.param == status
+	})
+	if err != nil {
+		return nil, err
+	}
+	if c := e.code(); c != ccSuccess {
+		return nil, fmt.Errorf("status stage failed with code %d", c)
+	}
+	if buf == nil {
+		return nil, nil
+	}
+	return buf.Bytes[:max(0, n)], nil
+}
+
+// hidEndpoint configures an interrupt IN endpoint and starts reading it.
+func (h *hc) hidEndpoint(ctx context.Context, d *device, it usb.Interface, e usb.Endpoint, kind string) error {
+	if _, err := h.control(ctx, d, usb.Setup{RequestType: usb.ReqTypeClassIf, Request: usb.ReqSetProtocol, Index: uint16(it.Number)}, nil); err != nil {
+		return fmt.Errorf("set boot protocol: %w", err)
+	}
+	if kind == "keyboard" { // reports only on change
+		h.control(ctx, d, usb.Setup{RequestType: usb.ReqTypeClassIf, Request: usb.ReqSetIdle, Index: uint16(it.Number)}, nil)
+	}
+	r, err := newRing(h.dma)
+	if err != nil {
+		return err
+	}
+	h.allocs = append(h.allocs, r.buf)
+	buf, err := h.alloc(max(e.MaxPacket, 8), 64)
+	if err != nil {
+		return err
+	}
+	dci := 2*e.Num() + 1
+	in := d.in.Bytes
+	clear(in)
+	put32(in, 4, 1<<0|1<<uint(dci))
+	// slot context from the output context, with the new last endpoint
+	copy(in[h.inCtx(0):h.inCtx(0)+h.ctxSize], d.out.Bytes[h.outCtx(0):h.outCtx(0)+h.ctxSize])
+	sc := binary.LittleEndian.Uint32(in[h.inCtx(0):])
+	entries := max(int(sc>>27), dci) // the last valid endpoint: only ever grows
+	put32(in, h.inCtx(0), sc&^(0x1f<<27)|uint32(entries)<<27)
+	c := h.inCtx(dci)
+	put32(in, c, uint32(interval(d.speed, e.Interval))<<16)
+	put32(in, c+4, 3<<1|7<<3|uint32(e.MaxPacket)<<16) // CErr 3, interrupt IN
+	binary.LittleEndian.PutUint64(in[c+8:], r.buf.Phys|1)
+	put32(in, c+16, uint32(e.MaxPacket)<<16|uint32(e.MaxPacket)) // max ESIT payload, average TRB length
+	if _, err := h.command(ctx, d.in.Phys, 0, trbConfigureEP<<10|uint32(d.slot)<<24); err != nil {
+		return fmt.Errorf("configure endpoint: %w", err)
+	}
+
+	ep := &endpoint{slot: d.slot, dci: dci, ring: r, buf: buf, size: e.MaxPacket}
+	events := &input.Broadcaster{Kind: kind}
+	switch kind {
+	case "keyboard":
+		k := &usb.BootKeyboard{}
+		k.Events = events
+		k.Emit = h.emit
+		h.kbds = append(h.kbds, k)
+		ep.handle = k.Report
+	default:
+		m := &usb.BootMouse{Events: events}
+		ep.handle = m.Report
+	}
+	h.eps = append(h.eps, ep)
+	h.svc.mu.Lock()
+	h.svc.sources = append(h.svc.sources, events)
+	h.svc.mu.Unlock()
+	h.queueIn(ep)
+	return nil
+}
+
+// interval converts bInterval to the endpoint context's exponent (in
+// 125 µs units): frames for low/full speed, already 2^(n-1) microframes
+// for high and SuperSpeed.
+func interval(s usb.Speed, b byte) int {
+	if s == usb.High || s == usb.Super {
+		return max(0, min(int(b)-1, 15))
+	}
+	n := 3 // 1 ms = 8 microframes
+	for f := 2; f <= int(b) && n < 10; f *= 2 {
+		n++
+	}
+	return n
+}
+
+func (h *hc) emit(b []byte) {
+	sent, dropped := 0, 0
+	for _, x := range b {
+		if h.keys == nil {
+			dropped++
+			continue
+		}
+		select {
+		case h.keys <- x:
+			sent++
+		default:
+			dropped++
+		}
+	}
+	h.svc.mu.Lock()
+	h.svc.keys += sent
+	h.svc.dropped += dropped
+	h.svc.mu.Unlock()
+}
+
+func sleep(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
