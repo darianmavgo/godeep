@@ -1,5 +1,5 @@
 // Package nvme drives an NVM Express controller over PCIe (class 010802),
-// polled, read-only: it brings the controller up, identifies it and its
+// polled, reads and writes: it brings the controller up, identifies it and its
 // first namespace, creates one I/O queue pair and serves block reads. The
 // published service is a block.Device.
 //
@@ -57,6 +57,7 @@ const (
 	opCreateCQ = 0x05
 	opIdentify = 0x06
 	opRead     = 0x02
+	opWrite    = 0x01
 )
 
 const (
@@ -95,7 +96,11 @@ func Driver(regs func(base uint64) mmio.Regs) dev.Driver {
 			case <-ctx.Done():
 				return nil
 			case r := <-disk.reqs:
-				r.done <- c.read(ctx, r.lba, r.p)
+				if r.write {
+					r.done <- c.write(ctx, r.lba, r.p)
+				} else {
+					r.done <- c.read(ctx, r.lba, r.p)
+				}
 			}
 		}
 	}}
@@ -110,19 +115,29 @@ type Disk struct {
 }
 
 type req struct {
-	lba  uint64
-	p    []byte
-	done chan error
+	lba   uint64
+	p     []byte
+	write bool
+	done  chan error
 }
 
 func (d *Disk) BlockSize() int    { return d.bs }
 func (d *Disk) Blocks() uint64    { return d.blocks }
 func (d *Disk) Devices() []string { return []string{d.info} }
 func (d *Disk) ReadBlocks(ctx context.Context, lba uint64, p []byte) error {
+	return d.do(ctx, lba, p, false)
+}
+
+// WriteBlocks implements block.Writer.
+func (d *Disk) WriteBlocks(ctx context.Context, lba uint64, p []byte) error {
+	return d.do(ctx, lba, p, true)
+}
+
+func (d *Disk) do(ctx context.Context, lba uint64, p []byte, write bool) error {
 	if err := block.Check(d, lba, p); err != nil {
 		return err
 	}
-	r := &req{lba: lba, p: p, done: make(chan error, 1)}
+	r := &req{lba: lba, p: p, write: write, done: make(chan error, 1)}
 	select {
 	case d.reqs <- r:
 	case <-ctx.Done():
@@ -338,6 +353,16 @@ func (c *ctrl) cmd(ctx context.Context, q *queue, op byte, nsid uint32, prp1, pr
 
 // read fills p from lba, in transfers of at most maxXfer bytes.
 func (c *ctrl) read(ctx context.Context, lba uint64, p []byte) error {
+	return c.transfer(ctx, opRead, lba, p)
+}
+
+// write writes p at lba.
+func (c *ctrl) write(ctx context.Context, lba uint64, p []byte) error {
+	return c.transfer(ctx, opWrite, lba, p)
+}
+
+// transfer runs reads or writes through the bounce buffer.
+func (c *ctrl) transfer(ctx context.Context, op byte, lba uint64, p []byte) error {
 	for len(p) > 0 {
 		n := min(len(p), c.maxXfer)
 		nlb := n / c.bs
@@ -352,10 +377,15 @@ func (c *ctrl) read(ctx context.Context, lba uint64, p []byte) error {
 			}
 			prp2 = c.prps.Phys
 		}
-		if err := c.cmd(ctx, c.io, opRead, 1, prp1, prp2, [6]uint32{uint32(lba), uint32(lba >> 32), uint32(nlb - 1)}); err != nil {
-			return fmt.Errorf("nvme: read %d blocks at %d: %w", nlb, lba, err)
+		if op == opWrite {
+			copy(c.buf.Bytes[:n], p)
 		}
-		copy(p, c.buf.Bytes[:n])
+		if err := c.cmd(ctx, c.io, op, 1, prp1, prp2, [6]uint32{uint32(lba), uint32(lba >> 32), uint32(nlb - 1)}); err != nil {
+			return fmt.Errorf("nvme: %s %d blocks at %d: %w", map[byte]string{opRead: "read", opWrite: "write"}[op], nlb, lba, err)
+		}
+		if op == opRead {
+			copy(p, c.buf.Bytes[:n])
+		}
 		p, lba = p[n:], lba+uint64(nlb)
 	}
 	return nil

@@ -42,6 +42,7 @@ This doc covers everything about running godeep on the actual machine it's devel
   - [7.3 Borrow what isn't native yet](#73-borrow-what-isnt-native-yet)
   - [7.4 Proposed structure (small additions, not yet built)](#74-proposed-structure-small-additions-not-yet-built)
   - [7.5 Definition of done for a native driver](#75-definition-of-done-for-a-native-driver)
+  - [7.6 What's still worth building on QEMU, and what needs two machines](#76-whats-still-worth-building-on-qemu-and-what-needs-two-machines)
 - [8. Recommendation and milestones](#8-recommendation-and-milestones)
 - [References](#references)
 
@@ -737,6 +738,44 @@ A row in §2 moves from ✗/◐ to ✅ when the driver has:
 3. an m1n1-hypervisor run (rung 4) whose MMIO trace was reviewed against the Asahi/Linux driver's behavior, with the trace saved as a rung-2 test fixture;
 4. a native-boot run (rung 5);
 5. its §2 row, `DriverModel.md` and any new service interface updated.
+
+### 7.6 What's still worth building on QEMU, and what needs two machines
+
+**The rule of thumb:** if QEMU emulates the device or protocol (virtio, xHCI, NVMe, USB devices, PL011, a network), build it on QEMU, where `make hot` and `check-virt` make each try take seconds. If it's Apple silicon IP (anything with an `apple,` compatible), QEMU can't help beyond host tests against `mmio.Fake`: it needs the Mac as the target and a second computer driving it (`Using2Computers.md`), because the only way to see what the hardware does is m1n1's hypervisor (MMIO traces, a serial console, a shell at a fault).
+
+`board/applem1` on QEMU sbsa-ref (`tools/fakem1n1`, `make check-applem1`) sits in between: it keeps the Mac image's boot path, framebuffer, fault screen and autorun from regressing, but its Apple nodes are RAM pages that don't behave like hardware.
+
+#### Still worth building on QEMU (portable; carries to the Mac)
+
+| What | Why it pays off on the Mac | QEMU test bed | Size |
+|---|---|---|---|
+| **FAT write support**, then NVMe writes | GODEEPDATA (§6.6) becomes a place godeep can save files that macOS and Omarchy read; ANS2 shares the NVMe command layer | writable NVMe/USB disk images in `check-virt`, `fsck.fat` on the host afterwards | M |
+| **USB CDC-ECM, host side** (`usb-net`) | the same Ethernet-in-bulk-transfers framing the DWC3 gadget will use, through the same `netdev.NIC` → `netd` path; and USB Ethernet dongles work on the Mac once DWC3 host mode does | QEMU `-device usb-net` on the xHCI, SSH over it | S–M |
+| **9P over TCP** (and 9P writes) | the Mac reads and writes the dev machine's tree over the USB-C network: the way programs and files get onto the Mac before the SSD driver exists | `fs/ninep` over a TCP transport against a host 9P server (`u9fs`/`diod`) through QEMU's NAT | S |
+| **TLS roots** (an embedded CA bundle) | `get https://`, Go module/proxy fetches, any HTTPS service | QEMU NAT to the internet | XS–S |
+| **DHCP lease renewal** | sessions over the cable that outlive a lease | short leases from a test DHCP server (host test exists) | XS |
+| **USB storage robustness**: REQUEST SENSE, reset recovery, writes | real USB sticks stall and need recovery more than QEMU's | `usb-storage` with error injection in host tests; writable images | S |
+| **Keyboard layouts**, and the shell's line editing (history, cursor keys) | used every day on the Mac's keyboard | serial and USB keyboards on QEMU, host tests | S |
+| **WASM**: writable host share, faster startup (cached compiled modules), more WASI | the dev loop on the Mac is "push a program, run it" | `host:` and `ram:` on QEMU | S |
+| **Kernel services**: `ipc` (named ports), tightening capabilities (sessions get narrower `cap`s), `top`/accounting, klog persistence to GODEEPDATA | all board-independent | QEMU and the hosted build | M |
+| **SMP scheduling groundwork** | the Mac has 10 cores; TamaGo uses one. The Go side (per-CPU idle, timers, starting secondary cores into the runtime) can be done on QEMU via PSCI `CPU_ON`; only the Mac's core start (PMGR `cpu-start`) is Apple-specific | QEMU `-smp 4` | L |
+
+#### Only makes sense with two machines (Mac as target, the other as developer)
+
+| What | Why QEMU can't do it | What the second machine gives |
+|---|---|---|
+| **Samsung UART** (`serial@39b200000`) | the logic is host-testable, but its output is only visible on the Mac | the guest UART forwarded as `/dev/ttyACM1`: the console as text, then SSH over it |
+| **AIC2** interrupt controller; keyboard and timer on interrupts | Apple IP; how the timer FIQ reaches EL1 under m1n1 has to be observed | MMIO traces of the ack loop, a shell when an interrupt storms |
+| **DART** IOMMU, **ASC mailbox**, **RTKit** encodings (verified, not just tested against the fake) | Apple IP; RTKit firmware only exists on the Mac | traces of the mailbox, the coprocessor's crash logs |
+| **SMC** (power-off, power button, lid, battery, maybe RTC) | needs RTKit on real firmware | see above; power-off is otherwise untestable |
+| **ANS2 + SART** (the SSD) | Apple's NVMe variant and its address filter | traces before any write; **read-only until verified** |
+| **DWC3** host and device mode, **ATC PHY**, **CD321x** (on I²C) | Apple's USB-C glue around a standard core; QEMU's xHCI already covers the standard part | the gadget network link itself, then everything in §3.4 over it |
+| **Transaction translators** behind high-speed hubs (USB-C docks) | QEMU's `usb-hub` is full speed: there's nothing to translate | a real dock with a keyboard behind it |
+| **SPMI**, keyboard-backlight **PWM**, **SIO**, Wi-Fi | Apple IP | traces, and eyes on the hardware |
+| **Native measurements**: idle cost, interrupt latency, watchdog over long uptimes, the entropy seed's presence in `/chosen` | only real silicon answers | text output to compare runs, instead of photos |
+| **MMIO trace fixtures** for every Apple driver (§7.5, rung 4 → rung 2) | traces come from the hardware | `run_guest.py` logs, cut into `mmio.Fake` tests that then run on every `make test` |
+
+**So the split from here:** keep QEMU for whatever has an emulated device or is pure kernel code, and keep the Mac sessions for Apple IP. The first two-machine session should be the UART, because every later Apple driver is easier to debug with text output instead of a photo.
 
 ---
 

@@ -140,10 +140,13 @@ func TestDHCPAndDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	renewed := make(chan struct{})
 	go func() {
 		c, err := l.Accept()
 		if err == nil {
-			io.WriteString(c, "hello by name")
+			io.WriteString(c, "hello ")
+			<-renewed
+			io.WriteString(c, "by name")
 			c.Close()
 		}
 	}()
@@ -151,6 +154,11 @@ func TestDHCPAndDNS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Renew while the connection is open: same address, connection lives.
+	if l2, err := cli.DHCP(ctx); err != nil || l2.Addr != lease.Addr {
+		t.Fatalf("renewal: %+v %v", l2, err)
+	}
+	close(renewed)
 	got, _ := io.ReadAll(c)
 	c.Close()
 	if string(got) != "hello by name" {

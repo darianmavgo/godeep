@@ -25,6 +25,7 @@ type Keyboard struct {
 	held     byte // usage code repeating, 0 if none
 	heldMods byte
 	next     time.Time
+	layout   layoutRef // US until SetLayout
 }
 
 // State feeds the current modifiers and pressed keys (zeros ignored).
@@ -53,7 +54,7 @@ func (d *Keyboard) State(mods byte, keys []byte, now time.Time) {
 			d.caps = !d.caps
 			continue
 		}
-		if b := Translate(k, mods, d.caps); len(b) > 0 {
+		if b := d.layout.get().translate(k, mods, d.caps); len(b) > 0 {
 			if d.Emit != nil {
 				d.Emit(b)
 			}
@@ -76,7 +77,7 @@ func (d *Keyboard) Tick(now time.Time) {
 	if d.held == 0 || now.Before(d.next) {
 		return
 	}
-	if b := Translate(d.held, d.heldMods, d.caps); len(b) > 0 && d.Emit != nil {
+	if b := d.layout.get().translate(d.held, d.heldMods, d.caps); len(b) > 0 && d.Emit != nil {
 		d.Emit(b)
 	}
 	d.next = now.Add(RepeatRate)

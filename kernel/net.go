@@ -48,8 +48,11 @@ func startNet(ctx context.Context, tab *proc.Table, mgr *dev.Manager, cfg, fallb
 		p.Go(func(ctx context.Context) { st.RunTX(ctx) })
 		if !cfg.Addr.IsValid() {
 			dctx, cancel := context.WithTimeout(ctx, dhcpWait)
-			_, err := st.DHCP(dctx)
+			lease, err := st.DHCP(dctx)
 			cancel()
+			if err == nil && lease.Time > 0 {
+				p.Go(func(ctx context.Context) { renew(ctx, st, lease, log) })
+			}
 			if err != nil {
 				if ctx.Err() != nil {
 					return nil
@@ -157,6 +160,34 @@ func (f *followNIC) rebind(ctx context.Context, old netdev.NIC) error {
 		case <-ctx.Done():
 			t.Stop()
 			return ctx.Err()
+		}
+	}
+}
+
+// renew renews a DHCP lease at half its time, retrying every minute if the
+// server doesn't answer (the address stays in use meanwhile).
+func renew(ctx context.Context, st *netstack.Stack, lease netstack.Lease, log io.Writer) {
+	wait := lease.Time / 2
+	for {
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-t.C:
+		}
+		dctx, cancel := context.WithTimeout(ctx, dhcpWait)
+		l, err := st.DHCP(dctx)
+		cancel()
+		switch {
+		case err != nil:
+			fmt.Fprintf(log, "netd: DHCP renewal failed (%v); retrying in a minute\n", err)
+			wait = time.Minute
+		case l.Addr != lease.Addr:
+			fmt.Fprintf(log, "netd: DHCP renewal moved us from %s to %s\n", lease.Addr, l.Addr)
+			lease, wait = l, l.Time/2
+		default:
+			lease, wait = l, l.Time/2
 		}
 	}
 }

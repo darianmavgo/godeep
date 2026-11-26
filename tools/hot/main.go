@@ -32,6 +32,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 var (
@@ -354,6 +356,9 @@ func qmpPowerdown(path string) error {
 // rawTerminal puts the terminal in raw mode (keys go to godeep unchanged,
 // including ^C) and returns the function that restores it.
 func rawTerminal() (func(), error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return func() {}, nil // piped or in the background: leave every terminal alone
+	}
 	tty, err := os.Open("/dev/tty")
 	if err != nil {
 		return func() {}, nil // not a terminal (e.g. piped): stay cooked

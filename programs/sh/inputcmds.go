@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	"godeep/kernel/input"
@@ -57,4 +58,37 @@ func evtest(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 		}
 		fmt.Fprintf(env.TTY, "%s: %s\n", names[i-2], v.Interface().(input.Event))
 	}
+}
+
+// kbd [LAYOUT]: show or switch every keyboard's layout.
+func kbd(_ context.Context, env Env, _ *proc.Proc, args []string) error {
+	var setters []string
+	var target *input.Layout
+	if len(args) == 1 {
+		target = input.Layouts[args[0]]
+		if target == nil {
+			return fmt.Errorf("no layout %q (have: %s)", args[0], strings.Join(input.LayoutNames(), ", "))
+		}
+	} else if len(args) > 1 {
+		return errors.New("usage: kbd [LAYOUT]")
+	}
+	for _, st := range env.Dev.List() {
+		ls, ok := st.Service.(input.LayoutSetter)
+		if !ok {
+			continue
+		}
+		if target != nil {
+			ls.SetLayout(target)
+		}
+		setters = append(setters, st.Name)
+	}
+	if len(setters) == 0 {
+		return errors.New("no keyboard drivers")
+	}
+	if target != nil {
+		fmt.Fprintf(env.TTY, "layout %s on %s\n", target, strings.Join(setters, ", "))
+	} else {
+		fmt.Fprintf(env.TTY, "keyboards: %s; layouts: %s\n", strings.Join(setters, ", "), strings.Join(input.LayoutNames(), ", "))
+	}
+	return nil
 }

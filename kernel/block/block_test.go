@@ -113,3 +113,61 @@ func TestReader(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// memDisk is a writable in-memory device.
+type memDisk struct {
+	bs   int
+	data []byte
+}
+
+func (m *memDisk) BlockSize() int { return m.bs }
+func (m *memDisk) Blocks() uint64 { return uint64(len(m.data) / m.bs) }
+func (m *memDisk) ReadBlocks(_ context.Context, lba uint64, p []byte) error {
+	if err := Check(m, lba, p); err != nil {
+		return err
+	}
+	copy(p, m.data[lba*uint64(m.bs):])
+	return nil
+}
+func (m *memDisk) WriteBlocks(_ context.Context, lba uint64, p []byte) error {
+	if err := Check(m, lba, p); err != nil {
+		return err
+	}
+	copy(m.data[lba*uint64(m.bs):], p)
+	return nil
+}
+
+func TestWriteThroughCache(t *testing.T) {
+	d := &memDisk{bs: 512, data: make([]byte, 1<<20)}
+	r := NewReader(context.Background(), d)
+	buf := make([]byte, 10)
+	r.ReadAt(buf, 70000) // cache the chunk
+	msg := []byte("spans a chunk boundary and several blocks")
+	off := int64(ChunkSize - 7)
+	if n, err := r.WriteAt(msg, off); err != nil || n != len(msg) {
+		t.Fatalf("WriteAt: %d %v", n, err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := r.ReadAt(got, off); err != nil || string(got) != string(msg) {
+		t.Fatalf("read back through the cache: %q %v", got, err)
+	}
+	if string(d.data[off:off+int64(len(msg))]) != string(msg) {
+		t.Fatal("not written to the disk")
+	}
+	// a partition writes at its offset
+	p := &Partition{Start: 100, Count: 100, parent: d}
+	if !Writable(p) {
+		t.Fatal("partition of a writable disk not writable")
+	}
+	pr := NewReader(context.Background(), p)
+	pr.WriteAt([]byte("part"), 3)
+	if string(d.data[100*512+3:100*512+7]) != "part" {
+		t.Fatal("partition write at the wrong place")
+	}
+	ro := NewReader(context.Background(), readOnly{d})
+	if _, err := ro.WriteAt([]byte("x"), 0); err != ErrReadOnly {
+		t.Fatalf("read-only: %v", err)
+	}
+}
+
+type readOnly struct{ Device }

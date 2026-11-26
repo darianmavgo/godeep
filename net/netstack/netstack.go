@@ -106,15 +106,19 @@ func (st *Stack) Configure(cfg Config, source string) error {
 	}
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if old := st.cfg.Addr; old.IsValid() {
-		st.s.RemoveAddress(nicID, tcpip.AddrFrom4(old.Addr().As4()))
-	}
 	pa := tcpip.ProtocolAddress{
 		Protocol:          ipv4.ProtocolNumber,
 		AddressWithPrefix: tcpip.AddressWithPrefix{Address: tcpip.AddrFrom4(cfg.Addr.Addr().As4()), PrefixLen: cfg.Addr.Bits()},
 	}
-	if err := st.s.AddProtocolAddress(nicID, pa, stack.AddressProperties{}); err != nil {
-		return fmt.Errorf("netstack: add address: %s", err)
+	// The same address again (a DHCP renewal): keep it, so open
+	// connections survive; only routes and name servers are refreshed.
+	if cfg.Addr != st.cfg.Addr {
+		if old := st.cfg.Addr; old.IsValid() {
+			st.s.RemoveAddress(nicID, tcpip.AddrFrom4(old.Addr().As4()))
+		}
+		if err := st.s.AddProtocolAddress(nicID, pa, stack.AddressProperties{}); err != nil {
+			return fmt.Errorf("netstack: add address: %s", err)
+		}
 	}
 	routes := []tcpip.Route{{Destination: pa.AddressWithPrefix.Subnet(), NIC: nicID}}
 	if cfg.Gateway.Is4() {

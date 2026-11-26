@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -17,7 +18,7 @@ import (
 const (
 	CtrlC = 0x03
 	CtrlD = 0x04
-	esc   = 0x1b
+	esc0  = 0x1b
 )
 
 // ErrInterrupt is returned by ReadLine when ^C is typed at the prompt.
@@ -107,10 +108,162 @@ func (t *TTY) echoStr(s string) {
 	}
 }
 
+// HistorySize is how many lines the up/down keys can recall.
+const HistorySize = 100
+
+// editor is the line being typed: a cursor that moves (left/right, home,
+// end), insertion and deletion anywhere, and a history recalled with
+// up/down. Redrawing uses only backspaces, spaces and characters, so it
+// works the same on a serial terminal, over SSH and on the framebuffer.
+type editor struct {
+	t     *TTY
+	line  []byte
+	pos   int
+	hist  [][]byte
+	hi    int    // history entry shown; len(hist) means the line being typed
+	saved []byte // the line being typed while browsing history
+}
+
+func (e *editor) out(s string) { e.t.echoStr(s) }
+
+func (e *editor) back(n int) { e.out(strings.Repeat("\b", n)) }
+
+// redrawTail prints the line from the cursor on, plus extra blanks to cover
+// what was there, and moves the cursor back.
+func (e *editor) redrawTail(extra int) {
+	e.out(string(e.line[e.pos:]) + strings.Repeat(" ", extra))
+	e.back(len(e.line) - e.pos + extra)
+}
+
+func (e *editor) insert(b byte) {
+	e.line = append(e.line[:e.pos], append([]byte{b}, e.line[e.pos:]...)...)
+	e.out(string(b))
+	e.pos++
+	e.redrawTail(0)
+}
+
+func (e *editor) backspace() {
+	if e.pos == 0 {
+		return
+	}
+	e.line = append(e.line[:e.pos-1], e.line[e.pos:]...)
+	e.pos--
+	e.back(1)
+	e.redrawTail(1)
+}
+
+func (e *editor) del() {
+	if e.pos == len(e.line) {
+		return
+	}
+	e.line = append(e.line[:e.pos], e.line[e.pos+1:]...)
+	e.redrawTail(1)
+}
+
+func (e *editor) left() {
+	if e.pos > 0 {
+		e.pos--
+		e.back(1)
+	}
+}
+
+func (e *editor) right() {
+	if e.pos < len(e.line) {
+		e.out(string(e.line[e.pos]))
+		e.pos++
+	}
+}
+
+func (e *editor) home() { e.back(e.pos); e.pos = 0 }
+
+func (e *editor) end() { e.out(string(e.line[e.pos:])); e.pos = len(e.line) }
+
+// replace shows another line (from history, or an empty one).
+func (e *editor) replace(l []byte) {
+	e.end()
+	e.out(strings.Repeat("\b \b", len(e.line)))
+	e.line = append([]byte(nil), l...)
+	e.pos = len(e.line)
+	e.out(string(e.line))
+}
+
+func (e *editor) killWord() {
+	for e.pos > 0 && e.line[e.pos-1] == ' ' {
+		e.backspace()
+	}
+	for e.pos > 0 && e.line[e.pos-1] != ' ' {
+		e.backspace()
+	}
+}
+
+func (e *editor) up() {
+	if e.hi == 0 {
+		return
+	}
+	if e.hi == len(e.hist) {
+		e.saved = append([]byte(nil), e.line...)
+	}
+	e.hi--
+	e.replace(e.hist[e.hi])
+}
+
+func (e *editor) down() {
+	if e.hi == len(e.hist) {
+		return
+	}
+	e.hi++
+	if e.hi == len(e.hist) {
+		e.replace(e.saved)
+	} else {
+		e.replace(e.hist[e.hi])
+	}
+}
+
+// take ends the line: it goes to history (if new) and is returned.
+func (e *editor) take() string {
+	l := string(e.line)
+	if l != "" && (len(e.hist) == 0 || string(e.hist[len(e.hist)-1]) != l) {
+		e.hist = append(e.hist, []byte(l))
+		if len(e.hist) > HistorySize {
+			e.hist = e.hist[1:]
+		}
+	}
+	e.line, e.pos, e.hi, e.saved = nil, 0, len(e.hist), nil
+	return l
+}
+
+// escape handles a finished escape sequence: ESC [ (or ESC O) params final.
+func (e *editor) escape(params string, final byte) {
+	switch final {
+	case 'A':
+		e.up()
+	case 'B':
+		e.down()
+	case 'C':
+		e.right()
+	case 'D':
+		e.left()
+	case 'H':
+		e.home()
+	case 'F':
+		e.end()
+	case '~':
+		switch params {
+		case "1", "7":
+			e.home()
+		case "4", "8":
+			e.end()
+		case "3":
+			e.del()
+		}
+	}
+}
+
 func (t *TTY) discipline(in <-chan byte) {
 	defer close(t.lines)
-	var line []byte
-	skip := 0
+	e := &editor{t: t}
+	esc := 0 // 1: after ESC; 2: inside ESC [ ... (params so far in params)
+	params := ""
 	lastCR := false
 	for {
 		var b byte
@@ -123,10 +276,20 @@ func (t *TTY) discipline(in <-chan byte) {
 			}
 			b = c
 		}
-		if skip > 0 {
-			skip--
-			if skip == 1 && b != '[' {
-				skip = 0
+		switch esc {
+		case 1:
+			if b == '[' || b == 'O' {
+				esc, params = 2, ""
+			} else {
+				esc = 0
+			}
+			continue
+		case 2:
+			if b >= 0x40 && b <= 0x7e {
+				esc = 0
+				e.escape(params, b)
+			} else {
+				params += string(b)
 			}
 			continue
 		}
@@ -136,14 +299,15 @@ func (t *TTY) discipline(in <-chan byte) {
 		case b == '\n' && wasCR:
 			// CRLF: the CR already ended the line
 		case b == '\r' || b == '\n':
+			e.end()
 			t.echoStr("\n")
-			if !t.deliver(event{line: string(line)}) {
+			if !t.deliver(event{line: e.take()}) {
 				return
 			}
-			line = nil
 		case b == CtrlC:
+			e.end()
 			t.echoStr("^C\n")
-			line = nil
+			e.line, e.pos, e.hi, e.saved = nil, 0, len(e.hist), nil
 			select {
 			case t.intr <- struct{}{}: // a foreground job's waiter took it
 			default:
@@ -152,19 +316,26 @@ func (t *TTY) discipline(in <-chan byte) {
 				}
 			}
 		case b == CtrlD:
-			if len(line) == 0 && !t.deliver(event{err: io.EOF}) {
+			if len(e.line) == 0 && !t.deliver(event{err: io.EOF}) {
 				return
 			}
 		case b == 0x7f || b == 0x08:
-			if len(line) > 0 {
-				line = line[:len(line)-1]
-				t.echoStr("\b \b")
+			e.backspace()
+		case b == 0x01: // ^A
+			e.home()
+		case b == 0x05: // ^E
+			e.end()
+		case b == 0x15: // ^U
+			e.end()
+			for len(e.line) > 0 {
+				e.backspace()
 			}
-		case b == esc:
-			skip = 2 // ignore ESC [ X (arrow keys)
+		case b == 0x17: // ^W
+			e.killWord()
+		case b == esc0:
+			esc = 1
 		case b >= 0x20 && b < 0x7f:
-			line = append(line, b)
-			t.echoStr(string(b))
+			e.insert(b)
 		}
 	}
 }

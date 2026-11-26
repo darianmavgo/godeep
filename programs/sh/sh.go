@@ -67,9 +67,10 @@ func init() {
 		"cat":      {"cat VOLUME:PATH...: print files (e.g. cat nvme0p2:/hello.txt)", cat},
 		"ifconfig": {"network interface: address, MAC, traffic", ifconfig},
 		"pprof":    {"pprof NAME [1|2]: a runtime profile (goroutine, heap, allocs, threadcreate, block, mutex) as protobuf for `ssh godeep pprof heap > heap.pb.gz`; 1/2: as text", pprofCmd},
+		"kbd":      {"kbd [LAYOUT]: keyboard layout for every keyboard (us, uk, dvorak, colemak)", kbd},
 		"dmesg":    {"dmesg [-f]: the kernel log (-f: follow it until ^C)", dmesg},
 		"host":     {"host NAME: look a name up (DNS)", hostCmd},
-		"get":      {"get http://HOST/PATH: fetch a URL over HTTP, print the body", getCmd},
+		"get":      {"get http[s]://HOST/PATH: fetch a URL, print the body", getCmd},
 		"df":       {"volumes: ram, disks and partitions with a filesystem", df},
 		"cp":       {"cp VOLUME:FROM VOLUME:TO: copy a file (to ram:)", cp},
 		"mv":       {"mv VOLUME:FROM VOLUME:TO: rename in a writable volume", mv},
@@ -166,7 +167,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")

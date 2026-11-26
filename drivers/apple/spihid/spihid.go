@@ -139,6 +139,10 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 
 	k := &transport{ctx: ctx, c: c, ctl: ctl, st: st}
 	k.kbd = input.Keyboard{Emit: k.emit, Events: st.kbdEvents}
+	if old := st.keyboard; old != nil {
+		k.kbd.SetLayout(old.Layout()) // a restarted driver keeps the layout
+	}
+	st.set(func() { st.keyboard = &k.kbd })
 	k.tp = Trackpad{Events: st.tpEvents}
 	st.set(func() {
 		st.mode = "blind reads"
@@ -331,6 +335,7 @@ func sleep(ctx context.Context, d time.Duration) error {
 // keyboard's and trackpad's events come from it (input.Sources).
 type Stats struct {
 	kbdEvents, tpEvents *input.Broadcaster
+	keyboard            *input.Keyboard // for SetLayout (its layout is atomic)
 
 	booted, tp, replies, mtWrites int
 	tpTouch                       bool
@@ -350,6 +355,15 @@ func (s *Stats) set(f func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	f()
+}
+
+// SetLayout implements input.LayoutSetter: the internal keyboard's layout.
+func (s *Stats) SetLayout(l *input.Layout) {
+	var k *input.Keyboard
+	s.set(func() { k = s.keyboard })
+	if k != nil {
+		k.SetLayout(l)
+	}
 }
 
 // InputSources implements input.Sources.

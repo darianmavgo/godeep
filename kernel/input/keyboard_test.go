@@ -108,3 +108,51 @@ func TestBroadcaster(t *testing.T) {
 		t.Fatal("subscriber not removed")
 	}
 }
+
+func TestLayouts(t *testing.T) {
+	type key struct {
+		k, mods byte
+		caps    bool
+	}
+	usage := func(c byte) byte { return 0x04 + c - 'a' } // a..z keys (US positions)
+	cases := []struct {
+		layout string
+		in     key
+		want   string
+	}{
+		{"us", key{usage('q'), 0, false}, "q"},
+		{"dvorak", key{usage('q'), 0, false}, "'"},
+		{"dvorak", key{usage('j'), 0, false}, "h"},
+		{"dvorak", key{usage('j'), ModLShift, false}, "H"},
+		{"dvorak", key{usage('j'), 0, true}, "H"},            // caps after the remap
+		{"dvorak", key{usage('i'), ModLCtrl, false}, "\x03"}, // Ctrl on the key that types c
+		{"dvorak", key{0x2d, 0, false}, "["},                 // '-' key
+		{"dvorak", key{0x34, ModLShift, false}, "_"},         // shift-' key
+		{"dvorak", key{0x28, 0, false}, "\r"},                // enter untouched
+		{"dvorak", key{0x52, 0, false}, "\x1b[A"},            // arrows untouched
+		{"colemak", key{usage('e'), 0, false}, "f"},
+		{"colemak", key{0x33, 0, false}, "o"}, // ';' key
+		{"colemak", key{usage('p'), ModLShift, false}, ":"},
+		{"uk", key{0x1f, ModLShift, false}, "\""}, // shift-2
+		{"uk", key{0x34, ModLShift, false}, "@"},  // shift-'
+		{"uk", key{0x32, 0, false}, "#"},          // ISO key
+		{"uk", key{0x64, ModLShift, false}, "|"},
+	}
+	for _, c := range cases {
+		got := string(Layouts[c.layout].translate(c.in.k, c.in.mods, c.in.caps))
+		if got != c.want {
+			t.Errorf("%s %+v: got %q want %q", c.layout, c.in, got, c.want)
+		}
+	}
+	// A Keyboard switches layouts while in use.
+	var out []byte
+	k := &Keyboard{Emit: func(b []byte) { out = append(out, b...) }}
+	now := time.Now()
+	k.State(0, []byte{usage('j')}, now)
+	k.State(0, nil, now)
+	k.SetLayout(Layouts["dvorak"])
+	k.State(0, []byte{usage('j')}, now)
+	if string(out) != "jh" || k.Layout().Name != "dvorak" {
+		t.Fatalf("typed %q in %s", out, k.Layout())
+	}
+}

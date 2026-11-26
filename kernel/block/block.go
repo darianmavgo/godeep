@@ -48,6 +48,7 @@ type Reader struct {
 	d     Device
 	chunk int // bytes per cache entry, a multiple of the block size
 
+	wmu   sync.Mutex // serializes WriteAt's read-modify-write
 	mu    sync.Mutex
 	lru   *list.List // of *entry, most recent first
 	index map[int64]*list.Element

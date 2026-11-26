@@ -161,6 +161,8 @@ type Service struct {
 	lines         []string
 	sources       []input.Source
 	keys, dropped int
+	kbds          []*usb.BootKeyboard
+	layout        *input.Layout
 }
 
 func (s *Service) Devices() []string {
@@ -171,6 +173,17 @@ func (s *Service) Devices() []string {
 		out = append(out, fmt.Sprintf("%d keys typed (%d dropped)", s.keys, s.dropped))
 	}
 	return out
+}
+
+// SetLayout implements input.LayoutSetter for every USB keyboard, and the
+// ones plugged in later.
+func (s *Service) SetLayout(l *input.Layout) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.layout = l
+	for _, k := range s.kbds {
+		k.SetLayout(l)
+	}
 }
 
 func (s *Service) InputSources() []input.Source {
@@ -843,6 +856,12 @@ func (h *hc) hidEndpoint(ctx context.Context, d *device, it usb.Interface, e usb
 		k.Events = events
 		k.Emit = h.emit
 		h.kbds = append(h.kbds, k)
+		h.svc.mu.Lock()
+		if h.svc.layout != nil {
+			k.SetLayout(h.svc.layout)
+		}
+		h.svc.kbds = append(h.svc.kbds, k)
+		h.svc.mu.Unlock()
 		ep.handle = k.Report
 	default:
 		m := &usb.BootMouse{Events: events}

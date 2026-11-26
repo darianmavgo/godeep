@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	_ "golang.org/x/crypto/x509roots/fallback"
+
 	"godeep/kernel/cap"
 	"godeep/kernel/proc"
 )
@@ -48,14 +50,15 @@ func hostCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	return nil
 }
 
-// get URL: an HTTP GET, the body to the terminal (http only: TamaGo has
-// no root certificates to check TLS servers with).
+// get URL: an HTTP(S) GET, the body to the terminal. TLS servers are
+// checked against Mozilla's root certificates, built into the image
+// (x509roots/fallback: Go uses them when the system has none, as on TamaGo).
 func getCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: get http://HOST[:PORT]/PATH")
+		return errors.New("usage: get http[s]://HOST[:PORT]/PATH")
 	}
-	if !strings.HasPrefix(args[0], "http://") {
-		return errors.New("http:// only (no TLS root certificates yet)")
+	if !strings.HasPrefix(args[0], "http://") && !strings.HasPrefix(args[0], "https://") {
+		return errors.New("usage: get http[s]://HOST[:PORT]/PATH")
 	}
 	n, err := network(ctx, env)
 	if err != nil {

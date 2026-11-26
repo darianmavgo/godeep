@@ -106,6 +106,23 @@ func (m *model) exec(q *mq, e []byte) {
 		qq := m.queues[int(cdw11>>16)]
 		qq.sq = prp1
 		m.queues[int(cdw10&0xffff)] = qq
+	case q != m.queues[0] && op == opWrite:
+		lba := uint64(cdw10) | uint64(cdw11)<<32
+		n := (int(cdw12&0xffff) + 1) * m.bs
+		pages := []uint64{prp1}
+		switch np := (n + 4095) / 4096; {
+		case np == 2:
+			pages = append(pages, prp2)
+		case np > 2:
+			list := m.at(prp2, 4096)
+			for i := 0; i < np-1; i++ {
+				pages = append(pages, le.Uint64(list[8*i:]))
+			}
+		}
+		dst := m.disk[lba*uint64(m.bs):][:n]
+		for i, p := range pages {
+			copy(dst[min(i*4096, n):min((i+1)*4096, n)], m.at(p, 4096))
+		}
 	case q != m.queues[0] && op == opRead:
 		lba := uint64(cdw10) | uint64(cdw11)<<32
 		n := (int(cdw12&0xffff) + 1) * m.bs
@@ -241,4 +258,24 @@ func TestShutdownFreesDMA(t *testing.T) {
 	if m.f.Get(CSTS)&CSTS_SHST != 2<<2 {
 		t.Fatal("controller not shut down")
 	}
+}
+
+func TestWrites(t *testing.T) {
+	disk := make([]byte, 4<<20)
+	m := newModel(disk, 512, 0)
+	d, cancel := start(t, m)
+	defer cancel()
+	ctx := context.Background()
+	data := pattern(300 << 10) // more than one transfer, PRP lists
+	if err := d.WriteBlocks(ctx, 7, data); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(disk[7*512:7*512+len(data)], data) {
+		t.Fatal("disk contents differ")
+	}
+	back := make([]byte, len(data))
+	if err := d.ReadBlocks(ctx, 7, back); err != nil || !bytes.Equal(back, data) {
+		t.Fatalf("read back: %v", err)
+	}
+	var _ block.Writer = d
 }
