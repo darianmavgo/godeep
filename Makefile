@@ -71,7 +71,10 @@ endif
 QEMU_FLAGS  ?= -machine virt,gic-version=3$(MACHINE_EL2) -accel $(ACCEL) -cpu $(CPU) -smp 1 -m 4G $(SERIAL)
 # An NVMe disk (read-only) with a FAT32 and an ext4 partition: lsblk, ls, cat.
 DISK        ?= bin/disk.img
-QEMU_DISK   := -drive if=none,id=disk0,file=$(DISK),format=raw,readonly=on -device nvme,serial=godeep0,drive=disk0
+# The NVMe disk is a writable copy (bin/disk-rw.img: FAT writes persist
+# across make qemu / make hot reboots; check-virt starts from a fresh copy).
+DISK_RW     ?= bin/disk-rw.img
+QEMU_DISK   := -drive if=none,id=disk0,file=$(DISK_RW),format=raw -device nvme,serial=godeep0,drive=disk0
 # USB: an xHCI controller with a keyboard and a mouse (headless, they get
 # input from QMP input-send-event; see check-virt).
 QEMU_DISK   += -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
@@ -88,7 +91,7 @@ SSH_PORT    ?= 2222
 QEMU_NET    = -device ramfb -global virtio-mmio.force-legacy=false -device virtio-rng-device \
 	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22 -device virtio-net-device,netdev=net0 \
 	-fsdev local,id=share0,path=$(CURDIR),security_model=none,readonly=on -device virtio-9p-device,fsdev=share0,mount_tag=host
-QEMU_DEPS   := $(DISK)
+QEMU_DEPS   := $(DISK) $(DISK_RW)
 else ifeq ($(ARCH),amd64)
 # board/microvm, flags mirror usbarmory/tamago-example (TARGET=microvm).
 # TEXT_START = amd64 ramStart + 0x10000. Needs -m 3G+ (RAM is mapped up to 0xb0000000).
@@ -118,7 +121,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: wasm push hot test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
+.PHONY: wasm push hot check-usbnet test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
 
 # ---- SSH keys (development) ----
 # bin/ssh keeps them across builds: host_ed25519 is godeep's host key,
@@ -206,9 +209,11 @@ hot: keys $(QEMU_DEPS)
 # drags over "godeep", and a right click pastes it into the shell. The
 # screen ends up in bin/check-virt-screen.png.
 check-virt: SSH_PORT = 2223
+check-virt: DISK_RW = bin/disk-check.img
 check-virt: wasm
 	@if [ "$(ARCH)" != arm64 ] || [ "$(BOARD)" = applem1 ]; then echo "check-virt is for ARCH=arm64 on QEMU virt"; exit 1; fi
 	@$(MAKE) -s image $(DISK)
+	@cp $(DISK) $(DISK_RW)
 	go run ./tools/qemucheck \
 	  -step 'lsdev pci nvme=>nvme0,QEMU NVMe Ctrl,ready' \
 	  -step 'lsblk=>nvme0p1,FAT32,GODEEPFAT,nvme0p2,ext4,godeep-ext4' \
@@ -253,6 +258,22 @@ check-virt: wasm
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 pprof heap > bin/check-heap.pb.gz && go tool pprof -top bin/check-heap.pb.gz=>flat%' \
 	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. \
 	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(QEMU_NET) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
+	@$(MAKE) -s check-usbnet
+
+# USB Ethernet (CDC ECM) as the only network: QEMU's usb-net on the xHCI,
+# DHCP and SSH over it. The Mac's USB-C gadget link will look like this
+# from godeep's side. Run by check-virt.
+check-usbnet:
+	@$(MAKE) -s image
+	go run ./tools/qemucheck -log bin/qemucheck-usbnet.log \
+	  -step 'lsdev usbnet=>usbnet0,godeep,usb-ecm,ready' -step 'ifconfig=>dhcp from 10.0.2.2' \
+	  -step 'local:ssh -i $(SSH_DIR)/id_ed25519 -p 2224 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR root@127.0.0.1 lsdev usbnet0=>tx' \
+	  -- $(QEMU) $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -device qemu-xhci,id=xhci -netdev user,id=u0,hostfwd=tcp:127.0.0.1:2224-:22 -device usb-net,netdev=u0,bus=xhci.0 \
+	  -kernel $(BOOTFILE)
+
+$(DISK_RW): $(DISK)
+	cp $(DISK) $@
 
 bin/disk.img: tools/mkdisk/main.go kernel/block/gptwrite.go $(wildcard fs/testdata/*.img.gz)
 	go run ./tools/mkdisk -o $@

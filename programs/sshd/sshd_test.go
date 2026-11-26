@@ -341,7 +341,7 @@ func (roVol) Type() string  { return "test" }
 func (roVol) Label() string { return "" }
 
 func testNS() *vfs.NS {
-	ns := vfs.New(nil)
+	ns := vfs.New(context.Background(), nil)
 	ns.Mount("ram", memfs.New("ram"))
 	ns.Mount("disk", roVol{fstest.MapFS{"docs/readme.md": {Data: []byte("read me")}}})
 	return ns

@@ -125,8 +125,13 @@ func (e Endpoint) IsBulkOut() bool { return e.Address&0x80 == 0 && e.Attr&3 == 2
 
 // Interface classes.
 const (
+	ClassComm        = 0x02 // CDC communications (subclass 6: Ethernet, ECM)
 	ClassMassStorage = 0x08
 	ClassHub         = 0x09
+	ClassCDCData     = 0x0a
+	SubclassECM      = 0x06
+	DescString       = 0x03
+	DescCSInterface  = 0x24 // class-specific interface descriptor (CDC functional)
 )
 
 // Num is the endpoint number.
@@ -137,6 +142,7 @@ type Interface struct {
 	Number, Alt               byte
 	Class, Subclass, Protocol byte
 	Endpoints                 []Endpoint
+	Extra                     [][]byte // class-specific descriptors (CDC functional ones)
 }
 
 // Config is a configuration descriptor with its interfaces.
@@ -161,6 +167,11 @@ func ParseConfig(b []byte) (Config, error) {
 		case DescInterface:
 			if n >= 9 {
 				c.Interfaces = append(c.Interfaces, Interface{Number: d[2], Alt: d[3], Class: d[5], Subclass: d[6], Protocol: d[7]})
+			}
+		case DescCSInterface:
+			if len(c.Interfaces) > 0 {
+				it := &c.Interfaces[len(c.Interfaces)-1]
+				it.Extra = append(it.Extra, append([]byte(nil), d...))
 			}
 		case DescEndpoint:
 			if n >= 7 && len(c.Interfaces) > 0 {
@@ -222,4 +233,43 @@ func (m *BootMouse) Report(r []byte, now time.Time) {
 	if len(r) >= 4 && r[3] != 0 {
 		m.Events.Send(input.Event{Kind: input.Wheel, DY: int32(int8(r[3])), Time: now})
 	}
+}
+
+// ECMMACIndex returns the string index of a CDC Ethernet interface's MAC
+// address (the Ethernet Networking Functional Descriptor's iMACAddress).
+func (i Interface) ECMMACIndex() (byte, bool) {
+	for _, d := range i.Extra {
+		if len(d) >= 4 && d[2] == 0x0f {
+			return d[3], true
+		}
+	}
+	return 0, false
+}
+
+// ParseMAC decodes a MAC address string descriptor: 12 hex digits in UTF-16.
+func ParseMAC(desc []byte) ([6]byte, error) {
+	var mac [6]byte
+	if len(desc) < 2+24 || desc[1] != DescString {
+		return mac, errors.New("usb: not a MAC address string")
+	}
+	hex := func(c byte) (byte, bool) {
+		switch {
+		case c >= '0' && c <= '9':
+			return c - '0', true
+		case c >= 'a' && c <= 'f':
+			return c - 'a' + 10, true
+		case c >= 'A' && c <= 'F':
+			return c - 'A' + 10, true
+		}
+		return 0, false
+	}
+	for i := 0; i < 6; i++ {
+		hi, ok1 := hex(desc[2+4*i])
+		lo, ok2 := hex(desc[2+4*i+2])
+		if !ok1 || !ok2 {
+			return mac, errors.New("usb: bad MAC address string")
+		}
+		mac[i] = hi<<4 | lo
+	}
+	return mac, nil
 }

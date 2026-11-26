@@ -89,7 +89,7 @@ func Boot(ctx context.Context, b Board) error {
 	mgr.Start(ctx, b.Devices)
 
 	env := sh.Env{Table: tab, TTY: tty.New(con.In, con.Out, con.Echo), Boot: time.Now(),
-		Dev: mgr, IRQ: b.IRQ, DMA: b.DMA, Net: b.Net, FS: vfs.New(mgr)}
+		Dev: mgr, IRQ: b.IRQ, DMA: b.DMA, Net: b.Net, FS: vfs.New(ctx, mgr)}
 	env.FS.Mount("ram", memfs.New("ram"))
 	defer env.TTY.Close()
 	env.Log = klog.New(env.TTY, 0)

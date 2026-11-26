@@ -310,8 +310,8 @@ func (s *sftpServer) stat(p string) (fs.FileInfo, error) {
 }
 
 func writableVol(v vfs.Volume) (vfs.Writable, error) {
-	if w, ok := v.(vfs.Writable); ok {
-		return w, nil
+	if vfs.IsWritable(v) {
+		return v.(vfs.Writable), nil
 	}
 	return nil, vfs.ErrReadOnly
 }

@@ -96,12 +96,15 @@ const (
 	trbAddress     = 11
 	trbConfigureEP = 12
 	trbEvaluate    = 13
+	trbResetEP     = 14
+	trbSetDequeue  = 16
 	trbTransferEv  = 32
 	trbCommandEv   = 33
 	trbPortEv      = 34
 
 	ccSuccess = 1
 	ccShort   = 13
+	ccStall   = 6
 
 	trbCycle = 1 << 0
 	trbTC    = 1 << 1 // link: toggle cycle
@@ -129,8 +132,13 @@ func Driver(regs func(base uint64) mmio.Regs, keys chan<- byte) dev.Driver {
 		if d.DMA == nil {
 			return errors.New("xhci: the board has no DMA region")
 		}
-		h := &hc{r: regs(f.BARs[0].CPU), dma: d.DMA, keys: keys, svc: &Service{}, addDev: d.Add, reads: make(chan *readReq)}
+		h := &hc{r: regs(f.BARs[0].CPU), dma: d.DMA, keys: keys, svc: &Service{}, addDev: d.Add, reads: make(chan *readReq), sends: make(chan *sendReq)}
 		defer h.free()
+		defer func() { // USB NICs stop with the controller (netd sees ErrDown)
+			for _, n := range h.nics {
+				close(n.down)
+			}
+		}()
 		if err := h.init(ctx); err != nil {
 			return err
 		}
@@ -147,8 +155,10 @@ func Driver(regs func(base uint64) mmio.Regs, keys chan<- byte) dev.Driver {
 				if err := h.poll(ctx, now); err != nil {
 					return err
 				}
+			case r := <-h.sends:
+				r.done <- r.nic.send(ctx, r.frame)
 			case r := <-h.reads:
-				r.done <- r.disk.read(ctx, r.lba, r.p)
+				r.done <- r.disk.transfer(ctx, r.lba, r.p, r.write)
 			}
 		}
 	}}
@@ -287,6 +297,8 @@ type hc struct {
 	disks       []*Disk
 	addDev      func(dev.Node) bool // publishes discovered devices (mass storage)
 	reads       chan *readReq       // mass-storage reads, served by this goroutine
+	sends       chan *sendReq       // USB Ethernet frames out
+	nics        []*NIC
 }
 
 func (h *hc) alloc(size, align int) (*dma.Buffer, error) {
@@ -645,16 +657,24 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 	if d.desc, err = usb.ParseDevice(b); err != nil {
 		return d, err
 	}
-	if b, err = h.control(ctx, d, usb.GetDescriptor(usb.DescConfig, 0, 9), buf); err != nil || len(b) < 4 {
-		return d, fmt.Errorf("configuration descriptor: %v", err)
-	}
-	total := min(int(binary.LittleEndian.Uint16(b[2:])), len(buf.Bytes))
-	if b, err = h.control(ctx, d, usb.GetDescriptor(usb.DescConfig, 0, total), buf); err != nil {
-		return d, fmt.Errorf("configuration descriptor: %w", err)
-	}
-	cfg, err := usb.ParseConfig(b)
-	if err != nil {
-		return d, err
+	// Several configurations (QEMU's usb-net: RNDIS, then CDC Ethernet):
+	// take the first with an interface we drive, else the first.
+	var cfg usb.Config
+	for idx := 0; idx < max(1, d.desc.Configs); idx++ {
+		c, err := h.config(ctx, d, idx, buf)
+		if err != nil {
+			if idx == 0 {
+				return d, err
+			}
+			break
+		}
+		if idx == 0 {
+			cfg = c
+		}
+		if supported(c) {
+			cfg = c
+			break
+		}
 	}
 	if _, err := h.control(ctx, d, usb.Setup{Request: usb.ReqSetConfiguration, Value: uint16(cfg.Value)}, nil); err != nil {
 		return d, fmt.Errorf("set configuration: %w", err)
@@ -671,6 +691,12 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 				return d, fmt.Errorf("hub: %w", err)
 			}
 			kinds = append(kinds, "hub")
+			continue
+		case it.Class == usb.ClassComm && it.Subclass == usb.SubclassECM:
+			if err := h.newECM(ctx, d, cfg, it); err != nil {
+				return d, fmt.Errorf("ethernet: %w", err)
+			}
+			kinds = append(kinds, "ethernet")
 			continue
 		case it.Class == usb.ClassMassStorage && it.Subclass == 6 && it.Protocol == 0x50:
 			if err := h.newDisk(ctx, d, it); err != nil {
@@ -697,7 +723,7 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 	what := "no driver for its interfaces"
 	if len(kinds) > 0 {
 		what = strings.Join(kinds, ", ")
-		if !strings.Contains(what, "hub") && !strings.Contains(what, "mass") {
+		if !strings.Contains(what, "hub") && !strings.Contains(what, "mass") && !strings.Contains(what, "ethernet") {
 			what = "HID boot " + what
 		}
 	}
@@ -779,6 +805,31 @@ const (
 	epInterruptIn = 7
 	slotHub       = 1 << 26
 )
+
+// config reads configuration descriptor idx.
+func (h *hc) config(ctx context.Context, d *device, idx int, buf *dma.Buffer) (usb.Config, error) {
+	b, err := h.control(ctx, d, usb.GetDescriptor(usb.DescConfig, byte(idx), 9), buf)
+	if err != nil || len(b) < 4 {
+		return usb.Config{}, fmt.Errorf("configuration descriptor: %v", err)
+	}
+	total := min(int(binary.LittleEndian.Uint16(b[2:])), len(buf.Bytes))
+	if b, err = h.control(ctx, d, usb.GetDescriptor(usb.DescConfig, byte(idx), total), buf); err != nil {
+		return usb.Config{}, fmt.Errorf("configuration descriptor: %w", err)
+	}
+	return usb.ParseConfig(b)
+}
+
+// supported reports a configuration with an interface this driver drives.
+func supported(c usb.Config) bool {
+	for _, it := range c.Interfaces {
+		switch {
+		case it.Class == usb.ClassHub, it.Class == usb.ClassComm && it.Subclass == usb.SubclassECM,
+			it.Class == usb.ClassMassStorage, it.BootKind() != "":
+			return true
+		}
+	}
+	return false
+}
 
 // configureEP adds endpoint e (of type typ) to the device and returns its
 // device context index and transfer ring. slotExtra is ORed into the slot

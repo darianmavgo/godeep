@@ -1,6 +1,7 @@
 // Package fat reads FAT12, FAT16 and FAT32 filesystems (with long file
-// names), read-only, as an io/fs.FS. Names match case-insensitively, as on
-// every system that writes FAT.
+// names) as an io/fs.FS, and writes FAT16 and FAT32 ones (write.go) when
+// opened with NewWritable. Names match case-insensitively, as on every
+// system that writes FAT.
 package fat
 
 import (
@@ -10,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -30,6 +32,16 @@ type FS struct {
 	bits       int    // 12, 16 or 32
 	label      string
 	clusterLen int64
+
+	// writing (write.go)
+	w         io.WriterAt // nil: read-only
+	nfats     int
+	fatBytes  int64 // one FAT's size
+	fsinfoOff int64 // FAT32 FSInfo sector (0: none)
+	freeHint  uint32
+	mu        sync.RWMutex // writers exclude readers
+	dirty     bool         // free counted (FSInfo maintained from then on)
+	free      int64        // free clusters, once dirty
 }
 
 // Probe reports whether r starts with a FAT boot sector.
@@ -82,10 +94,14 @@ func New(r io.ReaderAt) (*FS, error) {
 	f.rootOff = int64(rsvd+nfats*fatSz) * bps
 	f.rootSize = int64(rootEnts) * 32
 	f.dataOff = int64(meta) * bps
+	f.nfats, f.fatBytes = int(nfats), int64(fatSz)*bps
 	labelAt := 43
 	if f.bits == 32 {
 		f.rootClus = le.Uint32(b[44:])
 		labelAt = 71
+		if s := le.Uint16(b[48:]); s != 0 && s != 0xffff {
+			f.fsinfoOff = int64(s) * bps
+		}
 	}
 	if b[labelAt-5] == 0x29 { // extended boot signature
 		f.label = strings.TrimRight(string(b[labelAt:labelAt+11]), " ")
@@ -168,6 +184,8 @@ type node struct {
 	size    uint32
 	mtime   time.Time
 	chain   []uint32 // loaded on first read
+	entOff  int64    // disk offset of its short directory entry (0: root)
+	lfnOffs []int64  // and of its long-name entries
 }
 
 const (
@@ -218,6 +236,12 @@ func (n *node) data(p []byte, off int64) (int, error) {
 }
 
 func (n *node) ReadAt(p []byte, off int64) (int, error) {
+	n.f.mu.RLock()
+	defer n.f.mu.RUnlock()
+	return n.readAt(p, off)
+}
+
+func (n *node) readAt(p []byte, off int64) (int, error) {
 	if n.isDir() {
 		return 0, errors.New("fat: is a directory")
 	}
@@ -238,32 +262,55 @@ func (n *node) ReadAt(p []byte, off int64) (int, error) {
 func (n *node) Readlink() (string, error) { return "", errors.New("fat: no symlinks") }
 
 func (n *node) ReadDir() ([]rofs.Node, error) {
+	n.f.mu.RLock()
+	defer n.f.mu.RUnlock()
+	ns, err := n.readDir()
+	out := make([]rofs.Node, len(ns))
+	for i, x := range ns {
+		out[i] = x
+	}
+	return out, err
+}
+
+// dirRaw returns a directory's raw entries and where each byte lives on
+// the disk.
+func (n *node) dirRaw() ([]byte, func(i int) int64, error) {
+	if n.root && n.f.bits != 32 {
+		raw := make([]byte, n.f.rootSize)
+		if _, err := n.f.r.ReadAt(raw, n.f.rootOff); err != nil {
+			return nil, nil, err
+		}
+		return raw, func(i int) int64 { return n.f.rootOff + int64(i) }, nil
+	}
+	ch, err := n.clusters()
+	if err != nil {
+		return nil, nil, err
+	}
+	raw := make([]byte, int64(len(ch))*n.f.clusterLen)
+	if _, err := n.data(raw, 0); err != nil && err != io.EOF {
+		return nil, nil, err
+	}
+	return raw, func(i int) int64 {
+		return n.f.clusterOff(ch[int64(i)/n.f.clusterLen]) + int64(i)%n.f.clusterLen
+	}, nil
+}
+
+func (n *node) readDir() ([]*node, error) {
 	if !n.isDir() {
 		return nil, errors.New("fat: not a directory")
 	}
-	var raw []byte
-	if n.root && n.f.bits != 32 {
-		raw = make([]byte, n.f.rootSize)
-		if _, err := n.f.r.ReadAt(raw, n.f.rootOff); err != nil {
-			return nil, err
-		}
-	} else {
-		ch, err := n.clusters()
-		if err != nil {
-			return nil, err
-		}
-		raw = make([]byte, int64(len(ch))*n.f.clusterLen)
-		if _, err := n.data(raw, 0); err != nil && err != io.EOF {
-			return nil, err
-		}
+	raw, pos, err := n.dirRaw()
+	if err != nil {
+		return nil, err
 	}
-	return n.f.parseDir(raw), nil
+	return n.f.parseDir(raw, pos), nil
 }
 
-func (f *FS) parseDir(raw []byte) []rofs.Node {
+func (f *FS) parseDir(raw []byte, pos func(int) int64) []*node {
 	le := binary.LittleEndian
-	var out []rofs.Node
+	var out []*node
 	var lfn []uint16
+	var lfnAt []int64
 	var lfnSum byte
 	lfnOK := false
 	for i := 0; i+32 <= len(raw); i += 32 {
@@ -279,7 +326,9 @@ func (f *FS) parseDir(raw []byte) []rofs.Node {
 			seq := int(e[0] & 0x1f)
 			if e[0]&0x40 != 0 { // last (first stored) part
 				lfn, lfnSum, lfnOK = make([]uint16, 13*seq), e[13], seq > 0
+				lfnAt = nil
 			}
+			lfnAt = append(lfnAt, pos(i))
 			if !lfnOK || seq == 0 || 13*seq > len(lfn) || e[13] != lfnSum {
 				lfnOK = false
 				continue
@@ -295,7 +344,9 @@ func (f *FS) parseDir(raw []byte) []rofs.Node {
 			continue
 		}
 		name := ""
+		var lfnOffs []int64
 		if lfnOK && checksum(e[:11]) == lfnSum {
+			lfnOffs = lfnAt
 			end := 0
 			for end < len(lfn) && lfn[end] != 0 && lfn[end] != 0xffff {
 				end++
@@ -313,7 +364,7 @@ func (f *FS) parseDir(raw []byte) []rofs.Node {
 			cl |= uint32(le.Uint16(e[20:])) << 16
 		}
 		out = append(out, &node{f: f, name: name, attr: e[11], cluster: cl, size: le.Uint32(e[28:]),
-			mtime: dosTime(le.Uint16(e[24:]), le.Uint16(e[22:]))})
+			mtime: dosTime(le.Uint16(e[24:]), le.Uint16(e[22:])), entOff: pos(i), lfnOffs: lfnOffs})
 	}
 	return out
 }

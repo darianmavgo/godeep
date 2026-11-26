@@ -74,7 +74,9 @@ func Run(ctx context.Context, p Program) error {
 	root := fstest.MapFS{}
 	fsc := wazero.NewFSConfig()
 	for _, m := range p.Mounts {
-		if w, ok := m.FS.(vfs.Writable); ok {
+		if v, ok := m.FS.(vfs.Volume); ok && vfs.IsWritable(v) {
+			fsc = fsc.(sysfs.FSConfig).WithSysFSMount(&writableFS{w: v.(vfs.Writable)}, m.Path)
+		} else if w, ok := m.FS.(vfs.Writable); ok && !isVolume(m.FS) {
 			fsc = fsc.(sysfs.FSConfig).WithSysFSMount(&writableFS{w: w}, m.Path)
 		} else {
 			fsc = fsc.WithFSMount(m.FS, m.Path)
@@ -137,3 +139,5 @@ func (l *LineReader) Read(p []byte) (int, error) {
 	l.buf = l.buf[n:]
 	return n, nil
 }
+
+func isVolume(f any) bool { _, ok := f.(vfs.Volume); return ok }

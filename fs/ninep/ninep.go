@@ -3,8 +3,11 @@
 // a volume named by the share's tag ("host:/bin/wasm/hello.wasm"), so files
 // built on the host are visible in the guest at once: no copy, no reboot.
 //
-// Read-only for now: version, attach, walk, getattr, lopen, read, readdir,
-// clunk. Requests go through a Transport (drivers/virtio/p9), one at a time.
+// Reads: version, attach, walk, getattr, lopen, read, readdir, clunk.
+// Writes (write.go): lcreate, write, setattr (truncate), mkdir, unlinkat,
+// renameat; whether the share accepts them is probed at mount. Requests go
+// through a Transport, one at a time: virtio (drivers/virtio/p9) or TCP
+// (DialTCP, for a server like tools/ninepd on the other computer).
 package ninep
 
 import (
@@ -52,9 +55,10 @@ type Client struct {
 	msize int
 	tag   string
 
-	mu      sync.Mutex
-	nextFid uint32
-	freeFid []uint32
+	mu       sync.Mutex
+	nextFid  uint32
+	freeFid  []uint32
+	writable bool
 }
 
 // Errno is a Linux error number from the server (Rlerror).
@@ -70,6 +74,12 @@ func (e Errno) Error() string {
 		return "not a directory"
 	case 21:
 		return "is a directory"
+	case 17:
+		return "file exists"
+	case 30:
+		return "read-only file system"
+	case 39:
+		return "directory not empty"
 	}
 	return fmt.Sprintf("9p error %d", uint32(e))
 }
@@ -79,7 +89,9 @@ func (e Errno) Is(target error) bool {
 	case fs.ErrNotExist:
 		return e == 2
 	case fs.ErrPermission:
-		return e == 1 || e == 13
+		return e == 1 || e == 13 || e == 30
+	case fs.ErrExist:
+		return e == 17
 	}
 	return false
 }
@@ -111,6 +123,7 @@ func Mount(ctx context.Context, t Transport, tag string) (*Client, error) {
 	if _, err := c.rpc(tattach, m); err != nil {
 		return nil, fmt.Errorf("9p attach: %w", err)
 	}
+	c.writable = c.probeWrite()
 	return c, nil
 }
 

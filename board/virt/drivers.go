@@ -48,6 +48,7 @@ func init() {
 	dev.Register(nvme.Driver(window))
 	dev.Register(xhci.Driver(window, consoleIn))
 	dev.Register(xhci.DiskDriver())
+	dev.Register(xhci.NICDriver())
 	dev.Register(dev.Driver{Compatible: "arm,armv8-timer", Run: runPtimerProbe})
 	dev.Register(dev.Driver{Compatible: "arm,pl011", Run: func(ctx context.Context, d *dev.Device) error {
 		d.Ready(dev.Lister(lister{"board console (" + UARTMode + " mode)"}))

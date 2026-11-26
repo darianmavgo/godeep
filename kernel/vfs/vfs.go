@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -53,19 +54,47 @@ type Named interface {
 	VolumeName() string
 }
 
+// IsWritable reports whether v accepts writes now: it implements Writable,
+// and (if it says) is open for writing: a FAT on a read-only disk has the
+// methods but refuses.
+func IsWritable(v Volume) bool {
+	if _, ok := v.(Writable); !ok {
+		return false
+	}
+	if w, ok := v.(interface{ Writable() bool }); ok {
+		return w.Writable()
+	}
+	return true
+}
+
 // ErrReadOnly is returned for writes to a read-only volume.
 var ErrReadOnly = errors.New("read-only filesystem")
 
 // NS is a namespace.
 type NS struct {
-	dev *dev.Manager // nil: no block volumes
+	ctx context.Context // the namespace's lifetime: opened volumes read with it
+	dev *dev.Manager    // nil: no block volumes
 
 	mu     sync.Mutex
 	mounts map[string]Volume
+	open   map[string]openVol // block volumes already opened
 }
 
-// New returns a namespace with the device manager's block volumes.
-func New(mgr *dev.Manager) *NS { return &NS{dev: mgr, mounts: map[string]Volume{}} }
+// openVol is a block volume's filesystem, kept so every user shares one
+// (two writers through separate FAT objects would corrupt it), with the
+// disk it came from (a restarted driver means a new one).
+type openVol struct {
+	disk block.Device
+	v    Volume
+}
+
+// New returns a namespace with the device manager's block volumes. ctx is
+// its lifetime (the kernel's): volumes opened through it stay open, shared
+// by every user, and do their I/O with it, not with the ctx of whichever
+// command happened to open them first.
+func New(ctx context.Context, mgr *dev.Manager) *NS {
+	return &NS{ctx: ctx, dev: mgr, mounts: map[string]Volume{}, open: map[string]openVol{}}
+}
 
 // Mount adds a volume under name.
 func (n *NS) Mount(name string, v Volume) {
@@ -88,15 +117,49 @@ func (n *NS) Open(ctx context.Context, name string) (Volume, error) {
 	if v := named(n.dev)[name]; v != nil {
 		return v, nil
 	}
+	disk := diskOf(n.dev, name)
+	n.mu.Lock()
+	if o, ok := n.open[name]; ok && same(o.disk, disk) {
+		n.mu.Unlock()
+		return o.v, nil
+	}
+	n.mu.Unlock()
 	d, err := BlockVolume(ctx, n.dev, name)
 	if err != nil {
 		return nil, err
 	}
-	f, err := OpenFS(ctx, d)
+	f, err := OpenFS(n.ctx, d)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if o, ok := n.open[name]; ok && same(o.disk, disk) {
+		return o.v, nil // opened concurrently: share that one
+	}
+	n.open[name] = openVol{disk: disk, v: f}
 	return f, nil
+}
+
+// same reports whether two disk services are the same one (services that
+// aren't comparable values never match: such a volume isn't cached).
+func same(a, b block.Device) bool {
+	if a == nil || b == nil || !reflect.TypeOf(a).Comparable() || !reflect.TypeOf(b).Comparable() {
+		return false
+	}
+	return a == b
+}
+
+// diskOf is the disk service a volume name lives on ("nvme0p2" → nvme0).
+func diskOf(mgr *dev.Manager, name string) block.Device {
+	all := Disks(mgr)
+	if d, ok := all[name]; ok {
+		return d
+	}
+	if i := strings.LastIndexByte(name, 'p'); i > 0 {
+		return all[name[:i]]
+	}
+	return nil
 }
 
 // Names lists the volumes that hold a filesystem: mounts, then disks and
@@ -220,7 +283,8 @@ func BlockVolume(ctx context.Context, mgr *dev.Manager, name string) (block.Devi
 	return nil, fmt.Errorf("%s: no such volume (see lsblk)", name)
 }
 
-// OpenFS recognizes the filesystem on a block volume.
+// OpenFS recognizes the filesystem on a block volume. FAT on a writable
+// device opens for writing (fs/fat), ext2/3/4 is read-only.
 func OpenFS(ctx context.Context, d block.Device) (Volume, error) {
 	r := block.NewReader(ctx, d)
 	switch {
@@ -231,7 +295,13 @@ func OpenFS(ctx context.Context, d block.Device) (Volume, error) {
 		}
 		return f, nil
 	case fat.Probe(r):
-		f, err := fat.New(r)
+		var f *fat.FS
+		var err error
+		if block.Writable(d) {
+			f, err = fat.NewWritable(r, r)
+		} else {
+			f, err = fat.New(r)
+		}
 		if err != nil {
 			return nil, err
 		}

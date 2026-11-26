@@ -16,13 +16,19 @@ type Writer interface {
 // ErrReadOnly is returned for writes to a device that can't be written.
 var ErrReadOnly = errors.New("block: read-only device")
 
-// Writable reports whether d can be written.
+// Writable reports whether d can be written: it implements Writer, and
+// doesn't report its medium write-protected (ReadOnly() true).
 func Writable(d Device) bool {
 	if p, ok := d.(*Partition); ok {
 		return Writable(p.parent)
 	}
-	_, ok := d.(Writer)
-	return ok
+	if _, ok := d.(Writer); !ok {
+		return false
+	}
+	if ro, ok := d.(interface{ ReadOnly() bool }); ok && ro.ReadOnly() {
+		return false
+	}
+	return true
 }
 
 // WriteBlocks writes through to the disk (offset by the partition's start).

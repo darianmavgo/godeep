@@ -41,11 +41,10 @@ func writable(ctx context.Context, env Env, arg string) (vfs.Writable, string, e
 	if err != nil {
 		return nil, "", err
 	}
-	w, ok := v.(vfs.Writable)
-	if !ok {
+	if !vfs.IsWritable(v) {
 		return nil, "", fmt.Errorf("%s: %w", arg, vfs.ErrReadOnly)
 	}
-	return w, path, nil
+	return v.(vfs.Writable), path, nil
 }
 
 func rm(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
@@ -145,7 +144,7 @@ func df(ctx context.Context, env Env, _ *proc.Proc, _ []string) error {
 			continue
 		}
 		mode := "ro"
-		if _, ok := v.(vfs.Writable); ok {
+		if vfs.IsWritable(v) {
 			mode = "rw"
 		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", name, v.Type(), dash(v.Label()), mode)

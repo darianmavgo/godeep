@@ -70,7 +70,7 @@ func TestDiskCommands(t *testing.T) {
 	out := &syncBuf{}
 	term := tty.New(make(chan byte), out, false)
 	defer term.Close()
-	ns := vfs.New(m)
+	ns := vfs.New(ctx, m)
 	ns.Mount("ram", memfs.New("ram"))
 	env := Env{TTY: term, Dev: m, FS: ns}
 
