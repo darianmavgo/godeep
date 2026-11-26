@@ -39,6 +39,7 @@ make kernel    # build bin/godeep-$(ARCH).elf with TamaGo (TAMAGO=path/to/tamago
 make image     # arm64 Linux-style Image (bin/godeep-arm64.img) for QEMU -kernel, m1n1, U-Boot booti
 make check-virt # headless QEMU virt: PCIe + NVMe + GPT + FAT32/ext4, USB kbd/mouse/hub/storage, ramfb, rng, net, SSH/SFTP, WASM, 9P, pprof, usbnet (tools/qemucheck)
 make check-usbnet # headless QEMU virt test using USB CDC-ECM (usb-net) as sole NIC
+make check-pcie # headless QEMU virt: NVMe + SD card (sdhci-pci) behind pcie-root-ports, and the write fence on a Mac-layout disk (serial godeep-mac)
 make qemu      # boot it with an interactive shell on serial (arm64: the Image + device tree; BOOT=elf for the ELF; EL2=1 to enter at EL2 like m1n1, TCG)
 make qemu-applem1   # the Mac image itself on QEMU sbsa-ref, handed over like m1n1 (tools/fakem1n1); TCG
 make shot-applem1   # (another terminal) its framebuffer → bin/fakem1n1/screen.png

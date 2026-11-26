@@ -121,7 +121,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: wasm push hot check-usbnet test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
+.PHONY: wasm push hot check-usbnet check-pcie test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
 
 # ---- SSH keys (development) ----
 # bin/ssh keeps them across builds: host_ed25519 is godeep's host key,
@@ -267,6 +267,7 @@ check-virt: wasm
 	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. -ninep 127.0.0.1:5641=bin/ninep-check \
 	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(QEMU_NET) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
 	@$(MAKE) -s check-usbnet
+	@$(MAKE) -s check-pcie
 
 # USB Ethernet (CDC ECM) as the only network: QEMU's usb-net on the xHCI,
 # DHCP and SSH over it. The Mac's USB-C gadget link will look like this
@@ -278,6 +279,37 @@ check-usbnet:
 	  -step 'local:ssh -i $(SSH_DIR)/id_ed25519 -p 2224 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR root@127.0.0.1 lsdev usbnet0=>tx' \
 	  -- $(QEMU) $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
 	  -device qemu-xhci,id=xhci -netdev user,id=u0,hostfwd=tcp:127.0.0.1:2224-:22 -device usb-net,netdev=u0,bus=xhci.0 \
+	  -kernel $(BOOTFILE)
+
+# PCIe bridges: the NVMe disk behind a root port (QEMU's pcie-root-port), the
+# way the Mac's PCIe devices sit behind its root ports; and an SD card in an
+# SDHCI reader behind another (the Mac's card reader is one), read and written.
+check-pcie:
+	@$(MAKE) -s image $(DISK)
+	@cp $(DISK) bin/sd-check.img
+	@go run ./tools/mkdisk -mac -size 134217728 -o bin/mac-check.img >/dev/null
+	go run ./tools/qemucheck -log bin/qemucheck-pcie.log \
+	  -step 'lsdev pci=>bridge0,bridge to buses 1-1,nvme0 01:00.0,nvme1 03:00.0' \
+	  -step 'lsblk=>nvme0p1,FAT32,nvme0p2,ext4' \
+	  -step 'cat nvme0p2:/hello.txt=>hello from godeep' \
+	  -step 'lsdev mmc=>SDSC card,64 MB,4-bit at' \
+	  -step 'lsblk=>mmc0p1,FAT32,mmc0p2,ext4' \
+	  -step 'cat mmc0p2:/hello.txt=>hello from godeep' \
+	  -step 'cat mmc0p1:/many/f123.txt=>file 123' \
+	  -step 'write mmc0p1:/sd.txt written on the SD card=>' \
+	  -step 'cat mmc0p1:/sd.txt=>written on the SD card' \
+	  -step 'lsdev nvme1=>godeep-mac,writes only to p2' \
+	  -step 'write nvme1p2:/fenced.txt inside the fence=>' \
+	  -step 'cat nvme1p2:/fenced.txt=>inside the fence' \
+	  -step 'write nvme1p3:/fenced.txt outside the fence=>read-only' \
+	  -step 'ls nvme1p3:/=>docs' \
+	  -- $(QEMU) $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -device pcie-root-port,id=rp1,bus=pcie.0,chassis=1 \
+	  -drive if=none,id=d0,file=$(DISK),format=raw,readonly=on -device nvme,serial=godeep1,drive=d0,bus=rp1 \
+	  -device pcie-root-port,id=rp2,bus=pcie.0,chassis=2 -device sdhci-pci,id=sd0,bus=rp2 \
+	  -drive if=none,id=sdcard,file=bin/sd-check.img,format=raw -device sd-card,drive=sdcard \
+	  -device pcie-root-port,id=rp3,bus=pcie.0,chassis=3 \
+	  -drive if=none,id=mac,file=bin/mac-check.img,format=raw -device nvme,serial=godeep-mac,drive=mac,bus=rp3 \
 	  -kernel $(BOOTFILE)
 
 $(DISK_RW): $(DISK)

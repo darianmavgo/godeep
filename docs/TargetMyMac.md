@@ -445,7 +445,9 @@ Scope: this Mac only (t6000, J316sAP, the Asahi device tree m1n1 hands over), de
 
 The autorun's last line is now `lsdev idle watchdog hid usb nvme smc rtc kbdlight`: one photo of the next boot covers everything above.
 
-**Still open:** taking real IRQ exceptions (AIC2 is polled), the power button (SMC notifications are only counted), SSD writes (limited to `GODEEPDATA`, after reads are confirmed), USB 3 hubs on the SuperSpeed side, NCM in device mode (Windows hosts), the PCIe root complex (SD reader, then Wi-Fi), Wi-Fi itself (BCM4387 firmware + driver: months), audio, GPU.
+**Then, validated on QEMU (2026-11-26):** `halt` is a clean shutdown everywhere (drivers stop, the SSD shuts its firmware down, then `Board.PowerOff`; qemucheck fails on an unclean halt); `drivers/pci` follows bridges (root ports, switches: bus numbers and memory windows), which the Mac's PCIe devices sit behind; `drivers/sdhci` (the Mac's GL9755 card reader is an SDHCI controller) reads and writes SD cards; and `block.Fence` confines writes to chosen partitions. The SSD driver can now write, fenced to the FAT32 partition labelled GODEEPDATA, but `ssdWrites` in `board/applem1/devices.go` stays false until a boot has shown it reading correctly. `make check-pcie` (part of `check-virt`) runs an NVMe disk and an SD card behind root ports, and a Mac-layout disk (APFS stand-in, GODEEPDATA, a decoy FAT32) with the same fence: the write lands in GODEEPDATA only.
+
+**Still open:** taking real IRQ exceptions (AIC2 is polled), the power button (SMC notifications are only counted), SSD writes (built and fenced; switch `ssdWrites` on after reads are confirmed), USB 3 hubs on the SuperSpeed side, NCM in device mode (Windows hosts), the Apple PCIe root complex driver (bridges and SDHCI are ready for it; then Wi-Fi), Wi-Fi itself (BCM4387 firmware + driver: months), audio, GPU.
 
 ---
 

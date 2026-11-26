@@ -20,7 +20,7 @@ func ConfigFromFDT(n *fdt.Node) (HostConfig, error) {
 	}
 	c.ECAM = reg[0].Base
 	if br := n.U32s("bus-range"); len(br) == 2 && br[0] != 0 {
-		return c, fmt.Errorf("pci: %s: buses start at %d; only bus 0 is supported", n.Path, br[0])
+		return c, fmt.Errorf("pci: %s: buses start at %d; godeep numbers them from 0", n.Path, br[0])
 	}
 	pac := cells(n.Parent, "#address-cells", 2)
 	sc := cells(n, "#size-cells", 2)

@@ -63,5 +63,5 @@ func NewBoard() kernel.Board {
 		<-term
 		close(shut)
 	})
-	return kernel.Board{Console: NewConsole(), Shutdown: shut, Net: hostnet.Net{}}
+	return kernel.Board{Console: NewConsole(), Shutdown: shut, Net: hostnet.Net{}, PowerOff: func() { os.Exit(0) }}
 }

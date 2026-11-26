@@ -14,12 +14,14 @@ import (
 	"godeep/drivers/arm/pl061"
 	"godeep/drivers/nvme"
 	"godeep/drivers/pci"
+	"godeep/drivers/sdhci"
 	"godeep/drivers/simplefb"
 	"godeep/drivers/usb/xhci"
 	virtiommio "godeep/drivers/virtio/mmio"
 	virtionet "godeep/drivers/virtio/net"
 	virtiop9 "godeep/drivers/virtio/p9"
 	virtiorng "godeep/drivers/virtio/rng"
+	"godeep/kernel/block"
 	"godeep/kernel/dev"
 	kmmio "godeep/kernel/mmio"
 )
@@ -45,7 +47,16 @@ func init() {
 	}
 	dev.Register(virtionet.Driver(window, netOpt))
 	dev.Register(pci.Driver(window))
-	dev.Register(nvme.Driver(window))
+	// A disk with serial "godeep-mac" rehearses the Mac SSD's write fence:
+	// writes only to the GODEEPDATA FAT32 partition (make check-pcie).
+	dev.Register(nvme.Driver(window, func(serial string) block.Policy {
+		if serial == "godeep-mac" {
+			return block.BasicDataFAT32("GODEEPDATA")
+		}
+		return nil
+	}))
+	dev.Register(sdhci.Driver(window, sdhci.Compatible))
+	dev.Register(sdhci.Driver(window, sdhci.CompatibleDMA))
 	dev.Register(xhci.Driver(window, consoleIn))
 	dev.Register(xhci.DiskDriver())
 	dev.Register(xhci.NICDriver())

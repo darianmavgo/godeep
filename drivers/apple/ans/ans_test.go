@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,6 +43,8 @@ type ssd struct {
 	heads    map[int]int
 	phase    map[int]uint32
 	cmdsSeen int
+	quiesced atomic.Bool // the firmware was told to quiesce (clean shutdown)
+	disk     []byte      // backing store (4 KB blocks); nil: a pattern
 }
 
 func (s *ssd) at(pa uint64, n int) []byte { return s.mem[pa-memBase:][:n] }
@@ -56,6 +60,9 @@ func newSSD(t *testing.T, mem []byte) *ssd {
 			s.nvme.Set(BOOT_STATUS, BootOK)
 			return []rtkit.Message{{EP: 0, Data: 7<<52 | rtkit.PwrOn}}
 		case 0xb:
+			if m.Data&0xffff == rtkit.PwrQuiesced {
+				s.quiesced.Store(true)
+			}
 			return []rtkit.Message{{EP: 0, Data: m.Data}}
 		case 6:
 			return []rtkit.Message{{EP: 0, Data: 7<<52 | m.Data&0xffff}}
@@ -125,7 +132,11 @@ func (s *ssd) exec(q, tag int) {
 	case q == 0 && op == opIdentify:
 		id := s.at(prp1, 4096)
 		clear(id)
-		le.PutUint64(id, blocks)
+		if s.disk != nil {
+			le.PutUint64(id, uint64(len(s.disk)/4096))
+		} else {
+			le.PutUint64(id, blocks)
+		}
 		le.PutUint32(id[128:], 12<<16) // LBA format 0: 4096-byte blocks
 	case q == 1 && op == opRead:
 		lba := le.Uint64(c[40:])
@@ -143,7 +154,26 @@ func (s *ssd) exec(q, tag int) {
 			s.t.Errorf("TCB length %d for %d blocks", le.Uint32(tcb[4:]), n)
 		}
 		for i, pa := range pages {
-			fill(s.at(pa, 4096), lba+uint64(i))
+			if s.disk != nil {
+				copy(s.at(pa, 4096), s.disk[(lba+uint64(i))*4096:])
+			} else {
+				fill(s.at(pa, 4096), lba+uint64(i))
+			}
+		}
+	case q == 1 && op == opWrite && s.disk != nil:
+		lba := le.Uint64(c[40:])
+		n := int(le.Uint32(c[48:])&0xffff) + 1
+		pages := []uint64{prp1}
+		switch {
+		case n == 2:
+			pages = append(pages, prp2)
+		case n > 2:
+			for i := 0; i < n-1; i++ {
+				pages = append(pages, le.Uint64(s.at(prp2+uint64(8*i), 8)))
+			}
+		}
+		for i, pa := range pages {
+			copy(s.disk[(lba+uint64(i))*4096:], s.at(pa, 4096))
 		}
 	case q == 0 && (op == opDeleteSQ || op == opDeleteCQ):
 	default:
@@ -211,7 +241,15 @@ func TestBootIdentifyRead(t *testing.T) {
 	if got := fakes[sartBase].(*mmio.Fake).Get(0); got != 0xff {
 		t.Fatalf("SART entry 0 config %#x: DMA region not allowed", got)
 	}
+	// Stopping the driver (halt) shuts the controller and firmware down.
 	cancel()
+	deadline := time.Now().Add(5 * time.Second)
+	for s.nvme.Get(CC)&CC_SHN_MASK != CC_SHN_NORMAL || !s.quiesced.Load() {
+		if time.Now().After(deadline) {
+			t.Fatalf("no clean shutdown: CC %#x, firmware quiesced %v", s.nvme.Get(CC), s.quiesced.Load())
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestConfigFromFDT(t *testing.T) {
@@ -269,5 +307,68 @@ func TestConfigFromFDT(t *testing.T) {
 	}
 	if len(c.Power) != 1 || c.Reset == nil || c.Reset.Addr != 0x2_8e08_03c8 {
 		t.Fatalf("power %+v reset %+v", c.Power, c.Reset)
+	}
+}
+
+// With writes on, the SSD is published fenced: GODEEPDATA takes writes,
+// APFS and the partition table don't.
+func TestFencedWrites(t *testing.T) {
+	fat := make([]byte, 1<<20)
+	copy(fat[0x47:], "GODEEPDATA ")
+	copy(fat[0x52:], "FAT32   ")
+	fat[510], fat[511] = 0x55, 0xaa
+	apfs := bytes.Repeat([]byte{0xaa}, 1<<20)
+	img, err := block.MakeGPT(16<<20, 4096, []block.PartSpec{
+		{Name: "Macintosh HD", Type: block.TypeAPFS, Data: apfs},
+		{Type: block.TypeBasicData, Data: fat},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem := make([]byte, 8<<20)
+	s := newSSD(t, mem)
+	s.disk = img
+	fakes := map[uint64]mmio.Regs64{nvmeBase: s.nvme, mboxBase: s.mbox.F, ansBase: mmio.NewFake(), sartBase: mmio.NewFake()}
+	dev.Register(Driver(func(b uint64) mmio.Regs64 {
+		if f, ok := fakes[b]; ok {
+			return f
+		}
+		return mmio.NewFake()
+	}))
+	m := dev.NewManager(proc.NewTable(), nil, dma.New(dma.Region{Base: memBase, Mem: mem}))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	m.Start(ctx, []dev.Node{{Name: "nvme0", Compatible: Compatible,
+		Config: Config{NVMe: nvmeBase, ANS: ansBase, Mailbox: mboxBase, SART: sartBase, Writes: true}}})
+	svc, err := m.Get(ctx, "nvme0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, ok := svc.(*block.Fenced)
+	if !ok {
+		t.Fatalf("service %T, want a fenced disk", svc)
+	}
+	if got := f.Allowed(); len(got) != 1 || got[0] != "p2 " {
+		t.Fatalf("allowed %q", got)
+	}
+	parts, _, err := block.Partitions(ctx, f)
+	if err != nil || len(parts) != 2 {
+		t.Fatalf("%v %v", parts, err)
+	}
+	data := bytes.Repeat([]byte("godeep!!"), 4096/8*3)
+	if err := parts[1].WriteBlocks(ctx, 10, data); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(img[(parts[1].Start+10)*4096:][:len(data)], data) {
+		t.Fatal("write didn't reach the SSD")
+	}
+	if err := parts[0].WriteBlocks(ctx, 0, data[:4096]); !errors.Is(err, block.ErrFenced) {
+		t.Fatalf("APFS write: %v", err)
+	}
+	if err := f.WriteBlocks(ctx, 0, data[:4096]); !errors.Is(err, block.ErrFenced) {
+		t.Fatalf("partition-table write: %v", err)
+	}
+	if !bytes.Equal(img[parts[0].Start*4096:][:1<<20], apfs) {
+		t.Fatal("APFS changed")
 	}
 }

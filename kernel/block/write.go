@@ -20,6 +20,11 @@ var ErrReadOnly = errors.New("block: read-only device")
 // doesn't report its medium write-protected (ReadOnly() true).
 func Writable(d Device) bool {
 	if p, ok := d.(*Partition); ok {
+		if f, ok := p.parent.(interface {
+			CanWrite(start, count uint64) bool
+		}); ok {
+			return f.CanWrite(p.Start, p.Count) // a fenced disk: per partition
+		}
 		return Writable(p.parent)
 	}
 	if _, ok := d.(Writer); !ok {

@@ -71,7 +71,11 @@ const (
 
 // Driver returns the NVMe driver. The node's Config is its *pci.Function
 // and Reg[0] its BAR0.
-func Driver(regs func(base uint64) mmio.Regs) dev.Driver {
+//
+// fence, if given, decides which disks are fenced (by serial number) and
+// how: their writes are confined to the partitions the policy allows
+// (block.Fence). QEMU virt uses it to rehearse the Mac SSD's fence.
+func Driver(regs func(base uint64) mmio.Regs, fence ...func(serial string) block.Policy) dev.Driver {
 	return dev.Driver{Compatible: Compatible, Run: func(ctx context.Context, d *dev.Device) error {
 		f, ok := d.Config.(*pci.Function)
 		if !ok || f.BARs[0].Size == 0 {
@@ -90,7 +94,44 @@ func Driver(regs func(base uint64) mmio.Regs) dev.Driver {
 		defer c.free()
 		defer c.shutdown()
 		disk := &Disk{reqs: make(chan *req), info: c.info, bs: c.bs, blocks: c.blocks}
-		d.Ready(disk)
+		var policy block.Policy
+		for _, f := range fence {
+			if p := f(c.serial); p != nil {
+				policy = p
+			}
+		}
+		if policy == nil {
+			d.Ready(disk)
+		} else {
+			// The fence reads the partition table through the disk, so
+			// serve requests while it does.
+			fenced := make(chan *block.Fenced, 1)
+			fctx, cancel := context.WithCancel(ctx)
+			d.Proc.Go(func(context.Context) { // ends with fctx; touches only the disk's request channel
+				f, err := block.Fence(fctx, disk, policy)
+				if err != nil {
+					f = nil
+				}
+				fenced <- f
+			})
+		wait:
+			for {
+				select {
+				case f := <-fenced:
+					cancel()
+					if f == nil {
+						return errors.New("nvme: can't read the partition table to fence the disk")
+					}
+					d.Ready(f)
+					break wait
+				case r := <-disk.reqs:
+					r.done <- c.read(ctx, r.lba, r.p) // the fence only reads
+				case <-ctx.Done():
+					cancel()
+					return nil
+				}
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
@@ -161,6 +202,7 @@ type queue struct {
 }
 
 type ctrl struct {
+	serial  string
 	r       mmio.Regs
 	dma     *dma.Allocator
 	dstrd   uint64
@@ -268,6 +310,7 @@ func (c *ctrl) init(ctx context.Context) error {
 	id := c.buf.Bytes[:4096]
 	model := strings.TrimSpace(string(id[24:64]))
 	serial := strings.TrimSpace(string(id[4:24]))
+	c.serial = serial
 	c.maxXfer = maxTransfer
 	if mdts := id[77]; mdts != 0 && pageSize<<mdts < c.maxXfer {
 		c.maxXfer = pageSize << mdts

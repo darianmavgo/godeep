@@ -4,6 +4,7 @@
 package microvm
 
 import (
+	"os"
 	"time"
 
 	vm "github.com/usbarmory/tamago/board/qemu/microvm"
@@ -46,5 +47,5 @@ func (crlf) Write(p []byte) (int, error) {
 // which godeep does not handle yet, so there is no Shutdown channel: `make
 // stop` falls back to killing QEMU.
 func NewBoard() kernel.Board {
-	return kernel.Board{Console: NewConsole()}
+	return kernel.Board{Console: NewConsole(), PowerOff: func() { os.Exit(0) }} // triple fault: QEMU exits (-no-reboot)
 }

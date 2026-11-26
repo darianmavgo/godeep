@@ -254,11 +254,26 @@ func run(st steps, argv []string, timeout time.Duration, logPath, qmpPath string
 		fmt.Printf("qemucheck: OK: %s\n", command)
 		mark = len(seen)
 	}
+	// halt must be clean: every process stops ("godeep: halted") and the
+	// board powers QEMU off.
 	io.WriteString(in, "halt\r")
 	select {
 	case <-exited:
-	case <-time.After(10 * time.Second):
+	case <-time.After(15 * time.Second):
+		return errors.New("QEMU still running 15 s after halt")
 	}
+	for {
+		select {
+		case seen = <-text:
+			continue
+		default:
+		}
+		break
+	}
+	if !strings.Contains(seen, "godeep: halted") || strings.Contains(seen, "did not exit") {
+		return fmt.Errorf("halt was not clean:\n%s", tail(seen))
+	}
+	fmt.Println("qemucheck: OK: halt (clean shutdown, powered off)")
 	return nil
 }
 

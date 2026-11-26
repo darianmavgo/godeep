@@ -7,8 +7,9 @@
 // repeating the command's DMA addresses.
 //
 // One goroutine owns the controller; one command is in flight at a time
-// (slot 0). The disk is READ-ONLY: this driver hasn't run on the Mac yet,
-// and the SSD holds macOS and Omarchy.
+// (slot 0). The disk is read-only unless Config.Writes is set, and even
+// then it is fenced (block.Fence): writes land only in the FAT32 partition
+// labelled GODEEPDATA. The SSD holds macOS and Omarchy.
 package ans
 
 import (
@@ -70,6 +71,7 @@ const (
 	opDeleteCQ = 0x04
 	opIdentify = 0x06
 	opRead     = 0x02
+	opWrite    = 0x01
 
 	tcbToDevice   = 1 << 1
 	tcbFromDevice = 1 << 0
@@ -84,7 +86,13 @@ type Config struct {
 	Power                    []pmgr.Domain // parents first
 	Reset                    *pmgr.Domain  // ps_ans2: reset when firmware was left running
 	MailboxIRQs              []int         // the mailbox's interrupts (AIC ids), if the board has AIC
+	// Writes turns on writing, always fenced to the GODEEPDATA partition.
+	// Off until reads have been confirmed on the Mac.
+	Writes bool
 }
+
+// Fence is the write policy for the SSD: godeep's own FAT32 partition.
+var Fence = block.BasicDataFAT32("GODEEPDATA")
 
 // Driver returns the SSD driver.
 func Driver(regs func(base uint64) mmio.Regs64) dev.Driver {
@@ -101,18 +109,21 @@ func Driver(regs func(base uint64) mmio.Regs64) dev.Driver {
 
 // Disk is the SSD: a read-only block.Device.
 type Disk struct {
-	reqs   chan *req
-	down   chan struct{}
-	bs     int
-	blocks uint64
-	info   string
-	reads  atomic.Uint64
+	reqs     chan *req
+	down     chan struct{}
+	bs       int
+	blocks   uint64
+	info     string
+	reads    atomic.Uint64
+	writes   atomic.Uint64
+	writable bool
 }
 
 type req struct {
-	lba  uint64
-	p    []byte
-	done chan error
+	lba   uint64
+	p     []byte
+	write bool
+	done  chan error
 }
 
 var _ block.Device = (*Disk)(nil)
@@ -120,17 +131,32 @@ var _ block.Device = (*Disk)(nil)
 func (k *Disk) BlockSize() int { return k.bs }
 func (k *Disk) Blocks() uint64 { return k.blocks }
 func (k *Disk) Devices() []string {
-	return []string{fmt.Sprintf("%s, %d reads, read-only", k.info, k.reads.Load())}
+	mode := "read-only"
+	if k.writable {
+		mode = fmt.Sprintf("%d writes", k.writes.Load())
+	}
+	return []string{fmt.Sprintf("%s, %d reads, %s", k.info, k.reads.Load(), mode)}
+}
+
+// writer is the Disk with writes: only ever handed to block.Fence.
+type writer struct{ *Disk }
+
+func (w writer) WriteBlocks(ctx context.Context, lba uint64, p []byte) error {
+	return w.do(ctx, lba, p, true)
 }
 
 func (k *Disk) ReadBlocks(ctx context.Context, lba uint64, p []byte) error {
+	return k.do(ctx, lba, p, false)
+}
+
+func (k *Disk) do(ctx context.Context, lba uint64, p []byte, write bool) error {
 	if len(p)%k.bs != 0 {
-		return fmt.Errorf("ans: read of %d bytes", len(p))
+		return fmt.Errorf("ans: transfer of %d bytes", len(p))
 	}
 	if lba+uint64(len(p)/k.bs) > k.blocks {
 		return block.ErrRange
 	}
-	r := &req{lba: lba, p: p, done: make(chan error, 1)}
+	r := &req{lba: lba, p: p, write: write, done: make(chan error, 1)}
 	select {
 	case k.reqs <- r:
 	case <-k.down:
@@ -207,7 +233,9 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs64, c Co
 		}
 	}
 
-	mctx, stopMbox := context.WithCancel(ctx)
+	// The mailbox and RTKit outlive ctx: when the driver is stopped (halt),
+	// the firmware still has to be told to shut down.
+	mctx, stopMbox := context.WithCancel(context.WithoutCancel(ctx))
 	defer stopMbox()
 	mb := asc.New(regs(c.Mailbox))
 	line := asc.RecvLine(d.Bridge, c.MailboxIRQs, "ans mailbox")
@@ -235,7 +263,22 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs64, c Co
 	}
 	k.info = fmt.Sprintf("%s; RTKit v%d%s", k.info, rk.Info().Version, note)
 	defer close(k.down)
-	d.Ready(k)
+	var fenced chan *block.Fenced
+	if c.Writes {
+		// The fence reads the partition table through the disk: serve
+		// requests while it does, then publish the fenced disk.
+		k.writable = true
+		fenced = make(chan *block.Fenced, 1)
+		d.Proc.Go(func(ctx context.Context) {
+			f, err := block.Fence(ctx, writer{k}, Fence)
+			if err != nil {
+				f = nil
+			}
+			fenced <- f
+		})
+	} else {
+		d.Ready(k)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -244,9 +287,21 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs64, c Co
 			rk.Shutdown(sctx)
 			cancel()
 			return nil
+		case f := <-fenced:
+			fenced = nil
+			if f == nil {
+				return errors.New("ans: can't read the partition table to fence writes")
+			}
+			d.Ready(f)
 		case q := <-k.reqs:
-			err := cl.read(ctx, k, q.lba, q.p)
-			k.reads.Add(1)
+			var err error
+			if q.write {
+				err = cl.write(ctx, k, q.lba, q.p)
+				k.writes.Add(1)
+			} else {
+				err = cl.read(ctx, k, q.lba, q.p)
+				k.reads.Add(1)
+			}
 			q.done <- err
 		}
 	}
@@ -426,10 +481,23 @@ func (c *ctl) exec(ctx context.Context, q *queue, x cmd) (uint32, error) {
 
 // read fills p from lba on, MaxPages at a time.
 func (c *ctl) read(ctx context.Context, k *Disk, lba uint64, p []byte) error {
+	return c.rw(ctx, k, lba, p, false)
+}
+
+// write writes p from lba on (only ever reached through the fence).
+func (c *ctl) write(ctx context.Context, k *Disk, lba uint64, p []byte) error {
+	return c.rw(ctx, k, lba, p, true)
+}
+
+func (c *ctl) rw(ctx context.Context, k *Disk, lba uint64, p []byte, write bool) error {
+	op := byte(opRead)
+	if write {
+		op = opWrite
+	}
 	for len(p) > 0 {
 		n := min(len(p), MaxPages*PageSize)
 		pages := (n + PageSize - 1) / PageSize
-		x := cmd{op: opRead, nsid: 1, prp1: c.data.Phys, cdw10: uint32(lba), cdw11: uint32(lba >> 32),
+		x := cmd{op: op, nsid: 1, prp1: c.data.Phys, cdw10: uint32(lba), cdw11: uint32(lba >> 32),
 			cdw12: uint32(n/k.bs - 1)}
 		switch {
 		case pages == 2:
@@ -440,10 +508,15 @@ func (c *ctl) read(ctx context.Context, k *Disk, lba uint64, p []byte) error {
 			}
 			x.prp2 = c.prps.Phys
 		}
+		if write {
+			copy(c.data.Bytes[:n], p[:n])
+		}
 		if _, err := c.exec(ctx, c.io, x); err != nil {
 			return err
 		}
-		copy(p, c.data.Bytes[:n])
+		if !write {
+			copy(p, c.data.Bytes[:n])
+		}
 		p, lba = p[n:], lba+uint64(n/k.bs)
 	}
 	return nil

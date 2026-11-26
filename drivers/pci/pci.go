@@ -10,8 +10,12 @@
 // "pciclass,CCSSPP" (class, subclass, programming interface: the Linux
 // convention), so drivers bind by class. Its Config is the *Function.
 //
-// Scope: bus 0 only (QEMU virt puts devices there). Bridges are listed
-// but not followed. I/O BARs are skipped: PCIe devices don't need them.
+// Bridges (PCIe root ports, switches) are followed depth first, as Linux
+// does: each gets the next bus number, its subordinate number once its
+// subtree is known, and a memory window around its children's BARs (1 MB
+// granules). The I/O and prefetchable windows stay closed; every BAR goes
+// in the memory window, which works for 32- and 64-bit BARs alike. I/O BARs
+// are skipped: PCIe devices don't need them.
 package pci
 
 import (
@@ -34,6 +38,16 @@ const (
 	CLASS       = 0x08 // revision (low 8), class code (high 24)
 	HEADER_TYPE = 0x0c // byte 2
 	BAR0        = 0x10
+
+	// Type 1 (bridge) header.
+	BUS_NUMBERS = 0x18 // primary, secondary, subordinate, latency
+	IO_BASE     = 0x1c // I/O base and limit (low 16), secondary status (high 16)
+	MEM_BASE    = 0x20 // memory base (low 16), limit (high 16): address bits 31:20
+	PREF_BASE   = 0x24
+	PREF_UPPER  = 0x28 // and PREF_LIMIT_UPPER at 0x2c
+	BRIDGE_CTRL = 0x3c
+	bridgeAlign = 1 << 20
+	maxBuses    = 256
 
 	CMD_MEMORY     = 1 << 1
 	CMD_BUS_MASTER = 1 << 2
@@ -78,6 +92,8 @@ type Function struct {
 	Vendor, Device uint16
 	Class          uint32 // class<<16 | subclass<<8 | prog-if
 	Bridge         bool
+	Secondary      int    // bridges: the bus behind it
+	Subordinate    int    // bridges: the last bus in its subtree
 	BARs           [6]BAR // index = BAR number; Size 0: absent or not assigned
 	Name           string // e.g. "nvme0"
 
@@ -94,7 +110,7 @@ func (f *Function) ConfigWrite32(reg uint64, v uint32) { f.cfg.Write32(f.off+reg
 func (f *Function) String() string {
 	s := fmt.Sprintf("%02x:%02x.%x %04x:%04x class %06x", f.Bus, f.Dev, f.Fn, f.Vendor, f.Device, f.Class)
 	if f.Bridge {
-		return s + " bridge (not scanned)"
+		return s + fmt.Sprintf(" bridge to buses %d-%d", f.Secondary, f.Subordinate)
 	}
 	for i, b := range f.BARs {
 		if b.Size != 0 {
@@ -140,8 +156,9 @@ func (a *allocator) alloc(size uint64) (uint64, bool) {
 	return addr, true
 }
 
-// Scan enumerates bus 0 behind cfg and assigns memory BARs from the
-// windows. Functions are returned in bus/device/function order.
+// Scan enumerates the buses behind cfg (bus 0, then every bridge's) and
+// assigns memory BARs from the windows. Functions are returned in the order
+// they were found (depth first).
 func Scan(cfg mmio.Regs, windows []Window) ([]*Function, error) {
 	var mem32, mem64 *allocator
 	for _, w := range windows {
@@ -156,12 +173,34 @@ func Scan(cfg mmio.Regs, windows []Window) ([]*Function, error) {
 	if mem32 == nil && mem64 == nil {
 		return nil, errors.New("pci: the host bridge has no memory window")
 	}
+	s := &scanner{cfg: cfg, mem32: mem32, mem64: mem64, counts: map[string]int{}}
+	_, err := s.bus(0)
+	return s.out, err
+}
 
-	var out []*Function
-	counts := map[string]int{}
+type scanner struct {
+	cfg          mmio.Regs
+	mem32, mem64 *allocator
+	counts       map[string]int
+	out          []*Function
+	lastBus      int
+}
+
+// window is the allocator bridge windows come from: the one BARs use.
+func (s *scanner) window() *allocator {
+	if s.mem32 != nil {
+		return s.mem32
+	}
+	return s.mem64
+}
+
+// bus scans one bus and, depth first, the buses behind its bridges. It
+// returns the last bus number used.
+func (s *scanner) bus(b int) (int, error) {
+	cfg := s.cfg
 	for d := 0; d < 32; d++ {
 		for fn := 0; fn < 8; fn++ {
-			off := uint64(d)<<15 | uint64(fn)<<12
+			off := uint64(b)<<20 | uint64(d)<<15 | uint64(fn)<<12
 			id := cfg.Read32(off + VENDOR_ID)
 			if id&0xffff == 0xffff {
 				if fn == 0 {
@@ -169,41 +208,92 @@ func Scan(cfg mmio.Regs, windows []Window) ([]*Function, error) {
 				}
 				continue
 			}
-			f := &Function{Dev: d, Fn: fn, Vendor: uint16(id), Device: uint16(id >> 16),
+			f := &Function{Bus: b, Dev: d, Fn: fn, Vendor: uint16(id), Device: uint16(id >> 16),
 				Class: cfg.Read32(off+CLASS) >> 8, cfg: cfg, off: off}
 			ht := cfg.Read32(off+HEADER_TYPE) >> 16 & 0xff
 			f.Bridge = ht&0x7f == 1
-			if !f.Bridge && ht&0x7f == 0 {
-				if err := f.assign(mem32, mem64); err != nil {
-					return out, err
+			switch ht & 0x7f {
+			case 0:
+				if err := f.assign(s.mem32, s.mem64, 6); err != nil {
+					return s.lastBus, err
+				}
+			case 1:
+				if err := f.assign(s.mem32, s.mem64, 2); err != nil {
+					return s.lastBus, err
 				}
 			}
 			short := shortName(f.Class)
-			f.Name = fmt.Sprintf("%s%d", short, counts[short])
-			counts[short]++
-			out = append(out, f)
+			if f.Bridge {
+				short = "bridge"
+			}
+			f.Name = fmt.Sprintf("%s%d", short, s.counts[short])
+			s.counts[short]++
+			s.out = append(s.out, f)
+			if f.Bridge {
+				if err := s.bridge(f); err != nil {
+					return s.lastBus, err
+				}
+			}
 			if fn == 0 && ht&0x80 == 0 {
 				break // single-function device
 			}
 		}
 	}
-	return out, nil
+	return s.lastBus, nil
+}
+
+// bridge numbers the bus behind f, scans it, and opens f's memory window
+// around what its subtree got.
+func (s *scanner) bridge(f *Function) error {
+	if s.lastBus+1 >= maxBuses {
+		return fmt.Errorf("pci: %s: out of bus numbers", f)
+	}
+	s.lastBus++
+	f.Secondary = s.lastBus
+	// While scanning, the bridge forwards every bus above its secondary.
+	busReg := func(sub int) uint32 {
+		return f.ConfigRead32(BUS_NUMBERS)&0xff000000 | uint32(sub)<<16 | uint32(f.Secondary)<<8 | uint32(f.Bus)
+	}
+	f.ConfigWrite32(BUS_NUMBERS, busReg(0xff))
+	f.ConfigWrite32(IO_BASE, f.ConfigRead32(IO_BASE)&0xffff0000|0x00f0) // I/O closed (base > limit)
+	f.ConfigWrite32(PREF_BASE, 0x0000fff0)                              // prefetchable closed
+	f.ConfigWrite32(PREF_UPPER, 0)
+	f.ConfigWrite32(PREF_UPPER+4, 0)
+
+	a := s.window()
+	a.next = (a.next + bridgeAlign - 1) &^ (bridgeAlign - 1)
+	start := a.next
+	if _, err := s.bus(f.Secondary); err != nil {
+		return err
+	}
+	f.Subordinate = s.lastBus
+	f.ConfigWrite32(BUS_NUMBERS, busReg(f.Subordinate))
+
+	end := (a.next + bridgeAlign - 1) &^ (bridgeAlign - 1)
+	if end > start { // children have BARs: forward [start, end)
+		a.next = end
+		f.ConfigWrite32(MEM_BASE, uint32(end-1)&0xfff00000|uint32(start)>>16&0xfff0)
+	} else {
+		f.ConfigWrite32(MEM_BASE, 0x0000fff0) // closed
+	}
+	f.ConfigWrite32(COMMAND, f.ConfigRead32(COMMAND)&0xffff|CMD_MEMORY|CMD_BUS_MASTER)
+	return nil
 }
 
 // assign sizes and places the function's memory BARs, then enables memory
 // decoding and bus mastering.
-func (f *Function) assign(mem32, mem64 *allocator) error {
+func (f *Function) assign(mem32, mem64 *allocator, nbars int) error {
 	// Decoding off while BARs hold sizing patterns.
 	f.ConfigWrite32(COMMAND, f.ConfigRead32(COMMAND)&0xffff&^(CMD_MEMORY|CMD_BUS_MASTER))
 	assigned := false
-	for i := 0; i < 6; i++ {
+	for i := 0; i < nbars; i++ {
 		reg := BAR0 + uint64(4*i)
 		orig := f.ConfigRead32(reg)
 		if orig&BAR_IO != 0 {
 			continue
 		}
 		is64 := orig&(3<<1) == BAR_TYPE_64
-		if is64 && i == 5 {
+		if is64 && i == nbars-1 {
 			return fmt.Errorf("pci: %s: 64-bit BAR5 has no upper half", f)
 		}
 		f.ConfigWrite32(reg, 0xffffffff)
@@ -271,7 +361,7 @@ func Driver(regs func(base uint64) mmio.Regs) dev.Driver {
 		list := make(lister, 0, len(fns))
 		for _, f := range fns {
 			list = append(list, f.Name+" "+f.String())
-			if f.Bridge || f.Class>>8 == 0x0600 { // bridges and the host bridge itself
+			if f.Bridge || f.Class>>8 == 0x0600 || f.Class>>8 == 0x0604 { // bridges and the host bridge itself
 				continue
 			}
 			n := dev.Node{Name: f.Name, Compatible: f.Compatible(), Config: f}

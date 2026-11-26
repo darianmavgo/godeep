@@ -170,6 +170,7 @@ func configureNodes(root *fdt.Node, nodes []dev.Node, keys chan<- byte) (extra [
 			if c, err := ans.ConfigFromFDT(fn); err != nil {
 				n.Config = err
 			} else {
+				c.Writes = ssdWrites
 				n.Config = c
 			}
 		case smc.Compatible:
@@ -354,3 +355,8 @@ func fpwmConfig(n *fdt.Node) any {
 	c.Power = doms
 	return c
 }
+
+// ssdWrites lets godeep write to the internal SSD, fenced to the FAT32
+// partition labelled GODEEPDATA (block.Fence). Turn it on only after a
+// boot has shown `lsblk` and `ls nvme0p…:/` reading the SSD correctly.
+const ssdWrites = false

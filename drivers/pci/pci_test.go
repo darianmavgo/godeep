@@ -2,6 +2,7 @@ package pci
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -18,20 +19,37 @@ type fn struct {
 	mask, ro          [6]uint32 // per BAR register: writable bits, read-only bits (0, 0: unimplemented)
 	val               [6]uint32
 	cmd               uint32
+	regs              map[uint64]uint32 // other registers (bridge windows, bus numbers)
 }
 
 // ecam models config space: functions by (dev, fn), reads of absent ones
 // return all ones.
 type ecam struct {
 	mu  sync.Mutex
-	fns map[[2]int]*fn
+	fns map[[3]int]*fn // bus, device, function
+}
+
+// lookup finds the function at off; a bus other than 0 answers only once
+// some bridge forwards to it (its secondary..subordinate range covers it).
+func (e *ecam) lookup(off uint64) *fn {
+	bus := int(off >> 20 & 0xff)
+	f := e.fns[[3]int{bus, int(off >> 15 & 31), int(off >> 12 & 7)}]
+	if f == nil || bus == 0 {
+		return f
+	}
+	for _, b := range e.fns {
+		if r := b.regs[BUS_NUMBERS]; b.header&0x7f == 1 && int(r>>8&0xff) <= bus && bus <= int(r>>16&0xff) && r>>8&0xff != 0 {
+			return f
+		}
+	}
+	return nil
 }
 
 func (e *ecam) Read32(off uint64) uint32 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	f := e.fns[[2]int{int(off >> 15 & 31), int(off >> 12 & 7)}]
-	if f == nil || off>>20 != 0 {
+	f := e.lookup(off)
+	if f == nil {
 		return 0xffffffff
 	}
 	switch r := off & 0xfff; {
@@ -43,16 +61,16 @@ func (e *ecam) Read32(off uint64) uint32 {
 		return f.class<<8 | 1
 	case r == HEADER_TYPE:
 		return f.header << 16
-	case r >= BAR0 && r < BAR0+24:
+	case r >= BAR0 && r < BAR0+24 && (f.header&0x7f == 0 || r < BAR0+8):
 		return f.val[(r-BAR0)/4]
 	}
-	return 0
+	return f.regs[off&0xfff]
 }
 
 func (e *ecam) Write32(off uint64, v uint32) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	f := e.fns[[2]int{int(off >> 15 & 31), int(off >> 12 & 7)}]
+	f := e.lookup(off)
 	if f == nil {
 		return
 	}
@@ -62,9 +80,14 @@ func (e *ecam) Write32(off uint64, v uint32) {
 			panic("wrote 1s to the write-1-to-clear status register")
 		}
 		f.cmd = v & 0xffff
-	case r >= BAR0 && r < BAR0+24:
+	case r >= BAR0 && r < BAR0+24 && (f.header&0x7f == 0 || r < BAR0+8):
 		i := (r - BAR0) / 4
 		f.val[i] = v&f.mask[i] | f.ro[i]
+	default:
+		if f.regs == nil {
+			f.regs = map[uint64]uint32{}
+		}
+		f.regs[r] = v
 	}
 }
 
@@ -87,12 +110,12 @@ func newECAM() *ecam {
 	io := &fn{id: 0x2000_1af4, class: 0x0c0330}
 	io.mask[0], io.ro[0], io.val[0] = 0xffffffe0, BAR_IO, BAR_IO // an I/O BAR: skipped
 	io.bar32(2, 0x10000, BAR_PREFETCH)
-	return &ecam{fns: map[[2]int]*fn{
-		{0, 0}: {id: 0x0008_1b36, class: 0x060000},
-		{1, 0}: nvme,
-		{2, 0}: mf0,
-		{2, 3}: io,
-		{4, 0}: {id: 0x000c_1b36, class: 0x060400, header: 1},
+	return &ecam{fns: map[[3]int]*fn{
+		{0, 0, 0}: {id: 0x0008_1b36, class: 0x060000},
+		{0, 1, 0}: nvme,
+		{0, 2, 0}: mf0,
+		{0, 2, 3}: io,
+		{0, 4, 0}: {id: 0x000c_1b36, class: 0x060400, header: 1},
 	}}
 }
 
@@ -112,18 +135,18 @@ func TestScan(t *testing.T) {
 	for _, f := range fns {
 		names = append(names, f.Name)
 	}
-	if got := strings.Join(names, " "); got != "host0 nvme0 net0 xhci0 pci0" {
+	if got := strings.Join(names, " "); got != "host0 nvme0 net0 xhci0 bridge0" {
 		t.Fatalf("functions: %s", got)
 	}
 	nvme := fns[1]
 	if b := nvme.BARs[0]; b.Size != 0x4000 || !b.Is64 || b.CPU%0x4000 != 0 || b.CPU < 0x10000000 {
 		t.Fatalf("nvme BAR0 %+v", b)
 	}
-	if e.fns[[2]int{1, 0}].val[0]&^0xf != uint32(nvme.BARs[0].PCI) || e.fns[[2]int{1, 0}].val[1] != 0 {
+	if e.fns[[3]int{0, 1, 0}].val[0]&^0xf != uint32(nvme.BARs[0].PCI) || e.fns[[3]int{0, 1, 0}].val[1] != 0 {
 		t.Fatal("BAR0 not programmed")
 	}
-	if e.fns[[2]int{1, 0}].cmd != CMD_MEMORY|CMD_BUS_MASTER {
-		t.Fatalf("command %#x", e.fns[[2]int{1, 0}].cmd)
+	if e.fns[[3]int{0, 1, 0}].cmd != CMD_MEMORY|CMD_BUS_MASTER {
+		t.Fatalf("command %#x", e.fns[[3]int{0, 1, 0}].cmd)
 	}
 	if b := fns[2].BARs[1]; b.Size != 0x1000 || b.Is64 {
 		t.Fatalf("net0 BAR1 %+v", b)
@@ -218,5 +241,66 @@ func TestConfigFromFDT(t *testing.T) {
 	}
 	if w := c.Windows[2]; w.Space != SpaceMem64 || !w.Prefetch || w.CPU != 0x80_0000_0000 {
 		t.Fatalf("mem64 %+v", w)
+	}
+}
+
+// Root ports with devices behind them, one nested: bus numbers, windows,
+// and the devices' BARs inside their bridges' windows.
+func TestBridges(t *testing.T) {
+	disk := &fn{id: 0x0010_1b36, class: 0x010802}
+	disk.bar64(0, 0x4000)
+	sd := &fn{id: 0x0007_1b36, class: 0x080501}
+	sd.bar32(0, 0x100, 0)
+	rp := func() *fn { return &fn{id: 0x000c_1b36, class: 0x060400, header: 1} }
+	e := &ecam{fns: map[[3]int]*fn{
+		{0, 0, 0}: {id: 0x0008_1b36, class: 0x060000},
+		{0, 1, 0}: rp(), // root port: bus 1 (a switch: bus 2 behind it)
+		{1, 0, 0}: rp(), // the switch's port
+		{2, 0, 0}: disk, // nvme behind both
+		{0, 2, 0}: rp(), // second root port: bus 3
+		{3, 0, 0}: sd,   // sdhci
+		{0, 3, 0}: rp(), // an empty slot: bus 4, window closed
+	}}
+	fns, err := Scan(e, windows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, f := range fns {
+		names = append(names, fmt.Sprintf("%s@%d", f.Name, f.Bus))
+	}
+	if got := strings.Join(names, " "); got != "host0@0 bridge0@0 bridge1@1 nvme0@2 bridge2@0 mmc0@3 bridge3@0" {
+		t.Fatalf("functions: %s", got)
+	}
+	bus := func(k [3]int) (pri, sec, sub uint32) {
+		r := e.fns[k].regs[BUS_NUMBERS]
+		return r & 0xff, r >> 8 & 0xff, r >> 16 & 0xff
+	}
+	for _, c := range []struct {
+		k             [3]int
+		pri, sec, sub uint32
+	}{{[3]int{0, 1, 0}, 0, 1, 2}, {[3]int{1, 0, 0}, 1, 2, 2}, {[3]int{0, 2, 0}, 0, 3, 3}, {[3]int{0, 3, 0}, 0, 4, 4}} {
+		if p, s2, sb := bus(c.k); p != c.pri || s2 != c.sec || sb != c.sub {
+			t.Fatalf("bridge %v: buses %d/%d/%d, want %d/%d/%d", c.k, p, s2, sb, c.pri, c.sec, c.sub)
+		}
+	}
+	window := func(k [3]int) (lo, hi uint64) {
+		r := e.fns[k].regs[MEM_BASE]
+		return uint64(r&0xfff0) << 16, uint64(r>>16&0xfff0)<<16 | 0xfffff
+	}
+	inside := func(k [3]int, b BAR) {
+		lo, hi := window(k)
+		if b.PCI < lo || b.PCI+b.Size-1 > hi {
+			t.Fatalf("BAR %#x+%#x outside bridge %v's window %#x-%#x", b.PCI, b.Size, k, lo, hi)
+		}
+	}
+	inside([3]int{0, 1, 0}, fns[3].BARs[0])
+	inside([3]int{1, 0, 0}, fns[3].BARs[0])
+	inside([3]int{0, 2, 0}, fns[5].BARs[0])
+	if lo, hi := window([3]int{0, 3, 0}); lo <= hi {
+		t.Fatalf("empty slot's window open: %#x-%#x", lo, hi)
+	}
+	if e.fns[[3]int{0, 1, 0}].cmd&CMD_MEMORY == 0 || e.fns[[3]int{2, 0, 0}].cmd&CMD_MEMORY == 0 {
+		t.Fatal("decoding not enabled")
 	}
 }
