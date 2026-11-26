@@ -3,6 +3,7 @@
 package applem1
 
 import (
+	"godeep/drivers/simplefb"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +28,7 @@ func init() {
 	}
 	dev.Register(dev.Driver{Compatible: idleCompatible, Run: runIdleStats})
 	dev.Register(spihid.Driver(window))
+	dev.Register(simplefb.Driver())
 	// QEMU only (tools/fakem1n1): typing in the terminal. The Mac has no PL011.
 	dev.Register(pl011.Driver(window))
 }

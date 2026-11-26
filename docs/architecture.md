@@ -15,7 +15,7 @@ This plan was the starting point; the repo has since grown past it. Where things
 - **Phase 1 ✅:** boots on QEMU `virt` (arm64, HVF, the default), `microvm` (amd64), and **on the real MacBook Pro** (`board/applem1`, via m1n1). Hosted build for tests.
 - **Phase 2 ◐:** `proc` (PIDs, supervision, panic containment, pprof-label accounting) is done; `cap`, `ipc` and `klog` are still planned.
 - **Phase 3 ◐:** the shell has `ps`, `kill`, `mem`, `lsdev`, `lsblk`, `ls`, `cat` and more. No VFS or pipes yet; read-only FAT and ext4 exist as `io/fs.FS` (`fs/`), reached by naming the disk (`cat nvme0p2:/hello.txt`).
-- **Phase 4 ◐:** interrupt bridge, device manager, DMA allocator, device tree, virtio-mmio probe, PCIe and NVMe (`make check-virt`). On the Mac: framebuffer console, watchdog, WFE idle, and a polled SPI keyboard and multitouch trackpad (typing works since 2026-11-26). No networking yet.
+- **Phase 4 ◐:** interrupt bridge, device manager, DMA allocator, device tree, virtio-mmio probe, PCIe and NVMe (`make check-virt`). On the Mac: framebuffer console, watchdog, WFE idle, and a polled SPI keyboard and multitouch trackpad (typing works since 2026-11-26). Networking on QEMU (2026-11-26): virtio-net + gVisor TCP/IP + `sshd`, virtio-rng seeding `crypto/rand` (`docs/SSHServer.md`); not on the Mac yet.
 - **Phases 5–6:** not started (panic containment from phase 6 is done).
 
 The Mac work is tracked in `TargetMyMac.md` (§3, §8), the driver rules in `DriverModel.md`.

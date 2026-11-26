@@ -14,8 +14,12 @@ import (
 	"godeep/drivers/arm/pl061"
 	"godeep/drivers/nvme"
 	"godeep/drivers/pci"
+	"godeep/drivers/simplefb"
 	"godeep/drivers/usb/xhci"
 	virtiommio "godeep/drivers/virtio/mmio"
+	virtionet "godeep/drivers/virtio/net"
+	virtiop9 "godeep/drivers/virtio/p9"
+	virtiorng "godeep/drivers/virtio/rng"
 	"godeep/kernel/dev"
 	kmmio "godeep/kernel/mmio"
 )
@@ -30,9 +34,20 @@ func init() {
 	dev.Register(pl061.Driver(window, 3, func() { shutdownOnce.Do(func() { close(shutdown) }) }))
 	dev.Register(pl031.Driver(window))
 	dev.Register(virtiommio.Driver(window))
+	dev.Register(simplefb.Driver())
+	dev.Register(virtiorng.Driver(window, virtiorng.Options{Seed: mixSeed}))
+	dev.Register(virtiop9.Driver(window))
+	// Under HVF, device interrupts trigger QEMU's WFI bug (console.go), so
+	// the NIC is polled there: every 2 ms while frames flow, 20 ms when quiet.
+	netOpt := virtionet.Options{}
+	if OnAppleHVF() {
+		netOpt = virtionet.Options{Poll: 2 * time.Millisecond, IdlePoll: 20 * time.Millisecond}
+	}
+	dev.Register(virtionet.Driver(window, netOpt))
 	dev.Register(pci.Driver(window))
 	dev.Register(nvme.Driver(window))
 	dev.Register(xhci.Driver(window, consoleIn))
+	dev.Register(xhci.DiskDriver())
 	dev.Register(dev.Driver{Compatible: "arm,armv8-timer", Run: runPtimerProbe})
 	dev.Register(dev.Driver{Compatible: "arm,pl011", Run: func(ctx context.Context, d *dev.Device) error {
 		d.Ready(dev.Lister(lister{"board console (" + UARTMode + " mode)"}))

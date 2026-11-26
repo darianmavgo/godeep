@@ -8,9 +8,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"sync"
-
-	"golang.org/x/image/font/basicfont"
 )
 
 // Format is a device-tree "format" string.
@@ -104,121 +101,10 @@ func (f *Framebuffer) fill(y0, y1 int, c uint32) {
 	}
 }
 
-// Console renders text with the 7x13 bitmap font from x/image, scaled up
-// for high-density screens, and scrolls when the screen is full.
-type Console struct {
-	mu       sync.Mutex
-	fb       *Framebuffer
-	scale    int
-	cw, ch   int // character cell in pixels
-	cols     int
-	rows     int
-	col, row int
-	fg, bg   uint32
-}
-
-var face = basicfont.Face7x13
-
-// NewConsole clears the screen and returns a console on it. scale 0 picks one
-// so lines stay readable (about 1200 px of width per step).
-func NewConsole(fb *Framebuffer, scale int) (*Console, error) {
-	if err := fb.Validate(); err != nil {
-		return nil, err
+func (f *Framebuffer) get(x, y int) uint32 {
+	o := y*f.Stride + x*f.bpp()
+	if f.bpp() == 2 {
+		return uint32(f.Pix[o]) | uint32(f.Pix[o+1])<<8
 	}
-	if scale <= 0 {
-		scale = max(1, fb.Width/1200)
-	}
-	c := &Console{fb: fb, scale: scale, cw: face.Advance * scale, ch: face.Height * scale,
-		fg: fb.RGB(0xe6, 0xe6, 0xe6), bg: fb.RGB(0x10, 0x14, 0x1c)}
-	c.cols, c.rows = fb.Width/c.cw, fb.Height/c.ch
-	if c.cols < 1 || c.rows < 1 {
-		return nil, fmt.Errorf("simplefb: %dx%d is too small for text", fb.Width, fb.Height)
-	}
-	fb.fill(0, fb.Height, c.bg)
-	return c, nil
-}
-
-// Size returns the console size in characters.
-func (c *Console) Size() (cols, rows int) { return c.cols, c.rows }
-
-func (c *Console) glyph(r rune, col, row int) {
-	idx := -1
-	for _, rg := range face.Ranges {
-		if r >= rg.Low && r < rg.High {
-			idx = rg.Offset + int(r-rg.Low)
-			break
-		}
-	}
-	if idx < 0 {
-		idx = 0 // the font's placeholder glyph
-	}
-	x0, y0 := col*c.cw, row*c.ch
-	for gy := 0; gy < face.Height; gy++ {
-		for gx := 0; gx < face.Advance; gx++ {
-			on := gx < face.Width && face.Mask.At(gx, idx*face.Height+gy) != nil && alpha(face, gx, idx*face.Height+gy)
-			col := c.bg
-			if on {
-				col = c.fg
-			}
-			for sy := 0; sy < c.scale; sy++ {
-				for sx := 0; sx < c.scale; sx++ {
-					c.fb.set(x0+gx*c.scale+sx, y0+gy*c.scale+sy, col)
-				}
-			}
-		}
-	}
-}
-
-func alpha(f *basicfont.Face, x, y int) bool {
-	_, _, _, a := f.Mask.At(x, y).RGBA()
-	return a > 0x7fff
-}
-
-func (c *Console) newline() {
-	c.col = 0
-	if c.row++; c.row < c.rows {
-		return
-	}
-	// scroll up one text row
-	c.row = c.rows - 1
-	line := c.ch * c.fb.Stride
-	used := c.rows * c.ch * c.fb.Stride
-	copy(c.fb.Pix[:used-line], c.fb.Pix[line:used])
-	c.fb.fill((c.rows-1)*c.ch, c.rows*c.ch, c.bg)
-}
-
-// Write draws text. It understands \n, \r, \b and \t; other control
-// characters are ignored.
-func (c *Console) Write(p []byte) (int, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, b := range string(p) {
-		switch b {
-		case '\n':
-			c.newline()
-		case '\r':
-			c.col = 0
-		case '\b':
-			if c.col > 0 {
-				c.col--
-			}
-		case '\t':
-			for c.col%8 != 7 && c.col < c.cols-1 {
-				c.glyph(' ', c.col, c.row)
-				c.col++
-			}
-			c.glyph(' ', c.col, c.row)
-			c.col++
-		default:
-			if b < 0x20 {
-				continue
-			}
-			if c.col >= c.cols {
-				c.newline()
-			}
-			c.glyph(b, c.col, c.row)
-			c.col++
-		}
-	}
-	return len(p), nil
+	return uint32(f.Pix[o]) | uint32(f.Pix[o+1])<<8 | uint32(f.Pix[o+2])<<16 | uint32(f.Pix[o+3])<<24
 }

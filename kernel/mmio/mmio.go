@@ -18,6 +18,13 @@ type Regs interface {
 	Write32(off uint64, v uint32)
 }
 
+// ByteRegs is a register window that also allows single-byte reads (Window
+// and Fake do). Use it only where 32-bit reads don't work.
+type ByteRegs interface {
+	Regs
+	Read8(off uint64) uint8
+}
+
 // Modify is a read-modify-write for ordinary read/write registers only.
 //
 // Never use it on write-1-to-set / write-1-to-clear registers (interrupt
@@ -78,6 +85,11 @@ func (f *Fake) Write32(off uint64, v uint32) {
 		f.regs[off] = v
 	}
 	f.log = append(f.log, Access{Write: true, Off: off, Val: v})
+}
+
+// Read8 reads one byte of the 32-bit register that holds off.
+func (f *Fake) Read8(off uint64) uint8 {
+	return uint8(f.Read32(off&^3) >> (8 * (off & 3)))
 }
 
 // Set stores a register value without logging (device-side state).

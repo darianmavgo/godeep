@@ -12,6 +12,7 @@ import (
 	"godeep/kernel"
 	"godeep/kernel/proc"
 	"godeep/kernel/tty"
+	"godeep/net/hostnet"
 )
 
 // NewConsole returns the host terminal as a console. The terminal stays in
@@ -62,5 +63,5 @@ func NewBoard() kernel.Board {
 		<-term
 		close(shut)
 	})
-	return kernel.Board{Console: NewConsole(), Shutdown: shut}
+	return kernel.Board{Console: NewConsole(), Shutdown: shut, Net: hostnet.Net{}}
 }

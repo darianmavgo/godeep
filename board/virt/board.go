@@ -3,13 +3,19 @@
 package virt
 
 import (
+	"fmt"
+	"io"
 	"unsafe"
 
 	"github.com/usbarmory/tamago/arm64/gic"
 
+	"godeep/drivers/qemu/fwcfg"
+	"godeep/drivers/simplefb"
 	"godeep/kernel"
+	"godeep/kernel/dev"
 	"godeep/kernel/dma"
 	"godeep/kernel/irq"
+	kmmio "godeep/kernel/mmio"
 	"godeep/kernel/proc"
 )
 
@@ -68,17 +74,70 @@ var shutdown = make(chan struct{})
 func NewBoard() kernel.Board {
 	proc.Kthread("irq", serviceInterrupts)
 	nodes, source := devices()
+	// The first FDT_RESERVE bytes hold the boot device tree (entry_arm64.s).
+	alloc := dma.New(dma.Region{
+		Base: DMA_BASE + FDT_RESERVE,
+		Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
+	})
+	info := BootInfo(source)
+	con := NewConsole(Bridge)
+	if fb, note := framebuffer(nodes, alloc); fb != nil {
+		// Text goes to both the framebuffer and the UART; the USB mouse
+		// drives the framebuffer console (pointer, scrollback, select/paste).
+		con.Out = tee{fb, con.Out}
+		con.Input = &simplefb.Mouse{C: fb, Paste: simplefb.PasteTo(consoleIn)}
+		nodes = append(nodes, dev.Node{Name: "fbcon", Compatible: simplefb.DeviceCompatible, Config: fb})
+		info += "; " + note
+	} else if note != "" {
+		info += "; " + note
+	}
 	return kernel.Board{
-		Info:     BootInfo(source),
-		Console:  NewConsole(Bridge),
+		Info:     info,
+		Console:  con,
 		Shutdown: shutdown,
 		PowerOff: psciPowerOff,
 		IRQ:      Bridge,
-		// The first FDT_RESERVE bytes hold the boot device tree (entry_arm64.s).
-		DMA: dma.New(dma.Region{
-			Base: DMA_BASE + FDT_RESERVE,
-			Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
-		}),
-		Devices: nodes,
+		DMA:      alloc,
+		Devices:  nodes,
 	}
+}
+
+// Framebuffer size for QEMU's ramfb.
+const fbWidth, fbHeight = 1280, 800
+
+// framebuffer sets up a console on QEMU's ramfb (-device ramfb), through
+// the fw_cfg device in the tree. No ramfb: nil and no note.
+func framebuffer(nodes []dev.Node, a *dma.Allocator) (*simplefb.Console, string) {
+	for _, n := range nodes {
+		if n.Compatible != fwcfg.Compatible || len(n.Reg) == 0 {
+			continue
+		}
+		f, err := fwcfg.New(kmmio.Window{Base: n.Reg[0].Base}, a)
+		if err != nil {
+			return nil, "fw_cfg: " + err.Error()
+		}
+		defer f.Close()
+		if _, err := f.Find("etc/ramfb"); err != nil {
+			return nil, "" // QEMU started without -device ramfb
+		}
+		r, err := f.SetupRAMFB(a, fbWidth, fbHeight)
+		if err != nil {
+			return nil, "ramfb: " + err.Error()
+		}
+		c, err := simplefb.NewConsole(&simplefb.Framebuffer{Pix: r.Pix, Width: r.Width, Height: r.Height,
+			Stride: r.Stride, Format: simplefb.X8R8G8B8}, 0)
+		if err != nil {
+			return nil, "ramfb: " + err.Error()
+		}
+		return c, fmt.Sprintf("ramfb %dx%d console", r.Width, r.Height)
+	}
+	return nil, ""
+}
+
+// tee writes the console to the framebuffer and the UART.
+type tee struct{ fb, uart io.Writer }
+
+func (t tee) Write(p []byte) (int, error) {
+	t.fb.Write(p)
+	return t.uart.Write(p)
 }

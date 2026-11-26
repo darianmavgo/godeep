@@ -36,3 +36,7 @@ go.work.sum
 # Local environment & debug logs
 .env
 *.log
+
+# sshd development keys (make keys); only the README is tracked
+/programs/sshd/keys/*
+!/programs/sshd/keys/README.md

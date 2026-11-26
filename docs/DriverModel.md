@@ -69,9 +69,14 @@ Drivers on QEMU virt today:
 |---|---|---|
 | `gpio0` | `arm,pl061` | power button, interrupt-driven |
 | `rtc` | `arm,pl031` | wall clock; the board also seeds Go's clock from it at boot |
-| `virtio` | `virtio,mmio-bus` | lists attached virtio devices |
+| `virtio_mmio@…` | `virtio,mmio` | probe only: names a virtio device no driver claims |
+| `rng0` | `virtio,device4` | virtio-rng: seeds the board's random generator (`crypto/rand`) at start, `Read` for more |
+| `share0` | `virtio,device9` | virtio-9p: mounts QEMU's host share as the volume named by its tag (`host:`) |
+| `usbdisk0` | `godeep,usb-storage` | a USB stick the xHCI driver found (behind hubs too): a read-only `block.Device` |
+| `fbcon` | `godeep,fbcon` | the framebuffer console's state: size, history, scroll position, pointer, selection (QEMU: ramfb; the Mac: m1n1's framebuffer) |
+| `net0` | `virtio,device1` | virtio-net: publishes a `netdev.NIC`; `netd` runs the TCP/IP stack on it (`ifconfig`, `sshd`). Interrupts, or polled under HVF |
 | `ptimer` | `arm,armv8-ptimer-probe` | interrupt-latency probe |
-| `pcie@10000000` | `pci-host-ecam-generic` | scans the bus, assigns BARs, adds `nvme0` (and lists `net0`, QEMU's default NIC, no driver yet) |
+| `pcie@10000000` | `pci-host-ecam-generic` | scans the bus, assigns BARs, adds `nvme0` (QEMU adds a default PCI NIC only when no `-netdev` is given; the Makefile gives one, on virtio-mmio) |
 | `nvme0` | `pciclass,010802` | polled NVMe; publishes a `block.Device` for `lsblk`, `ls`, `cat` |
 | `xhci0` | `pciclass,0c0330` | polled USB host; HID boot keyboards type into the console, mice publish `input` events (`evtest`) |
 
@@ -118,7 +123,7 @@ The cost is wake-ups, not busy CPU: one register read per poll, on wake-ups that
 
 ## Where driver code lives
 
-- **`drivers/<vendor>/<device>`** holds portable packages with no build tags, so they're host-tested. They take a `func(base) mmio.Regs` and return a `dev.Driver`: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/mmio`, `drivers/pci`, `drivers/nvme`, `drivers/usb`, `drivers/usb/xhci`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`.
+- **`drivers/<vendor>/<device>`** holds portable packages with no build tags, so they're host-tested. They take a `func(base) mmio.Regs` and return a `dev.Driver`: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/{mmio,net,rng}`, `drivers/pci`, `drivers/nvme`, `drivers/usb`, `drivers/usb/xhci`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`.
   - Device-tree resolution that's specific to a driver lives with it and is host-tested (`spihid.ConfigFromFDT`, `pci.ConfigFromFDT`, `pmgr.FromFDT`); boards call it and put the result in `Node.Config`.
   - Tests model the hardware: an `mmio.Fake` with `OnRead`/`OnWrite` hooks (power domains that turn on, FIFOs, an NVMe controller executing commands from DMA memory, an SPI keyboard and trackpad sending packets and receiving the multitouch write, an xHCI controller with a USB keyboard and mouse).
 - **`kernel/mmio`:** drivers use `Regs`.
@@ -129,5 +134,5 @@ The cost is wake-ups, not busy CPU: one register read per poll, on wake-ups that
 
 ## Next drivers this enables
 
-- **QEMU virt:** virtio-rng (real entropy) and virtio-net (with gVisor's netstack). Next QEMU-testable and reusable on the Mac: USB hubs and mass storage on the xHCI driver, SDHCI.
+- **QEMU virt:** ✅ virtio-rng (real entropy) and virtio-net (with gVisor's netstack and `sshd`, `docs/SSHServer.md`). Next QEMU-testable and reusable on the Mac: USB hubs and mass storage on the xHCI driver, SDHCI.
 - **M1:** ASC mailbox (`rtkit.Mailbox`) and a hardware check of `kernel/rtkit`, then SMC (power-off, power button, lid, battery), the first RTKit client; then ANS2 (with SART) under `drivers/nvme`'s command layer; DART (`dma.IOMMU`); AIC2 (`irq.Controller`) to replace polling.

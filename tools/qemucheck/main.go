@@ -4,7 +4,9 @@
 //	qemucheck -step 'lsblk=>godeep-ext4,FAT32' -step 'cat nvme0p2:/hello.txt=>hello from godeep' -- qemu-system-aarch64 ...
 //
 // Each step waits for the shell prompt, types the command, then waits for
-// every expected string (comma-separated) in what the command printed. At
+// every expected string (comma-separated) in what the command printed; if
+// one is missing, it runs the command again (once a second, until the
+// timeout), since devices come up in the background. At
 // the end it types "halt" and waits for QEMU to exit. The serial output is
 // saved to -log.
 //
@@ -14,6 +16,8 @@
 //	wait:TEXT     wait until TEXT appears in output since the previous step
 //	keys:TEXT     type TEXT on QEMU's keyboard (USB) through QMP; \r is Enter
 //	qmp:JSON      send a QMP command, e.g. an input-send-event with mouse moves
+//	local:CMD=>EXPECTED[,...]  run CMD on this machine (sh -c), retrying until its
+//	              output has every EXPECTED string (e.g. ssh into the guest)
 package main
 
 import (
@@ -24,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -43,10 +48,20 @@ func main() {
 	timeout := flag.Duration("timeout", 60*time.Second, "per step (and for boot)")
 	logPath := flag.String("log", "bin/qemucheck.log", "serial output")
 	qmpPath := flag.String("qmp", "", "QMP unix socket of the QEMU being run (for keys: and qmp: steps)")
+	httpServe := flag.String("http", "", "ADDR=DIR: serve DIR over HTTP on ADDR while the check runs (the guest reaches 127.0.0.1 as 10.0.2.2)")
 	flag.Parse()
 	if flag.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "usage: qemucheck -step 'cmd=>want' ... -- qemu args")
 		os.Exit(2)
+	}
+	if *httpServe != "" {
+		addr, dir, _ := strings.Cut(*httpServe, "=")
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "qemucheck:", err)
+			os.Exit(1)
+		}
+		go http.Serve(l, http.FileServer(http.Dir(dir)))
 	}
 	if err := run(st, flag.Args(), *timeout, *logPath, *qmpPath); err != nil {
 		fmt.Fprintln(os.Stderr, "qemucheck: FAIL:", err)
@@ -137,6 +152,14 @@ func run(st steps, argv []string, timeout time.Duration, logPath, qmpPath string
 			fmt.Printf("qemucheck: OK: saw %q\n", arg)
 			mark = len(seen)
 			continue
+		case "local":
+			command, want, _ := strings.Cut(arg, "=>")
+			if err := hostStep(command, want, timeout); err != nil {
+				return err
+			}
+			fmt.Printf("qemucheck: OK: local: %s\n", command)
+			mark = len(seen)
+			continue
 		case "keys", "qmp":
 			if q == nil {
 				var err error
@@ -168,23 +191,38 @@ func run(st steps, argv []string, timeout time.Duration, logPath, qmpPath string
 			promptFrom = -1
 		}
 		command, want, _ := strings.Cut(s, "=>")
-		from := len(seen)
-		if _, err := io.WriteString(in, command+"\r"); err != nil {
-			return err
-		}
-		// the command's output ends at the next prompt
-		err := wait(fmt.Sprintf("%q to finish", command), from, func(s string) bool {
-			i := strings.Index(s, command)
-			return i >= 0 && strings.Contains(s[i+len(command):], prompt)
-		})
-		if err != nil {
-			return err
-		}
-		got := seen[from:]
-		for _, w := range strings.Split(want, ",") {
-			if w != "" && !strings.Contains(got, w) {
-				return fmt.Errorf("%q: output lacks %q:\n%s", command, w, tail(got))
+		// Run the command until its output has every wanted string: devices
+		// come up in the background (slowly under TCG), so a status command
+		// may need a few tries. Commands in checks only read state.
+		deadline := time.Now().Add(timeout)
+		for {
+			from := len(seen)
+			if _, err := io.WriteString(in, command+"\r"); err != nil {
+				return err
 			}
+			// the command's output ends at the next prompt
+			err := wait(fmt.Sprintf("%q to finish", command), from, func(s string) bool {
+				i := strings.Index(s, command)
+				return i >= 0 && strings.Contains(s[i+len(command):], prompt)
+			})
+			if err != nil {
+				return err
+			}
+			got := seen[from:]
+			missing := ""
+			for _, w := range strings.Split(want, ",") {
+				if w != "" && !strings.Contains(got, w) {
+					missing = w
+					break
+				}
+			}
+			if missing == "" {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("%q: output lacks %q:\n%s", command, missing, tail(got))
+			}
+			time.Sleep(time.Second)
 		}
 		fmt.Printf("qemucheck: OK: %s\n", command)
 		mark = len(seen)
@@ -195,6 +233,29 @@ func run(st steps, argv []string, timeout time.Duration, logPath, qmpPath string
 	case <-time.After(10 * time.Second):
 	}
 	return nil
+}
+
+// hostStep runs command until its output contains every wanted string. It
+// retries (services in the guest start after the shell's first prompt).
+func hostStep(command, want string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		out, err := exec.Command("sh", "-c", command).CombinedOutput()
+		missing := ""
+		for _, w := range strings.Split(want, ",") {
+			if w != "" && !strings.Contains(string(out), w) {
+				missing = w
+				break
+			}
+		}
+		if missing == "" && err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("local: %s: %v, output lacks %q:\n%s", command, err, missing, tail(string(out)))
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 func tail(s string) string {

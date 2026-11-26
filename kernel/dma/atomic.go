@@ -18,17 +18,25 @@ import (
 // This is the only unsafe code outside board/* and kernel/dev: the
 // alternative is every driver casting slices itself.
 
-func (b *Buffer) word(off int) *uint32 {
-	if off < 0 || off%4 != 0 || off+4 > len(b.Bytes) {
-		panic(fmt.Sprintf("dma: 32-bit access at %d in a %d-byte buffer", off, len(b.Bytes)))
+func word(mem []byte, off int) *uint32 {
+	if off < 0 || off%4 != 0 || off+4 > len(mem) {
+		panic(fmt.Sprintf("dma: 32-bit access at %d in a %d-byte buffer", off, len(mem)))
 	}
-	return (*uint32)(unsafe.Pointer(&b.Bytes[off]))
+	return (*uint32)(unsafe.Pointer(&mem[off]))
 }
 
 // Load32 reads the little-endian word at byte offset off (4-aligned) with
 // acquire ordering.
-func (b *Buffer) Load32(off int) uint32 { return atomic.LoadUint32(b.word(off)) }
+func (b *Buffer) Load32(off int) uint32 { return LoadWord(b.Bytes, off) }
 
 // Store32 writes the word at off (4-aligned) with release ordering: every
 // earlier write to DMA memory is visible first.
-func (b *Buffer) Store32(off int, v uint32) { atomic.StoreUint32(b.word(off), v) }
+func (b *Buffer) Store32(off int, v uint32) { StoreWord(b.Bytes, off, v) }
+
+// LoadWord and StoreWord are Load32 and Store32 on any slice of DMA memory.
+// Device models in host tests use them for their side of a shared word (a
+// ring index the driver publishes, a completion the model posts), which is
+// what a real device's accesses amount to.
+func LoadWord(mem []byte, off int) uint32 { return atomic.LoadUint32(word(mem, off)) }
+
+func StoreWord(mem []byte, off int, v uint32) { atomic.StoreUint32(word(mem, off), v) }

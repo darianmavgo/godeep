@@ -49,16 +49,36 @@ func devices() ([]dev.Node, string) {
 	return staticDevices(), "no device tree (ELF boot), static device list"
 }
 
+// virtioKinds names virtio devices by ID (net0, rng0).
+var virtioKinds = map[uint32]string{1: "net", 2: "blk", 4: "rng", 9: "share"}
+
 func fromFDT(root *fdt.Node) []dev.Node {
 	var out []dev.Node
+	virtioCount := map[string]int{}
 	root.Walk(func(n *fdt.Node) {
 		compat := n.Strings("compatible")
 		if n.Parent == nil || len(compat) == 0 || boardOwned[compat[0]] || n.Parent.Path == "/cpus" {
 			return
 		}
 		reg := n.Reg()
-		if compat[0] == "virtio,mmio" && (len(reg) == 0 || !virtiommio.Present(kmmio.Window{Base: reg[0].Base})) {
-			return // empty transport slot
+		name := n.Name
+		var virtioCompat string
+		if compat[0] == "virtio,mmio" {
+			if len(reg) == 0 || !virtiommio.Present(kmmio.Window{Base: reg[0].Base}) {
+				return // empty transport slot
+			}
+			// A driver for the device behind the slot (virtio-net, -rng)
+			// takes it, named like Linux would: net0, rng0.
+			id := virtiommio.ID(kmmio.Window{Base: reg[0].Base})
+			if c := virtiommio.Compatible(id); dev.HasDriver(c) {
+				virtioCompat = c
+				kind := virtioKinds[id]
+				if kind == "" {
+					kind = "virtio"
+				}
+				name = fmt.Sprintf("%s%d", kind, virtioCount[kind])
+				virtioCount[kind]++
+			}
 		}
 		c := compat[0]
 		for _, x := range compat {
@@ -67,7 +87,10 @@ func fromFDT(root *fdt.Node) []dev.Node {
 				break
 			}
 		}
-		node := dev.Node{Name: n.Name, Compatible: c, IRQ: n.GICInterrupts()}
+		if virtioCompat != "" {
+			c = virtioCompat
+		}
+		node := dev.Node{Name: name, Compatible: c, IRQ: n.GICInterrupts()}
 		if c == pci.Compatible {
 			if hc, err := pci.ConfigFromFDT(n); err != nil {
 				node.Config = err

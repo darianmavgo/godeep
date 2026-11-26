@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"godeep/fs/memfs"
+	"godeep/kernel/vfs"
 	"io"
 	"os"
 	"strings"
@@ -68,7 +70,9 @@ func TestDiskCommands(t *testing.T) {
 	out := &syncBuf{}
 	term := tty.New(make(chan byte), out, false)
 	defer term.Close()
-	env := Env{TTY: term, Dev: m}
+	ns := vfs.New(m)
+	ns.Mount("ram", memfs.New("ram"))
+	env := Env{TTY: term, Dev: m, FS: ns}
 
 	run := func(f func(context.Context, Env, *proc.Proc, []string) error, args ...string) string {
 		t.Helper()
@@ -103,5 +107,27 @@ func TestDiskCommands(t *testing.T) {
 	}
 	if !bytes.Contains([]byte(out.String()), []byte("drwx")) {
 		t.Fatal("no directory modes in ls output")
+	}
+
+	// ram: is writable; disks aren't.
+	run(cp, "nvme0p2:/hello.txt", "ram:/hello.txt")
+	run(mkdir, "ram:/d")
+	run(write, "ram:/d/note", "hi", "there")
+	run(mv, "ram:/d/note", "ram:/note.txt")
+	if s := run(cat, "ram:/hello.txt", "ram:note.txt"); s != "hello from godeep\nhi there\n" {
+		t.Fatalf("ram cat: %q", s)
+	}
+	if s := run(ls, "ram:/"); !strings.Contains(s, "d/") || !strings.Contains(s, "note.txt") {
+		t.Fatalf("ls ram: %q", s)
+	}
+	run(rm, "ram:/d")
+	if s := run(df); !strings.Contains(s, "ram") || !strings.Contains(s, "rw") || !strings.Contains(s, "nvme0p2") {
+		t.Fatalf("df: %q", s)
+	}
+	if err := write(ctx, env, nil, []string{"nvme0p2:/x", "no"}); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("write to a disk: %v", err)
+	}
+	if err := mv(ctx, env, nil, []string{"ram:/note.txt", "nvme0p2:/x"}); err == nil {
+		t.Fatal("mv across volumes")
 	}
 }

@@ -98,11 +98,16 @@ func NewBoard() kernel.Board {
 		Info: fmt.Sprintf("board: %s; entered at %s; %d devices from the device tree; %s; %s",
 			model, el, nodes, joinInfo(info), joinInfo(devices)),
 		Console: kernel.Console{In: in, Out: out, Echo: true},
-		DMA: dma.New(dma.Region{
-			Base: DMA_BASE + FDT_RESERVE,
-			Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
-		}),
 	}
+	if console != nil {
+		// The trackpad (and any mouse) drives the console: pointer, two-finger
+		// scroll through history, click-drag to select, right click to paste.
+		b.Console.Input = &simplefb.Mouse{C: console, Paste: simplefb.PasteTo(in)}
+	}
+	b.DMA = dma.New(dma.Region{
+		Base: DMA_BASE + FDT_RESERVE,
+		Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
+	})
 	if root != nil {
 		b.Devices = fromFDT(root)
 		if kbd, ok := keyboard(root, in); ok {
@@ -115,6 +120,9 @@ func NewBoard() kernel.Board {
 		}
 	}
 	b.Devices = append(b.Devices, dev.Node{Name: "idle", Compatible: idleCompatible})
+	if console != nil {
+		b.Devices = append(b.Devices, dev.Node{Name: "fbcon", Compatible: simplefb.DeviceCompatible, Config: console})
+	}
 	return b
 }
 

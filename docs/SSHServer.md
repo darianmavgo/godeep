@@ -2,7 +2,31 @@
 
 This document lists the steps to run an SSH server on godeep with `golang.org/x/crypto/ssh`, first on QEMU and then on the MacBook Pro, and how development changes once you can `ssh godeep`.
 
-Nothing here is built yet. It builds on `docs/ReUsingGVisor.md` §2 (the netstack) and `docs/Using2Computers.md` (the PC as dev host, the Mac as target).
+It builds on `docs/ReUsingGVisor.md` §2 (the netstack) and `docs/Using2Computers.md` (the PC as dev host, the Mac as target).
+
+## Status (2026-11-26): steps 1–4 built and running on QEMU
+
+```sh
+make qemu          # boots with virtio-net + virtio-rng; sshd listens on the guest's port 22
+make ssh           # (another terminal) ssh -p 2222 root@127.0.0.1, with the dev key from make keys
+make ssh CMD=ps    # one command
+make hosted        # the hosted build serves the same sshd on 127.0.0.1:2222 (host sockets)
+make check-virt    # headless: ... rng seeds crypto/rand, ifconfig, ssh ps / lsdev / a pty session
+```
+
+| Piece | Where | Notes |
+|---|---|---|
+| virtio-mmio transport + split virtqueue | `drivers/virtio/mmio` (`transport.go`, `queue.go`), `virtiotest` model | modern (version 2) only: QEMU needs `-global virtio-mmio.force-legacy=false` |
+| virtio-rng | `drivers/virtio/rng` | seeds `board/virt`'s DRBG (`mixSeed`) at start; `lsdev rng0` says `seeded crypto/rand` |
+| virtio-net | `drivers/virtio/net` | publishes a `netdev.NIC`; interrupts under TCG, polled under HVF (2 ms busy, 20 ms idle; idle cost measured ~2% of a host core, unchanged) |
+| TCP/IP | `net/netstack` (gVisor) | `gonet` listeners and conns; no `net.SocketFunc` global |
+| network capability | `kernel/cap` (`Net`, `PendingNet`), `kernel/net.go` (`netd`), `net/hostnet` | `netd` follows the NIC across driver restarts; hosted uses host sockets |
+| sshd | `programs/sshd`, keys from `make keys` | pty sessions on `tty.NewFor` + `sh`, `exec` (`sh -c`), exit status, ^C, kill-on-disconnect, stdin EOF doesn't kill `exec`; `FuzzPreAuth` |
+| checks | `tools/qemucheck` `host:` steps | `check-virt` passes under HVF (polled) and TCG (irq) |
+
+Since then (2026-11-26): **sftp/scp** (`programs/sshd/sftp.go`, onto the RAM filesystem `ram:`), **WASM programs** pushed with scp and run without a reboot (`programs/wasm`, `make push`), the **kernel log** (`dmesg`, `ssh godeep dmesg`), and **profiles** (`ssh godeep pprof heap > heap.pb.gz`), all in `check-virt`.
+
+Not yet: `window-change` handling beyond acknowledging it, DNS, DHCP (addresses are QEMU's user-net defaults), and everything on the Mac (steps 5 and 6 below). The sections below are the original plan; where the code differs, the code is right.
 
 ## Contents
 
@@ -275,9 +299,9 @@ Host godeep
 
 ### Next steps that build on it
 
-1. **scp/sftp → loading programs:** push WASM programs (the planned wazero loader) and run them without rebuilding the kernel. That's the real dev-cycle win: only kernel changes need a reboot.
-2. **Logs:** `ssh godeep klog -f` once `klog` exists.
-3. **pprof:** serve `net/http/pprof` on the netstack, or stream profiles over an SSH `exec` channel, then run `go tool pprof` on the PC. It works with godeep's existing `pid`/`proc` goroutine labels.
+1. ✅ **scp/sftp → loading programs:** push WASM programs (the planned wazero loader) and run them without rebuilding the kernel. That's the real dev-cycle win: only kernel changes need a reboot.
+2. ✅ **Logs:** `ssh godeep dmesg` (`dmesg -f` follows).
+3. ✅ **pprof** (goroutine, heap…; no CPU profile on TamaGo): serve `net/http/pprof` on the netstack, or stream profiles over an SSH `exec` channel, then run `go tool pprof` on the PC. It works with godeep's existing `pid`/`proc` goroutine labels.
 4. **Files:** 9P over the same link (`docs/ReUsingGVisor.md` §5), so godeep can read from a directory on the PC.
 5. **Kernel updates without a disk write:** an `sshd` subcommand that receives a new Image and hands it to m1n1 or a kexec-like path. This is further out; until then, use `linux.py` through the m1n1 proxy (`docs/Using2Computers.md` §5).
 
@@ -293,13 +317,13 @@ Host godeep
 
 ## 10. Suggested order
 
-1. **virtio-net + netstack on QEMU** (`board/virt`), `hostfwd` 2222, behind a `cap.Net`.
-2. **virtio-rng**, wired into `board/virt`'s `GetRandomData`.
-3. **`programs/sshd`** with a built-in dev host key and authorized key, plus host tests and a `qemucheck` script.
-4. **pty + tty discipline**, ^C, `exec`, kill-on-disconnect, sessions owning their tty goroutine.
+1. ✅ **virtio-net + netstack on QEMU** (`board/virt`), `hostfwd` 2222, behind a `cap.Net`.
+2. ✅ **virtio-rng**, wired into `board/virt`'s `GetRandomData`.
+3. ✅ **`programs/sshd`** with a built-in dev host key and authorized key, plus host tests and a `qemucheck` script.
+4. ✅ **pty + tty discipline**, ^C, `exec`, kill-on-disconnect, sessions owning their tty goroutine.
 5. **On the Mac, the bridge:** `drivers/apple/uart` with RX, `godeep.uart=ssh`, and SSH over `/dev/ttyACM1` under m1n1's hypervisor (§2.3).
 6. **On the Mac, the real link:** DWC3 gadget + CDC-ECM (M4). The same `sshd` then works over the USB-C cable at USB speed, without the hypervisor.
-7. sftp → WASM program loading → pprof → 9P.
+7. ✅ sftp → ✅ WASM program loading → ✅ pprof → 9P.
 
 ---
 

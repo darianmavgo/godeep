@@ -119,6 +119,16 @@ type Endpoint struct {
 // IsInterruptIn reports an interrupt IN endpoint.
 func (e Endpoint) IsInterruptIn() bool { return e.Address&0x80 != 0 && e.Attr&3 == 3 }
 
+// IsBulkIn and IsBulkOut: bulk endpoints (mass storage).
+func (e Endpoint) IsBulkIn() bool  { return e.Address&0x80 != 0 && e.Attr&3 == 2 }
+func (e Endpoint) IsBulkOut() bool { return e.Address&0x80 == 0 && e.Attr&3 == 2 }
+
+// Interface classes.
+const (
+	ClassMassStorage = 0x08
+	ClassHub         = 0x09
+)
+
 // Num is the endpoint number.
 func (e Endpoint) Num() int { return int(e.Address & 0xf) }
 

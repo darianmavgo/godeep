@@ -4,6 +4,7 @@ package virt
 
 import (
 	"crypto/aes"
+	"crypto/sha256"
 	"encoding/binary"
 	"sync"
 	_ "unsafe"
@@ -14,9 +15,11 @@ import (
 // following tamago/internal/rng (which can't be imported from outside
 // TamaGo).
 //
-// WARNING: the seed is the boot-time counter value, which is NOT secure
-// entropy. Fine for a dev kernel; replace with virtio-rng before trusting
-// crypto/rand.
+// The first seed is the boot-time counter value, which is NOT secure
+// entropy. When QEMU has a virtio-rng device (-device virtio-rng-device,
+// the Makefile adds one), its driver calls mixSeed with 64 bytes of the
+// host's entropy as soon as it starts; lsdev rng0 says "seeded crypto/rand".
+// Anything random made before that (map seeds, early keys) is predictable.
 var drbg struct {
 	sync.Mutex
 	seed [32]byte
@@ -60,4 +63,15 @@ func getRandomData(b []byte) {
 		c.Encrypt(block[:], block[:])
 		copy(b, block[:])
 	}
+}
+
+// mixSeed folds entropy into the generator's key: the new key is
+// SHA-256(old key || entropy), so it is at least as unpredictable as either.
+func mixSeed(entropy []byte) {
+	drbg.Lock()
+	defer drbg.Unlock()
+	h := sha256.New()
+	h.Write(drbg.seed[:])
+	h.Write(entropy)
+	copy(drbg.seed[:], h.Sum(nil))
 }

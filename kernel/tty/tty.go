@@ -45,9 +45,29 @@ type TTY struct {
 // set, typed characters are echoed (raw serial); a cooked host terminal
 // echoes by itself.
 func New(in <-chan byte, out io.Writer, echo bool) *TTY {
-	t := &TTY{echo: echo, out: out, lines: make(chan event, 16), intr: make(chan struct{}), stop: make(chan struct{})}
+	t := newTTY(out, echo)
 	proc.Kthread("tty", func() { t.discipline(in) })
 	return t
+}
+
+// NewFor is New with the line discipline running as one of p's goroutines
+// instead of a kernel thread: it is accounted to p and stops when p dies
+// (or on Close). For terminals that come and go, like SSH sessions.
+func NewFor(p *proc.Proc, in <-chan byte, out io.Writer, echo bool) *TTY {
+	t := newTTY(out, echo)
+	if !p.Go(func(ctx context.Context) {
+		stop := context.AfterFunc(ctx, t.Close)
+		defer stop()
+		t.discipline(in)
+	}) {
+		t.Close()
+		close(t.lines)
+	}
+	return t
+}
+
+func newTTY(out io.Writer, echo bool) *TTY {
+	return &TTY{echo: echo, out: out, lines: make(chan event, 16), intr: make(chan struct{}), stop: make(chan struct{})}
 }
 
 // Close stops the line discipline goroutine. Pending ReadLine calls get io.EOF.
