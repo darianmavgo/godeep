@@ -109,3 +109,41 @@ func TestManager(t *testing.T) {
 		t.Fatalf("processes left: %d", len(left))
 	}
 }
+
+// A bus driver adds the devices it finds; their drivers start like boot-time
+// ones, and a rescan doesn't duplicate them.
+func TestAdd(t *testing.T) {
+	Register(Driver{Compatible: "test,bus", Run: func(ctx context.Context, d *Device) error {
+		for _, name := range []string{"child0", "child1", "child0"} {
+			d.Add(Node{Name: name, Compatible: "test,child"})
+		}
+		d.Add(Node{Name: "orphan", Compatible: "test,nothing"})
+		d.Ready(nil)
+		<-ctx.Done()
+		return nil
+	}})
+	Register(Driver{Compatible: "test,child", Run: func(ctx context.Context, d *Device) error {
+		d.Ready(d.Name)
+		<-ctx.Done()
+		return nil
+	}})
+	m := NewManager(proc.NewTable(), nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx, []Node{{Name: "bus", Compatible: "test,bus"}})
+	if _, err := m.Get(ctx, "bus"); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"child0", "child1"} {
+		svc, err := m.Get(ctx, n)
+		if err != nil || svc != n {
+			t.Fatalf("%s: %v %v", n, svc, err)
+		}
+	}
+	if _, err := m.Get(ctx, "orphan"); err == nil {
+		t.Fatal("device without a driver reported ready")
+	}
+	if n := len(m.List()); n != 4 {
+		t.Fatalf("%d devices, want 4", n)
+	}
+}

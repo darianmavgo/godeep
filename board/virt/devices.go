@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"godeep/drivers/pci"
 	virtiommio "godeep/drivers/virtio/mmio"
 	"godeep/kernel/dev"
 	"godeep/kernel/fdt"
@@ -67,6 +68,13 @@ func fromFDT(root *fdt.Node) []dev.Node {
 			}
 		}
 		node := dev.Node{Name: n.Name, Compatible: c, IRQ: n.GICInterrupts()}
+		if c == pci.Compatible {
+			if hc, err := pci.ConfigFromFDT(n); err != nil {
+				node.Config = err
+			} else {
+				node.Config = hc
+			}
+		}
 		for _, r := range reg {
 			node.Reg = append(node.Reg, dev.Range{Base: r.Base, Size: r.Size})
 		}
@@ -81,6 +89,10 @@ func staticDevices() []dev.Node {
 		{Name: "pl031@9010000", Compatible: "arm,pl031", Reg: []dev.Range{{Base: PL031_BASE, Size: 0x1000}}, IRQ: []int{RTC_IRQ}},
 		{Name: "pl061@9030000", Compatible: "arm,pl061", Reg: []dev.Range{{Base: PL061_BASE, Size: 0x1000}}, IRQ: []int{GPIO_IRQ}},
 		{Name: "timer", Compatible: "arm,armv8-timer", IRQ: []int{16 + 13, PTIMER_IRQ, VTIMER_IRQ, 16 + 10}},
+		// QEMU virt's PCIe host (highmem ECAM; the 32-bit memory window)
+		{Name: "pcie@10000000", Compatible: pci.Compatible, Reg: []dev.Range{{Base: PCIE_ECAM, Size: 0x10000000}},
+			Config: pci.HostConfig{ECAM: PCIE_ECAM, Windows: []pci.Window{
+				{Space: pci.SpaceMem32, PCI: PCIE_MMIO, CPU: PCIE_MMIO, Size: PCIE_MMIO_SIZE}}}},
 	}
 	for slot := uint64(0); slot < VIRTIO_MMIO_SLOTS; slot++ {
 		base := VIRTIO_MMIO_BASE + slot*0x200

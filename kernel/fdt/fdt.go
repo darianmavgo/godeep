@@ -286,3 +286,8 @@ func (n *Node) Compatible(compat string) bool {
 	}
 	return false
 }
+
+// TranslateAddr maps an address in n's child address space (what a child's
+// "reg" or a bus's "ranges" holds) to a CPU physical address, through n's
+// "ranges" and its ancestors'.
+func (n *Node) TranslateAddr(addr uint64) uint64 { return n.translate(addr) }

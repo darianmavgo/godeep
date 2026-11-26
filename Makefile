@@ -11,6 +11,7 @@
 #                          handed over like m1n1 does (EL2, E2H=1, relocation, m1n1-style tree)
 #   make shot-applem1      (another terminal) save its framebuffer as bin/fakem1n1/screen.png
 #   make native            test, rehearse on QEMU, install on this Mac (DRY=1: dry run)
+#   make check-virt        QEMU virt headless: PCIe + NVMe + FAT/ext4 from the shell
 #   make check-applem1     boot it headless and check the shell comes up, then check the
 #                          fault screen at stages 1 and 3 (about a minute; TCG)
 #   make stop              from another terminal: power godeep off cleanly (falls back to kill)
@@ -58,6 +59,10 @@ CPU         ?= max
 endif
 # -smp 1: TamaGo has no arm64 SMP bring-up yet, extra vCPUs would stay powered off.
 QEMU_FLAGS  ?= -machine virt,gic-version=3$(MACHINE_EL2) -accel $(ACCEL) -cpu $(CPU) -smp 1 -m 4G $(SERIAL)
+# An NVMe disk (read-only) with a FAT32 and an ext4 partition: lsblk, ls, cat.
+DISK        ?= bin/disk.img
+QEMU_DISK   := -drive if=none,id=disk0,file=$(DISK),format=raw,readonly=on -device nvme,serial=godeep0,drive=disk0
+QEMU_DEPS   := $(DISK)
 else ifeq ($(ARCH),amd64)
 # board/microvm, flags mirror usbarmory/tamago-example (TARGET=microvm).
 # TEXT_START = amd64 ramStart + 0x10000. Needs -m 3G+ (RAM is mapped up to 0xb0000000).
@@ -87,7 +92,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: test hosted kernel image qemu qemu-applem1 shot-applem1 check-applem1 native stop kill clean
+.PHONY: test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean
 
 test:
 	go vet ./...
@@ -103,12 +108,29 @@ kernel:
 image: kernel
 	go run ./tools/mkimage -ram $(RAM_BASE) -o $(IMAGE) $(KERNEL)
 
-qemu: $(if $(filter $(BOOTFILE),$(IMAGE)),image,kernel)
+qemu: $(if $(filter $(BOOTFILE),$(IMAGE)),image,kernel) $(QEMU_DEPS)
 	@if [ "$(BOARD)" = applem1 ]; then echo "BOARD=applem1 runs on QEMU sbsa-ref, not virt: make qemu-applem1"; exit 1; fi
 	@echo "booting godeep $(ARCH)... (quit QEMU: Ctrl-A then X, or type halt)"
 	@mkdir -p bin
-	$(QEMU) $(QEMU_FLAGS) $(CONTROL) -kernel $(BOOTFILE)
+	$(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(CONTROL) -kernel $(BOOTFILE)
 	@rm -f bin/qemu-$(ARCH).pid bin/qmp-$(ARCH).sock
+
+# QEMU virt, headless: boot, then read the NVMe disk's partitions through
+# PCIe, NVMe, GPT, FAT32 and ext4 from the shell (tools/qemucheck).
+check-virt:
+	@if [ "$(ARCH)" != arm64 ] || [ "$(BOARD)" = applem1 ]; then echo "check-virt is for ARCH=arm64 on QEMU virt"; exit 1; fi
+	@$(MAKE) -s image $(DISK)
+	go run ./tools/qemucheck \
+	  -step 'lsdev pci nvme=>nvme0,QEMU NVMe Ctrl,ready' \
+	  -step 'lsblk=>nvme0p1,FAT32,GODEEPFAT,nvme0p2,ext4,godeep-ext4' \
+	  -step 'ls nvme0p2:/=>docs/,link-to-hello@,big.bin' \
+	  -step 'cat nvme0p2:/link-to-hello=>hello from godeep' \
+	  -step 'cat nvme0p1:/many/f123.txt=>file 123' \
+	  -step 'ls nvme0p1:/docs=>readme.md' \
+	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) -kernel $(BOOTFILE)
+
+bin/disk.img: tools/mkdisk/main.go kernel/block/gptwrite.go $(wildcard fs/testdata/*.img.gz)
+	go run ./tools/mkdisk -o $@
 
 # The Mac image under QEMU (tools/fakem1n1). Always BOARD=applem1, whatever
 # was given; sbsa-ref needs EL3, so TCG only.

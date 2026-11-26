@@ -8,6 +8,7 @@ import (
 
 	"godeep/drivers/apple/spihid"
 	"godeep/drivers/apple/wdt"
+	"godeep/drivers/arm/pl011"
 	"godeep/kernel/dev"
 	"godeep/kernel/mmio"
 )
@@ -26,6 +27,8 @@ func init() {
 	}
 	dev.Register(dev.Driver{Compatible: idleCompatible, Run: runIdleStats})
 	dev.Register(spihid.Driver(window))
+	// QEMU only (tools/fakem1n1): typing in the terminal. The Mac has no PL011.
+	dev.Register(pl011.Driver(window))
 }
 
 // stopWatchdog keeps the screen as it is: on halt, and on a fault or panic

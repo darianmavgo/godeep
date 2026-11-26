@@ -80,6 +80,33 @@ func (d *Device) IRQ0() int {
 // Ready publishes the driver's service object; consumers' Get returns it.
 func (d *Device) Ready(service any) { d.e.set(Ready, service, nil) }
 
+// Add registers a device this driver discovered (e.g. a PCI function) and
+// starts its driver under devmgr, like the boot-time devices. Names are
+// unique: adding an existing name does nothing and returns false (a bus
+// driver that restarts and rescans finds its children already there).
+func (d *Device) Add(n Node) bool { return d.m.add(n) }
+
+func (m *Manager) add(n Node) bool {
+	m.mu.Lock()
+	if _, ok := m.entries[n.Name]; ok || m.devmgr == nil {
+		m.mu.Unlock()
+		return false
+	}
+	drv, ok := drivers[n.Compatible]
+	st := Waiting
+	if !ok {
+		st = NoDriver
+	}
+	e := &entry{node: n, state: st, changed: make(chan struct{})}
+	m.entries[n.Name] = e
+	mgr := m.devmgr
+	m.mu.Unlock()
+	if ok {
+		mgr.Go(func(ctx context.Context) { m.supervise(ctx, mgr, drv, e) })
+	}
+	return true
+}
+
 // Lookup waits for another device and returns its service.
 func (d *Device) Lookup(ctx context.Context, name string) (any, error) {
 	return d.m.Get(ctx, name)
@@ -129,6 +156,7 @@ type Manager struct {
 
 	mu      sync.Mutex
 	entries map[string]*entry
+	devmgr  *proc.Proc // set by Start; Add runs new drivers under it
 }
 
 func NewManager(tab *proc.Table, b *irq.Bridge, a *dma.Allocator) *Manager {
@@ -152,6 +180,9 @@ func (m *Manager) Start(ctx context.Context, nodes []Node) *proc.Proc {
 	m.mu.Unlock()
 
 	return m.tab.Spawn(ctx, 0, proc.Spec{Name: "devmgr", Main: func(ctx context.Context, p *proc.Proc) error {
+		m.mu.Lock()
+		m.devmgr = p
+		m.mu.Unlock()
 		for _, n := range nodes {
 			if drv, ok := drivers[n.Compatible]; ok {
 				e := m.entry(n.Name)

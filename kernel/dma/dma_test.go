@@ -75,3 +75,25 @@ func TestFragmentationCoalesces(t *testing.T) {
 		t.Fatalf("want 1 span, got %+v", s)
 	}
 }
+
+func TestLoadStore32(t *testing.T) {
+	a := newTest(1 << 16)
+	b, err := a.Alloc(64, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Store32(8, 0xdeadbeef)
+	if b.Bytes[8] != 0xef || b.Bytes[11] != 0xde || b.Load32(8) != 0xdeadbeef {
+		t.Fatal("not little-endian at the right offset")
+	}
+	for _, off := range []int{2, -4, len(b.Bytes)} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("offset %d accepted", off)
+				}
+			}()
+			b.Load32(off)
+		}()
+	}
+}

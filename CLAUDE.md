@@ -36,6 +36,7 @@ make test      # go test ./... on the host (core packages must stay host-buildab
 make hosted    # build ./bin/godeep-hosted and run the kernel as a normal process
 make kernel    # build bin/godeep-$(ARCH).elf with TamaGo (TAMAGO=path/to/tamago-go/bin/go)
 make image     # arm64 Linux-style Image (bin/godeep-arm64.img) for QEMU -kernel, m1n1, U-Boot booti
+make check-virt # headless QEMU virt: PCIe + NVMe + GPT + FAT32/ext4 read from the shell (tools/qemucheck)
 make qemu      # boot it with an interactive shell on serial (arm64: the Image + device tree; BOOT=elf for the ELF; EL2=1 to enter at EL2 like m1n1, TCG)
 make qemu-applem1   # the Mac image itself on QEMU sbsa-ref, handed over like m1n1 (tools/fakem1n1); TCG
 make shot-applem1   # (another terminal) its framebuffer → bin/fakem1n1/screen.png
@@ -63,12 +64,17 @@ In QEMU, ^C goes to godeep (it kills the foreground program). Quit QEMU with `Ct
   - `proc`: process table. Each Proc tags its goroutines with pprof labels `pid`/`proc`; children inherit them. `Snapshot()` parses `runtime.Stack(all)`, which in Go 1.27 prints labels in each goroutine header, to attribute every goroutine to a PID (this is what `ps` uses). `Kthread` = kernel goroutine (pid 0).
   - `tty`: line discipline, run as its own kernel goroutine: echo, editing, typeahead, ^C → `Interrupts()` channel
   - `prog`: registry of built-in programs (registered from `init()`, read-only after boot)
-  - `dma`: DMA allocator over a region outside the Go heap + `IOMMU` interface (`Identity`; Apple DART to do)
+  - `dma`: DMA allocator over a region outside the Go heap + `IOMMU` interface (`Identity`; Apple DART to do). `Buffer.Load32/Store32`: acquire/release access to words a device shares (completion phase bits, ownership flags)
+  - `block`: block-device interface, GPT/MBR partitions, cached `io.ReaderAt` (`NewReader`); `MakeGPT` for tools/tests. Read-only
   - `irq`: interrupt bridge. The board acks and calls `Dispatch`; the line is masked until the driver calls `line.Done()` (oneshot)
   - `dev`: device manager. Each driver is a process `drv/<name>` under `devmgr`, with dependencies (`Needs`), readiness (`Ready`/`Get`) and restart-on-crash
   - `rtkit`: Apple RTKit coprocessor protocol over a `Mailbox` interface (encodings unverified on hardware)
   - `fdt`: device-tree parser (`ranges` translation, GIC interrupt cells, phandles: `Refs` for `*-gpios`/`power-domains`/`interrupts-extended`); boards build `dev.Node`s from the tree in `x0`. `dev.Node.Config` carries board-resolved driver settings (or an error the driver returns, so lsdev shows it)
   - `mmio`: `Regs` interface for device registers: `Window` (tamago only) and a recording `Fake` for host tests
+- `drivers/pci`: ECAM host bridge (`pci-host-ecam-generic`): scans bus 0, assigns BARs from `ranges` (no firmware does it), adds each function as a device named by class (`nvme0`) with compatible `pciclass,CCSSPP` and Config `*pci.Function` (`dev.Device.Add`: drivers can add devices they discover)
+- `drivers/nvme`: NVMe over PCIe, polled, read-only; one goroutine owns the controller, `ReadBlocks` requests go over a channel; publishes a `block.Device`
+- `fs/fat`, `fs/ext4`: read-only filesystems as `io/fs.FS` (FAT12/16/32 + long names; ext2/3/4: extents, block maps, 64-bit, htree, symlinks), over the shared `fs/rofs`. Tested against real `mkfs` images in `fs/testdata` (`tools/mktestfs.sh`, needs `brew install e2fsprogs dosfstools mtools`) and `testing/fstest`. Shell: `lsblk`, `ls DISK:PATH`, `cat DISK:PATH` (no mount table: `nvme0p2:/docs`)
+- `tools/mkdisk`: `bin/disk.img` (GPT: FAT32 + ext4 test images), QEMU's NVMe disk. `tools/qemucheck`: boot QEMU, type commands, expect output
 - `drivers/<vendor>/<device>`: portable drivers taking `mmio.Regs`, host-tested; boards register them (`drivers/arm/pl061`, `pl031`, `drivers/virtio/mmio`, `drivers/apple/wdt`: the Apple watchdog, a `dev.Rebooter` for the shell's `reboot`; `drivers/apple/{pmgr,gpio,spi,spihid}`: the internal keyboard, polled like U-Boot's, see below)
 - `tools/mkimage`: ELF → arm64 Linux Image (`-text-offset` override to test self-relocation)
 - `tools/m1n1boot`: puts godeep in place of U-Boot in an Asahi `m1n1/boot.bin` (m1n1 boots godeep directly; U-Boot on this Mac autoboots Omarchy). `-info` tells which payload a boot.bin has
@@ -76,7 +82,7 @@ In QEMU, ^C goes to godeep (it kills the foreground program). Quit QEMU with `Ct
 - Early boot screen (`board/applem1/early.go`): numbered squares on m1n1's framebuffer for each boot stage (1 Hwinit0, 2 final page tables, 3 Hwinit1, 4 runtime up), and a red fault screen (ESR/ELR/FAR) from early vectors (`entry_arm64.s` → `early_arm64.s`), then via `arm64.SystemExceptionHandler` until the console exists. Built on `fdt.ScanEarly` and `simplefb.Early`: allocation-free, and the painter is `//go:nosplit` (it runs on a private stack). `godeep.testfault=N` in `/chosen/bootargs` faults at stage N on purpose
 - `kernel/pgtable`: 4-level 48-bit page tables, allocation-free (runs in `Hwinit0`, before the Go runtime)
 - `drivers/simplefb`: text console on a firmware framebuffer
-- `board/applem1` (`tamago && arm64 && applem1`, `make image BOARD=applem1`): this MacBook Pro. Boots to the shell under QEMU sbsa-ref via `make check-applem1`, and on the real Mac via m1n1 (2026-11-25; no input yet). Idle = WFE woken by the generic-timer event stream (`idle.go`; no interrupts needed; under QEMU TCG WFE doesn't sleep). The watchdog (30 s) is stopped by `goos.Exit` and `lateFault` so halt/fault screens stay. fakem1n1's watchdog node is a RAM page: it is wired but never counts or resets. Keyboard: `spihid.ConfigFromFDT` resolves the transport node (power-domain chains, spi3 pinmux, spien, ready line) and the board feeds its bytes into the same console channel as autorun. It polls the ready line every 5 ms, or falls back to blind reads after 3 s; lsdev's `hid-transport@0` row reports mode, power, packets, CRC and keys. fakem1n1 backs this path with preloaded RAM pages (`keyboard.go`, `regs.bin`): it exercises bring-up and the fallback, not typing See docs/TargetMyMac.md §3.1, §6.8
+- `board/applem1` (`tamago && arm64 && applem1`, `make image BOARD=applem1`): this MacBook Pro. Boots to the shell under QEMU sbsa-ref via `make check-applem1`, and on the real Mac via m1n1 (2026-11-25; no input yet). Idle = WFE woken by the generic-timer event stream (`idle.go`; no interrupts needed; under QEMU TCG WFE doesn't sleep). The watchdog (30 s) is stopped by `goos.Exit` and `lateFault` so halt/fault screens stay. fakem1n1's watchdog node is a RAM page: it is wired but never counts or resets. Keyboard: `spihid.ConfigFromFDT` resolves the transport node (power-domain chains, spi3 pinmux, spien, ready line) and the board feeds its bytes into the same console channel as autorun. It polls the ready line every 5 ms, or falls back to blind reads after 3 s; lsdev's `hid-transport@0` row reports mode, power, packets, CRC and keys. fakem1n1 backs this path with preloaded RAM pages (`keyboard.go`, `regs.bin`): it exercises bring-up and the fallback, not typing. On QEMU you type through the PL011 instead (`drivers/arm/pl011`, polled, same input channel); `check-applem1` types `help` and expects the shell's answer See docs/TargetMyMac.md §3.1, §6.8
 - `third_party/tamago`: vendored TamaGo, via `replace` in go.mod: arm64 `linkhwinit0` (2 files), and `goos.HeapAddrBits` 41 instead of 40 (M1 DRAM starts at 1 TB = 1<<40; with 40 the runtime aborts in `schedinit`). See its GODEEP_PATCHES.md
 - `tools/godeep-partition.sh`: guided partitioning of this Mac (docs/TargetMyMac.md §6)
   - See `docs/DriverModel.md` for the driver rules and these four pieces
@@ -122,4 +128,4 @@ amd64 / `board/microvm`:
 
 - **Kill is cooperative.** Go cannot preempt-kill a goroutine. A cancelled Proc dies at its next blocking kernel call.
 - TamaGo has no cgo, no `plugin` and no `os/exec`. Anything dynamic goes through the (planned) wazero loader.
-- Single address space means trust: only memory-safe Go (no `unsafe` outside `board/*` and `kernel/dev`).
+- Single address space means trust: only memory-safe Go (no `unsafe` outside `board/*`, `kernel/dev` and `kernel/dma`'s word accessors).

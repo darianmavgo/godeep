@@ -25,6 +25,9 @@ const (
 	VIRTIO_MMIO_BASE  = 0x0a000000
 	VIRTIO_MMIO_SLOTS = 32
 	DRAM_BASE         = 0x40000000
+	PCIE_ECAM         = 0x40_1000_0000 // highmem ECAM (QEMU virt default)
+	PCIE_MMIO         = 0x10000000     // 32-bit memory window
+	PCIE_MMIO_SIZE    = 0x2eff0000
 
 	// GIC interrupt IDs: SPIs start at 32 (hw/arm/virt.c irqmap).
 	UART0_IRQ  = 32 + 1

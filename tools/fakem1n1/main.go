@@ -33,6 +33,7 @@ import (
 	"flag"
 	"fmt"
 	"image/png"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -439,6 +440,8 @@ func cmdCheck(args []string) error {
 	qemu := fs.String("qemu", "qemu-system-aarch64", "QEMU binary")
 	timeout := fs.Duration("timeout", 90*time.Second, "how long to wait for the shell")
 	want := fs.String("want", "board:,memory layout OK,uptime,wake-ups/s,bites in,power domains (0 switched on)", "comma-separated strings the serial output must contain")
+	typed := fs.String("type", "help\r", "then typed on the serial console (input check; empty: skip)")
+	reply := fs.String("reply", "BUILTIN", "what the typed input must produce")
 	fs.Parse(args)
 	if _, err := prepare(&c); err != nil {
 		return err
@@ -458,6 +461,11 @@ func cmdCheck(args []string) error {
 	if err != nil {
 		return err
 	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	defer stdin.Close()
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
 		return err
@@ -515,6 +523,26 @@ func cmdCheck(args []string) error {
 			return fmt.Errorf("timed out after %v; missing %q\nserial: %s\nscreen: %s (%v)",
 				*timeout, missing(text, wants), log, png, shotErr)
 		}
+	}
+	// Input: type on the serial console and wait for the shell's answer
+	// (the reply must be new output, not the echo of what was typed).
+	if *typed != "" {
+		before := len(text)
+		if _, err := io.WriteString(stdin, *typed); err != nil {
+			return fmt.Errorf("typing on the serial console: %w", err)
+		}
+		deadline := time.After(30 * time.Second)
+		for !strings.Contains(text[before:], *reply) {
+			select {
+			case text = <-seen:
+			case <-exited:
+				return fmt.Errorf("QEMU exited after typing %q; serial: %s", *typed, log)
+			case <-deadline:
+				return fmt.Errorf("typed %q on the serial console, but no %q came back: input doesn't reach the shell\nserial: %s",
+					*typed, *reply, log)
+			}
+		}
+		fmt.Printf("fakem1n1: OK: typed %q, the shell answered (%q)\n", *typed, *reply)
 	}
 	time.Sleep(2 * time.Second) // let autorun finish drawing
 	png := filepath.Join(c.out, "screen.png")

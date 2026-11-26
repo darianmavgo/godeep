@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"unsafe"
 
+	"godeep/drivers/arm/pl011"
 	"godeep/drivers/simplefb"
 	"godeep/kernel"
 	"godeep/kernel/dev"
@@ -85,7 +86,8 @@ func NewBoard() kernel.Board {
 		devices = append(devices, "no device tree from the boot loader")
 	}
 
-	// One input stream: autorun first, then the keyboard driver's bytes.
+	// One input stream: autorun first, then the keyboard driver's bytes (and
+	// on QEMU, the serial port's).
 	// Never closed.
 	in := make(chan byte, len(Autorun)+keyBuffer)
 	for i := 0; i < len(Autorun); i++ {
@@ -105,6 +107,11 @@ func NewBoard() kernel.Board {
 		b.Devices = fromFDT(root)
 		if kbd, ok := keyboard(root, in); ok {
 			b.Devices = withNode(b.Devices, kbd)
+		}
+		for i := range b.Devices {
+			if b.Devices[i].Compatible == pl011.Compatible {
+				b.Devices[i].Config = (chan<- byte)(in) // serial input (QEMU)
+			}
 		}
 	}
 	b.Devices = append(b.Devices, dev.Node{Name: "idle", Compatible: idleCompatible})
