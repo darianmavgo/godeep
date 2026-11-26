@@ -84,9 +84,11 @@ func Driver(regs func(base uint64) mmio.Regs, fence ...func(serial string) block
 		if d.DMA == nil {
 			return errors.New("nvme: the board has no DMA region")
 		}
-		// No IOMMU on QEMU virt: the controller sees physical addresses.
-		// (Apple's ANS2 sits behind a DART: map buffers through dma.IOMMU.)
-		c := &ctrl{r: regs(f.BARs[0].CPU), dma: d.DMA}
+		a := d.DMA
+		if f.DMA != nil { // behind an IOMMU: buffers' Bus addresses are what it sees
+			a = f.DMA
+		}
+		c := &ctrl{r: regs(f.BARs[0].CPU), dma: a}
 		if err := c.init(ctx); err != nil {
 			c.free()
 			return err
@@ -289,8 +291,8 @@ func (c *ctrl) init(ctx context.Context) error {
 	}
 	c.r.Write32(INTMS, 0xffffffff) // polled: no interrupts
 	c.r.Write32(AQA, (queueDepth-1)<<16|(queueDepth-1))
-	c.write64(ASQ, c.admin.sq.Phys)
-	c.write64(ACQ, c.admin.cq.Phys)
+	c.write64(ASQ, c.admin.sq.Bus)
+	c.write64(ACQ, c.admin.cq.Bus)
 	c.r.Write32(CC, CC_IOCQES|CC_IOSQES|CC_EN)
 	if err := c.waitReady(ctx, true, timeout); err != nil {
 		return err
@@ -304,7 +306,7 @@ func (c *ctrl) init(ctx context.Context) error {
 	}
 
 	// Identify controller.
-	if err := c.cmd(ctx, c.admin, opIdentify, 0, c.buf.Phys, 0, [6]uint32{1}); err != nil {
+	if err := c.cmd(ctx, c.admin, opIdentify, 0, c.buf.Bus, 0, [6]uint32{1}); err != nil {
 		return fmt.Errorf("nvme: identify controller: %w", err)
 	}
 	id := c.buf.Bytes[:4096]
@@ -321,7 +323,7 @@ func (c *ctrl) init(ctx context.Context) error {
 	}
 
 	// Identify namespace 1.
-	if err := c.cmd(ctx, c.admin, opIdentify, 1, c.buf.Phys, 0, [6]uint32{0}); err != nil {
+	if err := c.cmd(ctx, c.admin, opIdentify, 1, c.buf.Bus, 0, [6]uint32{0}); err != nil {
 		return fmt.Errorf("nvme: identify namespace: %w", err)
 	}
 	ns := c.buf.Bytes[:4096]
@@ -336,10 +338,10 @@ func (c *ctrl) init(ctx context.Context) error {
 	if c.io, err = c.newQueue(1); err != nil {
 		return err
 	}
-	if err := c.cmd(ctx, c.admin, opCreateCQ, 0, c.io.cq.Phys, 0, [6]uint32{(queueDepth-1)<<16 | 1, 1}); err != nil {
+	if err := c.cmd(ctx, c.admin, opCreateCQ, 0, c.io.cq.Bus, 0, [6]uint32{(queueDepth-1)<<16 | 1, 1}); err != nil {
 		return fmt.Errorf("nvme: create I/O completion queue: %w", err)
 	}
-	if err := c.cmd(ctx, c.admin, opCreateSQ, 0, c.io.sq.Phys, 0, [6]uint32{(queueDepth-1)<<16 | 1, 1<<16 | 1}); err != nil {
+	if err := c.cmd(ctx, c.admin, opCreateSQ, 0, c.io.sq.Bus, 0, [6]uint32{(queueDepth-1)<<16 | 1, 1<<16 | 1}); err != nil {
 		return fmt.Errorf("nvme: create I/O submission queue: %w", err)
 	}
 	vs := c.r.Read32(VS)
@@ -410,15 +412,15 @@ func (c *ctrl) transfer(ctx context.Context, op byte, lba uint64, p []byte) erro
 		n := min(len(p), c.maxXfer)
 		nlb := n / c.bs
 		pages := (n + pageSize - 1) / pageSize
-		prp1, prp2 := c.buf.Phys, uint64(0)
+		prp1, prp2 := c.buf.Bus, uint64(0)
 		switch {
 		case pages == 2:
-			prp2 = c.buf.Phys + pageSize
+			prp2 = c.buf.Bus + pageSize
 		case pages > 2:
 			for i := 1; i < pages; i++ {
-				binary.LittleEndian.PutUint64(c.prps.Bytes[8*(i-1):], c.buf.Phys+uint64(i)*pageSize)
+				binary.LittleEndian.PutUint64(c.prps.Bytes[8*(i-1):], c.buf.Bus+uint64(i)*pageSize)
 			}
-			prp2 = c.prps.Phys
+			prp2 = c.prps.Bus
 		}
 		if op == opWrite {
 			copy(c.buf.Bytes[:n], p)

@@ -136,7 +136,11 @@ func Driver(regs func(base uint64) mmio.Regs, keys chan<- byte) dev.Driver {
 		if d.DMA == nil {
 			return errors.New("xhci: the board has no DMA region")
 		}
-		return Run(ctx, d, Config{Regs: regs(f.BARs[0].CPU), DMA: d.DMA, Keys: keys})
+		a := d.DMA
+		if f.DMA != nil { // behind an IOMMU
+			a = f.DMA
+		}
+		return Run(ctx, d, Config{Regs: regs(f.BARs[0].CPU), DMA: a, Keys: keys})
 	}}
 }
 

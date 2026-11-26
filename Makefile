@@ -121,7 +121,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: wasm push hot check-usbnet check-pcie test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
+.PHONY: wasm push hot check-usbnet check-pcie check-iommu test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
 
 # ---- SSH keys (development) ----
 # bin/ssh keeps them across builds: host_ed25519 is godeep's host key,
@@ -268,6 +268,7 @@ check-virt: wasm
 	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(QEMU_NET) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
 	@$(MAKE) -s check-usbnet
 	@$(MAKE) -s check-pcie
+	@$(MAKE) -s check-iommu
 
 # USB Ethernet (CDC ECM) as the only network: QEMU's usb-net on the xHCI,
 # DHCP and SSH over it. The Mac's USB-C gadget link will look like this
@@ -303,6 +304,8 @@ check-pcie:
 	  -step 'cat nvme1p2:/fenced.txt=>inside the fence' \
 	  -step 'write nvme1p3:/fenced.txt outside the fence=>read-only' \
 	  -step 'ls nvme1p3:/=>docs' \
+	  -step 'dmesg=>logd: saving the kernel log to nvme1p2' \
+	  -step 'ls nvme1p2:/godeep=>log.txt' \
 	  -- $(QEMU) $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
 	  -device pcie-root-port,id=rp1,bus=pcie.0,chassis=1 \
 	  -drive if=none,id=d0,file=$(DISK),format=raw,readonly=on -device nvme,serial=godeep1,drive=d0,bus=rp1 \
@@ -310,6 +313,30 @@ check-pcie:
 	  -drive if=none,id=sdcard,file=bin/sd-check.img,format=raw -device sd-card,drive=sdcard \
 	  -device pcie-root-port,id=rp3,bus=pcie.0,chassis=3 \
 	  -drive if=none,id=mac,file=bin/mac-check.img,format=raw -device nvme,serial=godeep-mac,drive=mac,bus=rp3 \
+	  -kernel $(BOOTFILE)
+	@LC_ALL=C grep -aq 'godeep: halt, stopping all processes' bin/mac-check.img && \
+	  echo "check-pcie: OK: the kernel log reached GODEEPDATA, halt included" || \
+	  { echo "check-pcie: FAIL: the log on GODEEPDATA lacks the halt"; exit 1; }
+
+# Every PCIe device behind an IOMMU (QEMU's SMMUv3), set up like the Mac's
+# DARTs: NVMe, xHCI with a USB stick and USB Ethernet all DMA through
+# translated bus addresses. A driver that hands a device a physical address
+# fails here (and lsdev pci lists the fault).
+check-iommu:
+	@$(MAKE) -s image $(DISK)
+	go run ./tools/qemucheck -log bin/qemucheck-iommu.log \
+	  -step 'lsdev pci=>SMMUv3: DMA region at bus 0x10000000,nvme0,xhci0' \
+	  -step 'lsblk=>nvme0p1,FAT32,nvme0p2,ext4,usbdisk0p1' \
+	  -step 'cat nvme0p2:/hello.txt=>hello from godeep' \
+	  -step 'cat usbdisk0p2:/hello.txt=>hello from godeep' \
+	  -step 'lsdev xhci=>HID boot keyboard,hub,mass storage,ethernet' \
+	  -step 'ifconfig=>dhcp from 10.0.2.2' \
+	  -step 'local:ssh -i $(SSH_DIR)/id_ed25519 -p 2225 -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR root@127.0.0.1 lsdev pci=>SMMUv3' \
+	  -- $(QEMU) $(QEMU_FLAGS) -machine iommu=smmuv3 -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -drive if=none,id=d0,file=$(DISK),format=raw,readonly=on -device nvme,serial=godeep-iommu,drive=d0 \
+	  -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-hub,bus=xhci.0,port=3 \
+	  -drive if=none,id=stick,file=$(DISK),format=raw,readonly=on -device usb-storage,bus=xhci.0,port=3.1,drive=stick \
+	  -netdev user,id=u0,hostfwd=tcp:127.0.0.1:2225-:22 -device usb-net,netdev=u0,bus=xhci.0 \
 	  -kernel $(BOOTFILE)
 
 $(DISK_RW): $(DISK)

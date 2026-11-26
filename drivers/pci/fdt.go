@@ -39,6 +39,12 @@ func ConfigFromFDT(n *fdt.Node) (HostConfig, error) {
 		}
 		return x
 	}
+	// An SMMUv3 in front of the bus: iommu-map = <rid-base iommu sid-base length>.
+	if m := n.U32s("iommu-map"); len(m) >= 4 && m[0] == 0 && m[2] == 0 {
+		if s := n.ByPhandle(m[1]); s != nil && s.Compatible("arm,smmu-v3") && len(s.Reg()) > 0 {
+			c.SMMU = s.Reg()[0].Base
+		}
+	}
 	for i := 0; i < len(v); i += step {
 		hi := v[i]
 		w := Window{

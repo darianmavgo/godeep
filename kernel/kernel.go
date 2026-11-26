@@ -69,6 +69,9 @@ type Board struct {
 	// NetConfig is the stack's address setup. Zero: DHCP, falling back to
 	// QEMU's user network (netstack.QEMUUser) if no server answers.
 	NetConfig netstack.Config
+	// LogLabel: save the kernel log to the writable FAT32 partition with
+	// this label (godeep/log.txt; "": don't).
+	LogLabel string
 	// NetWait is how long netd waits for a network device at boot: 0 means
 	// 10 s, negative forever (a USB Ethernet adapter plugged in later).
 	NetWait time.Duration
@@ -106,6 +109,11 @@ func Boot(ctx context.Context, b Board) error {
 	if con.Input != nil {
 		startInput(ctx, tab, mgr, con.Input)
 	}
+	var saver *logSaver
+	if b.LogLabel != "" {
+		saver = &logSaver{label: b.LogLabel, mgr: mgr, fs: env.FS, log: env.Log}
+		startLogd(ctx, tab, saver)
+	}
 	halt := make(chan struct{})
 	var haltOnce sync.Once
 	env.Halt = func() { haltOnce.Do(func() { close(halt) }) }
@@ -122,6 +130,9 @@ func Boot(ctx context.Context, b Board) error {
 	case <-halt:
 		shutdown = true
 		env.Log.Printf("godeep: halt, stopping all processes")
+	}
+	if shutdown && saver != nil {
+		saver.flush() // while the disk's driver still runs
 	}
 	cancel()
 

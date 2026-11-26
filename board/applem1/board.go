@@ -100,6 +100,9 @@ func NewBoard() kernel.Board {
 			model, el, nodes, joinInfo(info), joinInfo(devices)),
 		Console: kernel.Console{In: in, Out: out, Echo: true},
 		NetWait: -1, // until a USB Ethernet adapter is plugged in
+		// The kernel log goes to godeep/log.txt on GODEEPDATA (once
+		// ssdWrites is on), or on any USB stick formatted FAT32 with that label.
+		LogLabel: "GODEEPDATA",
 		// After halt has stopped every driver (the SSD shut its firmware
 		// down): goos.Exit powers off through the SMC, or keeps the screen.
 		PowerOff: func() { os.Exit(0) },

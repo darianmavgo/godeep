@@ -24,7 +24,9 @@ import (
 	"fmt"
 	"sort"
 
+	"godeep/drivers/arm/smmuv3"
 	"godeep/kernel/dev"
+	"godeep/kernel/dma"
 	"godeep/kernel/mmio"
 )
 
@@ -78,7 +80,11 @@ type Window struct {
 type HostConfig struct {
 	ECAM    uint64 // config space: bus<<20 | dev<<15 | fn<<12 | register
 	Windows []Window
+	SMMU    uint64 // an Arm SMMUv3 in front of the bus ("iommu-map"); 0: none
 }
+
+// IOVABase is where the DMA region appears to devices behind an IOMMU.
+const IOVABase = 0x1000_0000
 
 // BAR is one assigned memory BAR.
 type BAR struct {
@@ -96,6 +102,10 @@ type Function struct {
 	Subordinate    int    // bridges: the last bus in its subtree
 	BARs           [6]BAR // index = BAR number; Size 0: absent or not assigned
 	Name           string // e.g. "nvme0"
+	// DMA is the allocator for this function's DMA buffers when the bus
+	// is behind an IOMMU (buffers' Bus addresses are what it sees); nil:
+	// the board's, untranslated.
+	DMA *dma.Allocator
 
 	cfg mmio.Regs
 	off uint64
@@ -354,13 +364,23 @@ func Driver(regs func(base uint64) mmio.Regs) dev.Driver {
 		default:
 			return fmt.Errorf("pci: no configuration from the board (%T)", d.Config)
 		}
+		var iommu *smmuv3.SMMU
+		var translated *dma.Allocator
+		if hc.SMMU != 0 && d.DMA != nil {
+			var err error
+			if iommu, err = smmuv3.Setup(regs(hc.SMMU), d.DMA, IOVABase, 12); err != nil {
+				return err
+			}
+			translated = d.DMA.Translated(IOVABase)
+		}
 		fns, err := Scan(regs(hc.ECAM), hc.Windows)
 		if err != nil {
 			return err
 		}
-		list := make(lister, 0, len(fns))
+		list := &lister{iommu: iommu}
 		for _, f := range fns {
-			list = append(list, f.Name+" "+f.String())
+			f.DMA = translated
+			list.lines = append(list.lines, f.Name+" "+f.String())
 			if f.Bridge || f.Class>>8 == 0x0600 || f.Class>>8 == 0x0604 { // bridges and the host bridge itself
 				continue
 			}
@@ -372,13 +392,25 @@ func Driver(regs func(base uint64) mmio.Regs) dev.Driver {
 			}
 			d.Add(n)
 		}
-		sort.Strings(list)
+		sort.Strings(list.lines)
 		d.Ready(list)
 		<-ctx.Done()
 		return nil
 	}}
 }
 
-type lister []string
+type lister struct {
+	lines []string
+	iommu *smmuv3.SMMU
+}
 
-func (l lister) Devices() []string { return l }
+func (l *lister) Devices() []string {
+	if l.iommu == nil {
+		return l.lines
+	}
+	out := append([]string{l.iommu.Info()}, l.lines...)
+	for _, e := range l.iommu.Events() {
+		out = append(out, "IOMMU fault: "+e)
+	}
+	return out
+}

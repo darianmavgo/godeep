@@ -99,6 +99,7 @@ func NewBoard() kernel.Board {
 		IRQ:      Bridge,
 		DMA:      alloc,
 		Devices:  nodes,
+		LogLabel: "GODEEPDATA", // like the Mac: a disk with that FAT32 label gets the log
 	}
 }
 
