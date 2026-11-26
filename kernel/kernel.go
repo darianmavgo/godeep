@@ -22,6 +22,7 @@ import (
 	_ "godeep/programs/hello"
 	"godeep/programs/initd"
 	"godeep/programs/sh"
+	"godeep/programs/wasm"
 )
 
 const Version = "0.1.0"
@@ -67,6 +68,9 @@ type Board struct {
 	// NetConfig is the stack's address setup. Zero: DHCP, falling back to
 	// QEMU's user network (netstack.QEMUUser) if no server answers.
 	NetConfig netstack.Config
+	// NetWait is how long netd waits for a network device at boot: 0 means
+	// 10 s, negative forever (a USB Ethernet adapter plugged in later).
+	NetWait time.Duration
 }
 
 // Boot starts PID 1 and blocks until it exits, ctx is done, or the board
@@ -89,13 +93,14 @@ func Boot(ctx context.Context, b Board) error {
 	mgr.Start(ctx, b.Devices)
 
 	env := sh.Env{Table: tab, TTY: tty.New(con.In, con.Out, con.Echo), Boot: time.Now(),
-		Dev: mgr, IRQ: b.IRQ, DMA: b.DMA, Net: b.Net, FS: vfs.New(ctx, mgr)}
+		Dev: mgr, IRQ: b.IRQ, DMA: b.DMA, Net: b.Net, FS: vfs.New(ctx, mgr), WASM: wasm.NewCache(wasm.DefaultCacheSize)}
 	env.FS.Mount("ram", memfs.New("ram"))
+	defer env.WASM.Close()
 	defer env.TTY.Close()
 	env.Log = klog.New(env.TTY, 0)
 	env.Log.Record([]byte(banner))
 	if env.Net == nil {
-		env.Net = startNet(ctx, tab, mgr, b.NetConfig, netstack.QEMUUser, env.Log)
+		env.Net = startNet(ctx, tab, mgr, b.NetConfig, netstack.QEMUUser, b.NetWait, env.Log)
 	}
 	if con.Input != nil {
 		startInput(ctx, tab, mgr, con.Input)

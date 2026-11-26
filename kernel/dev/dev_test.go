@@ -147,3 +147,65 @@ func TestAdd(t *testing.T) {
 		t.Fatalf("%d devices, want 4", n)
 	}
 }
+
+// A controller that restarts publishes what it finds again under the same
+// names; followers see the new service.
+func TestReplace(t *testing.T) {
+	var publish atomic.Pointer[func(Node) bool]
+	Register(Driver{Compatible: "test,ctl", Run: func(ctx context.Context, d *Device) error {
+		f := d.Replace
+		publish.Store(&f)
+		d.Ready(nil)
+		<-ctx.Done()
+		return nil
+	}})
+	Register(Driver{Compatible: "test,nic", Run: func(ctx context.Context, d *Device) error {
+		d.Ready(d.Config)
+		<-ctx.Done()
+		return nil
+	}})
+	Register(Driver{Compatible: "test,once", Run: func(ctx context.Context, d *Device) error {
+		d.Ready(d.Config)
+		return nil // finished, service stays
+	}})
+	m := NewManager(proc.NewTable(), nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m.Start(ctx, []Node{{Name: "ctl", Compatible: "test,ctl"}})
+	if _, err := m.Get(ctx, "ctl"); err != nil {
+		t.Fatal(err)
+	}
+	pub := *publish.Load()
+	wait := func(name string, want any) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			svc, err := m.Get(ctx, name)
+			if err == nil && svc == want {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: got %v, %v; want %v", name, svc, err, want)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	for i := 0; i < 20; i++ {
+		if !pub(Node{Name: "net0", Compatible: "test,nic", Config: i}) {
+			t.Fatal("Replace refused")
+		}
+		wait("net0", i)
+		if !pub(Node{Name: "once", Compatible: "test,once", Config: i}) {
+			t.Fatal("Replace refused a finished device")
+		}
+		wait("once", i)
+	}
+	if pub(Node{Name: "net0", Compatible: "test,once"}) {
+		t.Fatal("Replace took a device of another kind")
+	}
+	for _, s := range m.List() {
+		if s.Name == "net0" && s.Restarts != 0 {
+			t.Fatalf("replacements counted as restarts: %+v", s)
+		}
+	}
+}

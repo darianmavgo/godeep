@@ -30,6 +30,10 @@ import (
 	"godeep/kernel/mmio"
 )
 
+// ErrStopped is returned by a USB disk whose controller has stopped (the
+// cable was pulled, or the controller restarted).
+var ErrStopped = errors.New("usb: controller stopped")
+
 // Compatible is the PCI class string for xHCI.
 const Compatible = "pciclass,0c0330"
 
@@ -121,8 +125,8 @@ const (
 	cmdTimeout   = 2 * time.Second
 )
 
-// Driver returns the xHCI driver. keys receives typed bytes from USB
-// keyboards (nil: keys only as events); regs maps BAR0.
+// Driver returns the xHCI driver for PCI controllers. keys receives typed
+// bytes from USB keyboards (nil: keys only as events); regs maps BAR0.
 func Driver(regs func(base uint64) mmio.Regs, keys chan<- byte) dev.Driver {
 	return dev.Driver{Compatible: Compatible, Run: func(ctx context.Context, d *dev.Device) error {
 		f, ok := d.Config.(*pci.Function)
@@ -132,36 +136,102 @@ func Driver(regs func(base uint64) mmio.Regs, keys chan<- byte) dev.Driver {
 		if d.DMA == nil {
 			return errors.New("xhci: the board has no DMA region")
 		}
-		h := &hc{r: regs(f.BARs[0].CPU), dma: d.DMA, keys: keys, svc: &Service{}, addDev: d.Add, reads: make(chan *readReq), sends: make(chan *sendReq)}
-		defer h.free()
-		defer func() { // USB NICs stop with the controller (netd sees ErrDown)
-			for _, n := range h.nics {
-				close(n.down)
-			}
-		}()
-		if err := h.init(ctx); err != nil {
-			return err
-		}
-		d.Ready(h.svc)
-		h.scanPorts(ctx)
-		t := time.NewTicker(PollInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				h.r.Write32(h.op+USBCMD, 0)
-				return nil
-			case now := <-t.C:
-				if err := h.poll(ctx, now); err != nil {
-					return err
-				}
-			case r := <-h.sends:
-				r.done <- r.nic.send(ctx, r.frame)
-			case r := <-h.reads:
-				r.done <- r.disk.transfer(ctx, r.lba, r.p, r.write)
-			}
-		}
+		return Run(ctx, d, Config{Regs: regs(f.BARs[0].CPU), DMA: d.DMA, Keys: keys})
 	}}
+}
+
+// Config is a controller instance for Run.
+type Config struct {
+	Regs mmio.Regs      // from the capability registers on
+	DMA  *dma.Allocator // device-visible memory: buffers' Bus addresses go to the controller
+	Keys chan<- byte    // typed bytes from USB keyboards (nil: events only)
+	// Names keeps the names of what the controller publishes (usbdisk0,
+	// usbnet0) across runs; nil: a fresh set.
+	Names *Names
+	// Ready publishes the service (nil: d.Ready). A glue driver that runs
+	// the controller again and again (DWC3) keeps its own service.
+	Ready func(*Service)
+}
+
+// Run drives one controller until ctx is done (it then halts it) or it
+// fails. Every DMA buffer is freed and the NICs it published report
+// netdev.ErrDown when it returns.
+func Run(ctx context.Context, d *dev.Device, c Config) error {
+	if c.Names == nil {
+		c.Names = &Names{}
+	}
+	h := &hc{r: c.Regs, dma: c.DMA, keys: c.Keys, svc: &Service{}, names: c.Names,
+		reads: make(chan *readReq), sends: make(chan *sendReq), down: make(chan struct{})}
+	if d != nil {
+		h.publish = d.Replace
+	}
+	defer h.free()
+	defer close(h.down) // disks: ErrStopped
+	defer func() {      // USB NICs stop with the controller (netd sees ErrDown)
+		for _, n := range h.nics {
+			close(n.down)
+		}
+	}()
+	if err := h.init(ctx); err != nil {
+		return err
+	}
+	switch {
+	case c.Ready != nil:
+		c.Ready(h.svc)
+	case d != nil:
+		d.Ready(h.svc)
+	}
+	h.scanPorts(ctx)
+	t := time.NewTicker(PollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			h.r.Write32(h.op+USBCMD, 0)
+			return nil
+		case now := <-t.C:
+			if err := h.poll(ctx, now); err != nil {
+				return err
+			}
+		case r := <-h.sends:
+			r.done <- r.nic.send(ctx, r.frame)
+		case r := <-h.reads:
+			r.done <- r.disk.transfer(ctx, r.lba, r.p, r.write)
+		}
+	}
+}
+
+// Names hands out device-manager names for what controllers publish
+// ("usbdisk0", "usbnet0"): unique across controllers that share it (or
+// whose names collide: the next free number is taken), and the same again
+// when a controller runs anew, so whoever follows a name (netd) gets the
+// device a replugged cable brought back.
+type Names struct {
+	mu    sync.Mutex
+	owned map[string][]string // by prefix, in publish order
+}
+
+// publish publishes node as this run's idx-th device named prefix<N>.
+func (n *Names) publish(add func(dev.Node) bool, prefix string, idx int, node dev.Node) string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.owned == nil {
+		n.owned = map[string][]string{}
+	}
+	if own := n.owned[prefix]; idx < len(own) {
+		node.Name = own[idx]
+		if add != nil {
+			add(node)
+		}
+		return node.Name
+	}
+	for i := 0; ; i++ {
+		node.Name = fmt.Sprintf("%s%d", prefix, i)
+		if add == nil || add(node) {
+			n.owned[prefix] = append(n.owned[prefix], node.Name)
+			return node.Name
+		}
+	}
 }
 
 // Service is the driver's service: lsdev lines and the HID devices'
@@ -220,7 +290,7 @@ func newRing(a *dma.Allocator) (*ring, error) {
 	if err != nil {
 		return nil, err
 	}
-	binary.LittleEndian.PutUint64(b.Bytes[(ringTRBs-1)*16:], b.Phys)
+	binary.LittleEndian.PutUint64(b.Bytes[(ringTRBs-1)*16:], b.Bus)
 	return &ring{buf: b, pcs: 1}, nil
 }
 
@@ -231,7 +301,7 @@ func (r *ring) push(param uint64, status, control uint32) uint64 {
 	binary.LittleEndian.PutUint64(r.buf.Bytes[off:], param)
 	binary.LittleEndian.PutUint32(r.buf.Bytes[off+8:], status)
 	r.buf.Store32(off+12, control&^trbCycle|r.pcs)
-	addr := r.buf.Phys + uint64(off)
+	addr := r.buf.Bus + uint64(off)
 	r.enq++
 	if r.enq == ringTRBs-1 { // hand the link TRB over, then wrap
 		r.buf.Store32((ringTRBs-1)*16+12, trbLink<<10|trbTC|r.pcs)
@@ -272,6 +342,26 @@ type device struct {
 	ep0        *ring
 	mps0       int
 	desc       usb.DeviceDesc
+	tt         tt // the high-speed hub's transaction translator a low/full-speed device is behind
+}
+
+// tt names a transaction translator: the slot of the high-speed hub that
+// has it and the hub port the low- or full-speed device's tree hangs off.
+// Zero for devices that talk to the controller at their own speed.
+type tt struct{ hubSlot, port int }
+
+// slotWord is the slot context's third word: TT hub slot ID, TT port.
+func (t tt) slotWord() uint32 { return uint32(t.hubSlot&0xff) | uint32(t.port&0xff)<<8 }
+
+// childTT is the translator for a device at speed on hub port p of d.
+func (d *device) childTT(p int, speed usb.Speed) tt {
+	switch {
+	case speed != usb.Low && speed != usb.Full:
+		return tt{}
+	case d.speed == usb.High:
+		return tt{hubSlot: d.slot, port: p} // this hub translates
+	}
+	return d.tt // a full-speed hub behind a high-speed one: its translator
 }
 
 type hc struct {
@@ -295,9 +385,11 @@ type hc struct {
 	allocs      []*dma.Buffer
 	hubs        []*hub
 	disks       []*Disk
-	addDev      func(dev.Node) bool // publishes discovered devices (mass storage)
-	reads       chan *readReq       // mass-storage reads, served by this goroutine
-	sends       chan *sendReq       // USB Ethernet frames out
+	publish     func(dev.Node) bool // publishes discovered devices (disks, NICs): dev.Device.Replace
+	names       *Names
+	down        chan struct{} // closed when Run returns
+	reads       chan *readReq // mass-storage reads, served by this goroutine
+	sends       chan *sendReq // USB Ethernet frames out
 	nics        []*NIC
 }
 
@@ -379,17 +471,17 @@ func (h *hc) init(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			binary.LittleEndian.PutUint64(arr.Bytes[8*i:], p.Phys)
+			binary.LittleEndian.PutUint64(arr.Bytes[8*i:], p.Bus)
 		}
-		binary.LittleEndian.PutUint64(h.dcbaa.Bytes, arr.Phys)
+		binary.LittleEndian.PutUint64(h.dcbaa.Bytes, arr.Bus)
 	}
-	h.write64(h.op+DCBAAP, h.dcbaa.Phys)
+	h.write64(h.op+DCBAAP, h.dcbaa.Bus)
 
 	if h.cmd, err = newRing(h.dma); err != nil {
 		return err
 	}
 	h.allocs = append(h.allocs, h.cmd.buf)
-	h.write64(h.op+CRCR, h.cmd.buf.Phys|1)
+	h.write64(h.op+CRCR, h.cmd.buf.Bus|1)
 
 	if h.evSeg, err = h.alloc(ringTRBs*16, 64); err != nil {
 		return err
@@ -397,13 +489,13 @@ func (h *hc) init(ctx context.Context) error {
 	if h.erst, err = h.alloc(16, 64); err != nil {
 		return err
 	}
-	binary.LittleEndian.PutUint64(h.erst.Bytes, h.evSeg.Phys)
+	binary.LittleEndian.PutUint64(h.erst.Bytes, h.evSeg.Bus)
 	binary.LittleEndian.PutUint32(h.erst.Bytes[8:], ringTRBs)
 	h.evCCS = 1
 	ir := h.rt + 0x20
 	h.r.Write32(ir+ERSTSZ, 1)
-	h.write64(ir+ERDP, h.evSeg.Phys)
-	h.write64(ir+ERSTBA, h.erst.Phys)
+	h.write64(ir+ERDP, h.evSeg.Bus)
+	h.write64(ir+ERSTBA, h.erst.Bus)
 	h.r.Write32(ir+IMAN, 1) // polled: interrupts off, pending flag cleared
 
 	h.r.Write32(h.op+USBCMD, CMD_RUN)
@@ -429,7 +521,7 @@ func (h *hc) nextEvent() (event, bool) {
 	if h.evDeq == ringTRBs {
 		h.evDeq, h.evCCS = 0, h.evCCS^1
 	}
-	h.write64(h.rt+0x20+ERDP, h.evSeg.Phys+uint64(h.evDeq*16)|1<<3)
+	h.write64(h.rt+0x20+ERDP, h.evSeg.Bus+uint64(h.evDeq*16)|1<<3)
 	return e, true
 }
 
@@ -547,7 +639,7 @@ func (h *hc) poll(ctx context.Context, now time.Time) error {
 }
 
 func (h *hc) queueIn(ep *endpoint) {
-	ep.ring.push(ep.buf.Phys, uint32(ep.size), trbNormal<<10|trbIOC|trbISP)
+	ep.ring.push(ep.buf.Bus, uint32(ep.size), trbNormal<<10|trbIOC|trbISP)
 	ep.pending = true
 	h.r.Write32(h.db+4*uint64(ep.slot), uint32(ep.dci))
 }
@@ -592,7 +684,7 @@ func (h *hc) attach(ctx context.Context, port int) error {
 	if err != nil {
 		return err
 	}
-	d, err := h.enumerate(ctx, port, 0, fmt.Sprintf("port %d", port), speed)
+	d, err := h.enumerate(ctx, port, 0, fmt.Sprintf("port %d", port), speed, tt{})
 	if d != nil {
 		h.devs[port] = d
 	}
@@ -603,12 +695,12 @@ func (h *hc) attach(ctx context.Context, port int) error {
 // hubs (route: one 4-bit hub port number per tier), and binds drivers to
 // its interfaces. The device is returned even on a later error, so the
 // caller doesn't retry it every poll.
-func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string, speed usb.Speed) (*device, error) {
+func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string, speed usb.Speed, t tt) (*device, error) {
 	slot, err := h.command(ctx, 0, 0, trbEnableSlot<<10)
 	if err != nil {
 		return nil, err
 	}
-	d := &device{slot: slot, port: port, route: route, where: where, speed: speed, mps0: speed.DefaultMaxPacket0()}
+	d := &device{slot: slot, port: port, route: route, where: where, speed: speed, mps0: speed.DefaultMaxPacket0(), tt: t}
 	if d.out, err = h.alloc(32*h.ctxSize, 64); err != nil {
 		return d, err
 	}
@@ -619,14 +711,17 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 		return d, err
 	}
 	h.allocs = append(h.allocs, d.ep0.buf)
-	binary.LittleEndian.PutUint64(h.dcbaa.Bytes[8*slot:], d.out.Phys)
+	binary.LittleEndian.PutUint64(h.dcbaa.Bytes[8*slot:], d.out.Bus)
 
 	in := d.in.Bytes
 	put32(in, 4, 1<<0|1<<1) // add slot and EP0
 	put32(in, h.inCtx(0), route&0xfffff|uint32(speed)<<20|1<<27)
 	put32(in, h.inCtx(0)+4, uint32(port)<<16)
+	if speed == usb.Low || speed == usb.Full {
+		put32(in, h.inCtx(0)+8, t.slotWord())
+	}
 	h.ep0Ctx(d)
-	if _, err := h.command(ctx, d.in.Phys, 0, trbAddress<<10|uint32(slot)<<24); err != nil {
+	if _, err := h.command(ctx, d.in.Bus, 0, trbAddress<<10|uint32(slot)<<24); err != nil {
 		return d, fmt.Errorf("address device: %w", err)
 	}
 
@@ -647,7 +742,7 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 		clear(in)
 		put32(in, 4, 1<<1)
 		h.ep0Ctx(d)
-		if _, err := h.command(ctx, d.in.Phys, 0, trbEvaluate<<10|uint32(slot)<<24); err != nil {
+		if _, err := h.command(ctx, d.in.Bus, 0, trbEvaluate<<10|uint32(slot)<<24); err != nil {
 			return d, fmt.Errorf("evaluate context: %w", err)
 		}
 	}
@@ -698,6 +793,12 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 			}
 			kinds = append(kinds, "ethernet")
 			continue
+		case it.Class == usb.ClassComm && it.Subclass == usb.SubclassNCM:
+			if err := h.newNCM(ctx, d, cfg, it); err != nil {
+				return d, fmt.Errorf("ethernet (NCM): %w", err)
+			}
+			kinds = append(kinds, "ethernet")
+			continue
 		case it.Class == usb.ClassMassStorage && it.Subclass == 6 && it.Protocol == 0x50:
 			if err := h.newDisk(ctx, d, it); err != nil {
 				return d, fmt.Errorf("mass storage: %w", err)
@@ -735,7 +836,7 @@ func (h *hc) ep0Ctx(d *device) {
 	c := h.inCtx(1)
 	in := d.in.Bytes
 	put32(in, c+4, 3<<1|4<<3|uint32(d.mps0)<<16) // CErr 3, control endpoint
-	binary.LittleEndian.PutUint64(in[c+8:], d.ep0.buf.Phys+uint64(d.ep0.enq*16)|uint64(d.ep0.pcs))
+	binary.LittleEndian.PutUint64(in[c+8:], d.ep0.buf.Bus+uint64(d.ep0.enq*16)|uint64(d.ep0.pcs))
 	put32(in, c+16, 8) // average TRB length
 }
 
@@ -757,7 +858,7 @@ func (h *hc) control(ctx context.Context, d *device, s usb.Setup, buf *dma.Buffe
 		if in {
 			dir = trbDirIn
 		}
-		dataTRB = d.ep0.push(buf.Phys, uint32(s.Length), trbData<<10|dir|trbISP|trbIOC)
+		dataTRB = d.ep0.push(buf.Bus, uint32(s.Length), trbData<<10|dir|trbISP|trbIOC)
 	}
 	statusDir := uint32(trbDirIn)
 	if s.Length > 0 && in {
@@ -823,7 +924,7 @@ func (h *hc) config(ctx context.Context, d *device, idx int, buf *dma.Buffer) (u
 func supported(c usb.Config) bool {
 	for _, it := range c.Interfaces {
 		switch {
-		case it.Class == usb.ClassHub, it.Class == usb.ClassComm && it.Subclass == usb.SubclassECM,
+		case it.Class == usb.ClassHub, it.Class == usb.ClassComm && (it.Subclass == usb.SubclassECM || it.Subclass == usb.SubclassNCM),
 			it.Class == usb.ClassMassStorage, it.BootKind() != "":
 			return true
 		}
@@ -833,8 +934,8 @@ func supported(c usb.Config) bool {
 
 // configureEP adds endpoint e (of type typ) to the device and returns its
 // device context index and transfer ring. slotExtra is ORed into the slot
-// context's first two words (a hub's flag and port count).
-func (h *hc) configureEP(ctx context.Context, d *device, e usb.Endpoint, typ int, slotExtra [2]uint32) (int, *ring, error) {
+// context's first three words (a hub's flag, port count and TT think time).
+func (h *hc) configureEP(ctx context.Context, d *device, e usb.Endpoint, typ int, slotExtra [3]uint32) (int, *ring, error) {
 	r, err := newRing(h.dma)
 	if err != nil {
 		return 0, nil, err
@@ -853,18 +954,19 @@ func (h *hc) configureEP(ctx context.Context, d *device, e usb.Endpoint, typ int
 	entries := max(int(sc>>27), dci) // the last valid endpoint: only ever grows
 	put32(in, h.inCtx(0), sc&^(0x1f<<27)|uint32(entries)<<27|slotExtra[0])
 	put32(in, h.inCtx(0)+4, binary.LittleEndian.Uint32(in[h.inCtx(0)+4:])|slotExtra[1])
+	put32(in, h.inCtx(0)+8, binary.LittleEndian.Uint32(in[h.inCtx(0)+8:])|slotExtra[2])
 	c := h.inCtx(dci)
 	if typ == epInterruptIn {
 		put32(in, c, uint32(interval(d.speed, e.Interval))<<16)
 	}
 	put32(in, c+4, 3<<1|uint32(typ)<<3|uint32(e.MaxPacket)<<16) // CErr 3
-	binary.LittleEndian.PutUint64(in[c+8:], r.buf.Phys|1)
+	binary.LittleEndian.PutUint64(in[c+8:], r.buf.Bus|1)
 	avg := uint32(e.MaxPacket)
 	if typ != epInterruptIn {
 		avg = 3072 // bulk: the spec's suggested average TRB length
 	}
 	put32(in, c+16, uint32(e.MaxPacket)<<16|avg) // max ESIT payload, average TRB length
-	if _, err := h.command(ctx, d.in.Phys, 0, trbConfigureEP<<10|uint32(d.slot)<<24); err != nil {
+	if _, err := h.command(ctx, d.in.Bus, 0, trbConfigureEP<<10|uint32(d.slot)<<24); err != nil {
 		return 0, nil, fmt.Errorf("configure endpoint: %w", err)
 	}
 	return dci, r, nil
@@ -872,8 +974,8 @@ func (h *hc) configureEP(ctx context.Context, d *device, e usb.Endpoint, typ int
 
 // interruptIn configures an interrupt IN endpoint (the caller sets its
 // handler and starts it with queueIn).
-func (h *hc) interruptIn(ctx context.Context, d *device, e usb.Endpoint, slotExtra ...[2]uint32) (*endpoint, error) {
-	var extra [2]uint32
+func (h *hc) interruptIn(ctx context.Context, d *device, e usb.Endpoint, slotExtra ...[3]uint32) (*endpoint, error) {
+	var extra [3]uint32
 	if len(slotExtra) > 0 {
 		extra = slotExtra[0]
 	}

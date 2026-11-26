@@ -37,6 +37,7 @@ type Env struct {
 	Net   cap.Net        // nil if the board has no network
 	FS    *vfs.NS        // volumes: ram, disks and partitions
 	Log   *klog.Log      // the kernel log (dmesg); nil: none
+	WASM  *wasm.Cache    // optional compiled-module cache for WASI programs
 }
 
 type builtin struct {
@@ -71,12 +72,14 @@ func init() {
 		"dmesg":    {"dmesg [-f]: the kernel log (-f: follow it until ^C)", dmesg},
 		"host":     {"host NAME: look a name up (DNS)", hostCmd},
 		"get":      {"get http[s]://HOST/PATH: fetch a URL, print the body", getCmd},
+		"mount9p":  {"mount9p HOST:PORT NAME: mount a 9P2000.L TCP share (e.g. tools/ninepd)", mount9pCmd},
+		"umount":   {"umount NAME: unmount a mounted volume", umount},
 		"df":       {"volumes: ram, disks and partitions with a filesystem", df},
-		"cp":       {"cp VOLUME:FROM VOLUME:TO: copy a file (to ram:)", cp},
+		"cp":       {"cp VOLUME:FROM VOLUME:TO: copy a file (to a writable volume)", cp},
 		"mv":       {"mv VOLUME:FROM VOLUME:TO: rename in a writable volume", mv},
-		"rm":       {"rm VOLUME:PATH...: remove files or empty directories (ram:)", rm},
-		"mkdir":    {"mkdir VOLUME:PATH...: make directories (ram:)", mkdir},
-		"write":    {"write VOLUME:PATH TEXT...: write a line to a file (ram:)", write},
+		"rm":       {"rm VOLUME:PATH...: remove files or empty directories (writable volume)", rm},
+		"mkdir":    {"mkdir VOLUME:PATH...: make directories (writable volume)", mkdir},
+		"write":    {"write VOLUME:PATH TEXT...: write a line to a file (writable volume)", write},
 	}
 }
 
@@ -132,6 +135,11 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 		bg = true
 		args[len(args)-1] = strings.TrimSuffix(args[len(args)-1], "&")
 	}
+	var envVars []string
+	for len(args) > 1 && isEnvAssign(args[0]) {
+		envVars = append(envVars, args[0])
+		args = args[1:]
+	}
 	if b, ok := builtins[args[0]]; ok {
 		return b.run(ctx, env, p, args[1:])
 	}
@@ -139,7 +147,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 	if pg, ok := prog.Lookup(args[0]); ok {
 		main = pg.Main
 	} else if strings.HasSuffix(args[0], ".wasm") && strings.Contains(args[0], ":") {
-		name, main = path.Base(args[0]), wasmMain(env, args[0])
+		name, main = path.Base(args[0]), wasmMain(env, args[0], envVars)
 	} else {
 		return errors.New("command not found")
 	}
@@ -167,7 +175,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")
@@ -253,9 +261,25 @@ func ifconfig(ctx context.Context, env Env, _ *proc.Proc, _ []string) error {
 	return nil
 }
 
+// isEnvAssign reports whether tok looks like KEY=VALUE with an identifier KEY.
+func isEnvAssign(tok string) bool {
+	k, _, ok := strings.Cut(tok, "=")
+	if !ok || k == "" {
+		return false
+	}
+	for i := 0; i < len(k); i++ {
+		c := k[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_' || (i > 0 && c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
 // wasmMain runs a WASI program from a volume: stdout to the terminal,
-// stdin from it (line by line), every volume mounted read-only at /NAME.
-func wasmMain(env Env, file string) proc.Main {
+// stdin from it (line by line), every volume mounted at /NAME (writable
+// volumes read-write, the rest read-only).
+func wasmMain(env Env, file string, envVars []string) proc.Main {
 	return func(ctx context.Context, p *proc.Proc) error {
 		if env.FS == nil {
 			return errors.New("no filesystems")
@@ -275,9 +299,9 @@ func wasmMain(env Env, file string) proc.Main {
 			}
 		}
 		return wasm.Run(ctx, wasm.Program{
-			Name: path.Base(file), Code: code, Args: p.Args,
+			Name: path.Base(file), Code: code, Args: p.Args, Env: envVars,
 			Stdin:  &wasm.LineReader{ReadLine: func() (string, error) { return env.TTY.ReadLine(ctx) }},
-			Stdout: p.Stdout, Mounts: mounts,
+			Stdout: p.Stdout, Mounts: mounts, Cache: env.WASM,
 		})
 	}
 }

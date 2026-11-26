@@ -59,6 +59,7 @@ type Disk struct {
 	blocks    uint64
 	info      string
 	readReqs  chan *readReq
+	down      <-chan struct{} // closed when the controller stops
 }
 
 type bulkEP struct {
@@ -109,6 +110,8 @@ func (k *Disk) do(ctx context.Context, lba uint64, p []byte, write bool) error {
 	r := &readReq{disk: k, lba: lba, p: p, write: write, done: make(chan error, 1)}
 	select {
 	case k.readReqs <- r:
+	case <-k.down:
+		return ErrStopped
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -116,7 +119,7 @@ func (k *Disk) do(ctx context.Context, lba uint64, p []byte, write bool) error {
 }
 
 func (h *hc) newDisk(ctx context.Context, d *device, it usb.Interface) error {
-	k := &Disk{h: h, d: d, readReqs: h.reads}
+	k := &Disk{h: h, d: d, readReqs: h.reads, down: h.down}
 	for _, e := range it.Endpoints {
 		var typ int
 		switch {
@@ -127,7 +130,7 @@ func (h *hc) newDisk(ctx context.Context, d *device, it usb.Interface) error {
 		default:
 			continue
 		}
-		dci, r, err := h.configureEP(ctx, d, e, typ, [2]uint32{})
+		dci, r, err := h.configureEP(ctx, d, e, typ, [3]uint32{})
 		if err != nil {
 			return err
 		}
@@ -174,15 +177,13 @@ func (h *hc) newDisk(ctx context.Context, d *device, it usb.Interface) error {
 	if hdr, err := k.scsi(ctx, []byte{scsiMode6, 0, 0x3f, 0, 4, 0}, 4); err == nil && len(hdr) >= 3 {
 		k.wp = hdr[2]&0x80 != 0
 	}
-	name := fmt.Sprintf("usbdisk%d", len(h.disks))
 	k.info = fmt.Sprintf("%s %s, %d x %d B, %s", vendor, product, k.blocks, k.bs, d.where)
 	if k.wp {
 		k.info += ", write-protected"
 	}
+	idx := len(h.disks)
 	h.disks = append(h.disks, k)
-	if h.addDev != nil {
-		h.addDev(dev.Node{Name: name, Compatible: DiskCompatible, Config: k})
-	}
+	h.names.publish(h.publish, "usbdisk", idx, dev.Node{Compatible: DiskCompatible, Config: k})
 	return nil
 }
 
@@ -227,7 +228,7 @@ func (k *Disk) clearStall(ctx context.Context, ep *bulkEP) error {
 	if _, err := h.command(ctx, 0, 0, trbResetEP<<10|uint32(ep.dci)<<16|uint32(k.d.slot)<<24); err != nil {
 		return fmt.Errorf("reset endpoint: %w", err)
 	}
-	deq := ep.ring.buf.Phys + uint64(ep.ring.enq*16) | uint64(ep.ring.pcs)
+	deq := ep.ring.buf.Bus + uint64(ep.ring.enq*16) | uint64(ep.ring.pcs)
 	if _, err := h.command(ctx, deq, 0, trbSetDequeue<<10|uint32(ep.dci)<<16|uint32(k.d.slot)<<24); err != nil {
 		return fmt.Errorf("set dequeue: %w", err)
 	}
@@ -290,7 +291,7 @@ func (k *Disk) bot(ctx context.Context, cdb []byte, n int, in bool) ([]byte, err
 	}
 	cbw[14] = byte(len(cdb))
 	copy(cbw[15:], cdb)
-	if _, err := k.bulk(ctx, k.out, k.cmd.Phys, 31, false); err != nil {
+	if _, err := k.bulk(ctx, k.out, k.cmd.Bus, 31, false); err != nil {
 		return nil, fmt.Errorf("command: %w", err)
 	}
 	got := 0
@@ -300,17 +301,17 @@ func (k *Disk) bot(ctx context.Context, cdb []byte, n int, in bool) ([]byte, err
 			ep = k.out
 		}
 		var err error
-		if got, err = k.bulk(ctx, ep, k.data.Phys, n, in); err != nil && err != errStall {
+		if got, err = k.bulk(ctx, ep, k.data.Bus, n, in); err != nil && err != errStall {
 			return nil, fmt.Errorf("data: %w", err)
 		}
 		// a stalled data stage still ends with a status (BOT §6.7.2)
 	}
 	csw := k.cmd.Bytes[32:45]
-	if _, err := k.bulk(ctx, k.in, k.cmd.Phys+32, 13, true); err != nil {
+	if _, err := k.bulk(ctx, k.in, k.cmd.Bus+32, 13, true); err != nil {
 		if err != errStall {
 			return nil, fmt.Errorf("status: %w", err)
 		}
-		if _, err := k.bulk(ctx, k.in, k.cmd.Phys+32, 13, true); err != nil { // BOT: retry once after clearing
+		if _, err := k.bulk(ctx, k.in, k.cmd.Bus+32, 13, true); err != nil { // BOT: retry once after clearing
 			return nil, fmt.Errorf("status: %w", err)
 		}
 	}

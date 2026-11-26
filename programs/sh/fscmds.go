@@ -132,6 +132,20 @@ func write(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	return w.WriteFile(path, []byte(strings.Join(args[1:], " ")+"\n"))
 }
 
+// umount NAME unmounts a mounted volume (e.g. a 9P TCP mount) and closes it.
+func umount(_ context.Context, env Env, _ *proc.Proc, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: umount NAME")
+	}
+	if env.FS == nil {
+		return errors.New("no filesystems")
+	}
+	if args[0] == "ram" {
+		return errors.New("cannot unmount ram")
+	}
+	return env.FS.Unmount(args[0])
+}
+
 func df(ctx context.Context, env Env, _ *proc.Proc, _ []string) error {
 	if env.FS == nil {
 		return errors.New("no filesystems")

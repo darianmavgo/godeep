@@ -21,7 +21,7 @@ var bootFDT, bootEL, bootE2H uint64
 // keyboard. The last lines show, after a few idle seconds, the idle loop's
 // wake-up rate, the watchdog's countdown, and how far the keyboard driver
 // got (hid-transport@0), so a boot that can't type still reports.
-var Autorun = "lsdev\rps\rmem\ruptime\rsleep 5\rlsdev idle watchdog hid\r"
+var Autorun = "lsdev\rps\rmem\ruptime\rsleep 5\rlsdev idle watchdog hid usb\r"
 
 // Typeahead from the keyboard beyond this is dropped (counted in lsdev).
 const keyBuffer = 256
@@ -98,6 +98,7 @@ func NewBoard() kernel.Board {
 		Info: fmt.Sprintf("board: %s; entered at %s; %d devices from the device tree; %s; %s",
 			model, el, nodes, joinInfo(info), joinInfo(devices)),
 		Console: kernel.Console{In: in, Out: out, Echo: true},
+		NetWait: -1, // until a USB Ethernet adapter is plugged in
 	}
 	if console != nil {
 		// The trackpad (and any mouse) drives the console: pointer, two-finger
@@ -113,6 +114,7 @@ func NewBoard() kernel.Board {
 		if kbd, ok := keyboard(root, in); ok {
 			b.Devices = withNode(b.Devices, kbd)
 		}
+		usbPorts(root, b.Devices, in)
 		for i := range b.Devices {
 			if b.Devices[i].Compatible == pl011.Compatible {
 				b.Devices[i].Config = (chan<- byte)(in) // serial input (QEMU)

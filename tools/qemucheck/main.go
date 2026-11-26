@@ -33,6 +33,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"godeep/fs/ninep"
 )
 
 type steps []string
@@ -49,6 +51,7 @@ func main() {
 	logPath := flag.String("log", "bin/qemucheck.log", "serial output")
 	qmpPath := flag.String("qmp", "", "QMP unix socket of the QEMU being run (for keys: and qmp: steps)")
 	httpServe := flag.String("http", "", "ADDR=DIR: serve DIR over HTTP on ADDR while the check runs (the guest reaches 127.0.0.1 as 10.0.2.2)")
+	ninepServe := flag.String("ninep", "", "ADDR=DIR: serve DIR over 9P2000.L TCP on ADDR while the check runs (read-write)")
 	flag.Parse()
 	if flag.NArg() == 0 {
 		fmt.Fprintln(os.Stderr, "usage: qemucheck -step 'cmd=>want' ... -- qemu args")
@@ -62,6 +65,30 @@ func main() {
 			os.Exit(1)
 		}
 		go http.Serve(l, http.FileServer(http.Dir(dir)))
+	}
+	if *ninepServe != "" {
+		addr, dir, _ := strings.Cut(*ninepServe, "=")
+		root, err := os.OpenRoot(dir)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "qemucheck:", err)
+			os.Exit(1)
+		}
+		defer root.Close()
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "qemucheck:", err)
+			os.Exit(1)
+		}
+		defer l.Close()
+		go func() {
+			for {
+				c, err := l.Accept()
+				if err != nil {
+					return
+				}
+				go ninep.Serve(c, root, false)
+			}
+		}()
 	}
 	if err := run(st, flag.Args(), *timeout, *logPath, *qmpPath); err != nil {
 		fmt.Fprintln(os.Stderr, "qemucheck: FAIL:", err)

@@ -30,6 +30,7 @@ type Region struct {
 // Buffer is an allocated DMA buffer.
 type Buffer struct {
 	Phys  uint64 // physical address (what an IOMMU maps, or the device sees directly)
+	Bus   uint64 // the address to give the device: Phys, or the IOVA (Translated)
 	Bytes []byte // CPU view of the buffer
 
 	a     *Allocator
@@ -53,6 +54,8 @@ type span struct{ off, size int }
 type Allocator struct {
 	base uint64
 	mem  []byte
+	bus  uint64     // Bus - Phys (mod 2^64): 0 unless Translated
+	core *Allocator // a Translated view's allocator (its spans and stats); nil: itself
 
 	mu    sync.Mutex
 	spans []span // free spans, sorted by off, never adjacent
@@ -67,6 +70,28 @@ var ErrNoMemory = errors.New("dma: out of memory")
 // New returns an allocator managing r.
 func New(r Region) *Allocator {
 	return &Allocator{base: r.Base, mem: r.Mem, spans: []span{{0, len(r.Mem)}}}
+}
+
+// Translated returns a view of a's region for devices behind an IOMMU
+// that maps the whole region linearly at busBase (an Apple DART set up
+// that way): it allocates from the same memory, and its buffers' Bus is
+// busBase plus their offset in the region.
+func (a *Allocator) Translated(busBase uint64) *Allocator {
+	c := a.root()
+	return &Allocator{base: c.base, mem: c.mem, bus: busBase - c.base, core: c}
+}
+
+// Region returns the physical base and size of the memory a allocates from.
+func (a *Allocator) Region() (base uint64, size int) {
+	c := a.root()
+	return c.base, len(c.mem)
+}
+
+func (a *Allocator) root() *Allocator {
+	if a.core != nil {
+		return a.core
+	}
+	return a
 }
 
 func alignUp(x, a uint64) uint64 { return (x + a - 1) &^ (a - 1) }
@@ -86,6 +111,8 @@ func (a *Allocator) Alloc(size, align int) (*Buffer, error) {
 	}
 	size = int(alignUp(uint64(size), DefaultAlign))
 
+	view := a
+	a = a.root()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for i, s := range a.spans {
@@ -110,7 +137,8 @@ func (a *Allocator) Alloc(size, align int) (*Buffer, error) {
 		}
 		b := a.mem[start : start+size : start+size]
 		clear(b)
-		return &Buffer{Phys: a.base + uint64(start), Bytes: b, a: a, off: start, size: size}, nil
+		phys := a.base + uint64(start)
+		return &Buffer{Phys: phys, Bus: phys + view.bus, Bytes: b, a: a, off: start, size: size}, nil
 	}
 	return nil, ErrNoMemory
 }
@@ -152,6 +180,7 @@ type Stats struct {
 }
 
 func (a *Allocator) Stats() Stats {
+	a = a.root()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s := Stats{Base: a.base, Size: len(a.mem), Used: a.used, Peak: a.peak, Buffers: a.count, FreeSpans: len(a.spans)}

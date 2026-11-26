@@ -130,6 +130,8 @@ const (
 	ClassHub         = 0x09
 	ClassCDCData     = 0x0a
 	SubclassECM      = 0x06
+	SubclassNCM      = 0x0d
+	ClassVendor      = 0xff
 	DescString       = 0x03
 	DescCSInterface  = 0x24 // class-specific interface descriptor (CDC functional)
 )
@@ -241,6 +243,18 @@ func (i Interface) ECMMACIndex() (byte, bool) {
 	for _, d := range i.Extra {
 		if len(d) >= 4 && d[2] == 0x0f {
 			return d[3], true
+		}
+	}
+	return 0, false
+}
+
+// UnionSubordinate returns the first subordinate interface of a CDC
+// communications interface's Union functional descriptor (its data
+// interface).
+func (i Interface) UnionSubordinate() (byte, bool) {
+	for _, d := range i.Extra {
+		if len(d) >= 5 && d[2] == 0x06 {
+			return d[4], true
 		}
 	}
 	return 0, false

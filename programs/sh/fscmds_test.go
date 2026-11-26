@@ -4,17 +4,20 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"godeep/fs/memfs"
-	"godeep/kernel/vfs"
 	"io"
+	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"godeep/fs/memfs"
+	"godeep/fs/ninep"
 	"godeep/kernel/block"
 	"godeep/kernel/dev"
 	"godeep/kernel/proc"
 	"godeep/kernel/tty"
+	"godeep/kernel/vfs"
 )
 
 func gunzip(t *testing.T, name string) []byte {
@@ -129,5 +132,97 @@ func TestDiskCommands(t *testing.T) {
 	}
 	if err := mv(ctx, env, nil, []string{"ram:/note.txt", "nvme0p2:/x"}); err == nil {
 		t.Fatal("mv across volumes")
+	}
+}
+
+type dialNet struct {
+	dial func(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+func (d dialNet) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	return d.dial(ctx, network, addr)
+}
+func (d dialNet) Listen(context.Context, string, string) (net.Listener, error) {
+	return nil, io.ErrUnexpectedEOF
+}
+
+func TestMount9pAndUmount(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "seed.txt"), []byte("from host\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { root.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := &syncBuf{}
+	term := tty.New(make(chan byte), out, false)
+	defer term.Close()
+	ns := vfs.New(ctx, nil)
+	ns.Mount("ram", memfs.New("ram"))
+	env := Env{TTY: term, FS: ns, Net: dialNet{dial: func(context.Context, string, string) (net.Conn, error) {
+		a, b := net.Pipe()
+		go ninep.Serve(a, root, false)
+		return b, nil
+	}}}
+
+	// Mount using a short-lived command context (like ssh exec): the volume
+	// must stay usable after cmdCtx is cancelled.
+	cmdCtx, cmdCancel := context.WithCancel(ctx)
+	if err := mount9pCmd(cmdCtx, env, nil, []string{"10.0.2.2:5640", "dev"}); err != nil {
+		t.Fatalf("mount9p: %v", err)
+	}
+	cmdCancel()
+	if !strings.Contains(out.String(), "mounted 10.0.2.2:5640 as dev: (rw)") {
+		t.Fatalf("mount9p output: %q", out.String())
+	}
+	if err := cat(ctx, env, nil, []string{"dev:/seed.txt"}); err != nil {
+		t.Fatalf("cat dev: %v", err)
+	}
+	if err := write(ctx, env, nil, []string{"dev:/guest.txt", "hello", "9p"}); err != nil {
+		t.Fatalf("write dev: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "guest.txt"))
+	if err != nil || string(got) != "hello 9p\n" {
+		t.Fatalf("host file: %q %v", got, err)
+	}
+	before := len(out.String())
+	if err := df(ctx, env, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if s := out.String()[before:]; !strings.Contains(s, "dev") || !strings.Contains(s, "9p") || !strings.Contains(s, "rw") {
+		t.Fatalf("df missing dev: %q", s)
+	}
+	if err := umount(ctx, env, nil, []string{"ram"}); err == nil {
+		t.Fatal("umount ram should fail")
+	}
+	if err := umount(ctx, env, nil, []string{"dev"}); err != nil {
+		t.Fatalf("umount dev: %v", err)
+	}
+	if err := cat(ctx, env, nil, []string{"dev:/seed.txt"}); err == nil {
+		t.Fatal("cat after umount should fail")
+	}
+}
+
+func TestIsEnvAssign(t *testing.T) {
+	for _, tc := range []struct {
+		tok  string
+		want bool
+	}{
+		{"FOO=bar", true},
+		{"_A1=/dev/out.txt", true},
+		{"EMPTY=", true},
+		{"1BAD=x", false},
+		{"=val", false},
+		{"ram:/hello.wasm", false},
+		{"write", false},
+	} {
+		if got := isEnvAssign(tc.tok); got != tc.want {
+			t.Errorf("isEnvAssign(%q) = %v, want %v", tc.tok, got, tc.want)
+		}
 	}
 }

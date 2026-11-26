@@ -7,9 +7,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"godeep/drivers/apple/dwc3"
+	"godeep/drivers/apple/i2c"
 	"godeep/drivers/apple/spihid"
 	"godeep/drivers/apple/wdt"
 	"godeep/drivers/arm/pl011"
+	"godeep/drivers/usb/xhci"
 	"godeep/kernel/dev"
 	"godeep/kernel/mmio"
 )
@@ -29,6 +32,12 @@ func init() {
 	dev.Register(dev.Driver{Compatible: idleCompatible, Run: runIdleStats})
 	dev.Register(spihid.Driver(window))
 	dev.Register(simplefb.Driver())
+	// USB-C ports (USB 2 host): port controllers on I2C, DWC3 + xHCI, and
+	// what gets plugged in.
+	dev.Register(i2c.Driver(window))
+	dev.Register(dwc3.Driver(window))
+	dev.Register(xhci.DiskDriver())
+	dev.Register(xhci.NICDriver())
 	// QEMU only (tools/fakem1n1): typing in the terminal. The Mac has no PL011.
 	dev.Register(pl011.Driver(window))
 }

@@ -96,11 +96,40 @@ func New(ctx context.Context, mgr *dev.Manager) *NS {
 	return &NS{ctx: ctx, dev: mgr, mounts: map[string]Volume{}, open: map[string]openVol{}}
 }
 
-// Mount adds a volume under name.
+// Context returns the namespace's lifetime context. Mounted volumes (such
+// as TCP 9P shares) use it for background/later I/O so they outlive the
+// command that mounted them.
+func (n *NS) Context() context.Context { return n.ctx }
+
+// Mount adds (or replaces) a volume under name. If an existing mounted
+// volume is replaced and implements io.Closer, it is closed.
 func (n *NS) Mount(name string, v Volume) {
 	n.mu.Lock()
+	prev := n.mounts[name]
 	n.mounts[name] = v
 	n.mu.Unlock()
+	if prev != nil && prev != v {
+		if cl, ok := prev.(io.Closer); ok {
+			cl.Close()
+		}
+	}
+}
+
+// Unmount removes a mounted volume and closes it if it implements io.Closer.
+func (n *NS) Unmount(name string) error {
+	n.mu.Lock()
+	v, ok := n.mounts[name]
+	if ok {
+		delete(n.mounts, name)
+	}
+	n.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("%s: not a mounted volume", name)
+	}
+	if cl, ok := v.(io.Closer); ok {
+		return cl.Close()
+	}
+	return nil
 }
 
 // Open returns the named volume.
@@ -165,9 +194,11 @@ func diskOf(mgr *dev.Manager, name string) block.Device {
 // Names lists the volumes that hold a filesystem: mounts, then disks and
 // partitions with one godeep can read.
 func (n *NS) Names(ctx context.Context) []string {
+	seen := map[string]bool{}
 	n.mu.Lock()
 	var out []string
 	for name := range n.mounts {
+		seen[name] = true
 		out = append(out, name)
 	}
 	n.mu.Unlock()
@@ -177,7 +208,10 @@ func (n *NS) Names(ctx context.Context) []string {
 	}
 	var shares []string
 	for name := range named(n.dev) {
-		shares = append(shares, name)
+		if !seen[name] {
+			seen[name] = true
+			shares = append(shares, name)
+		}
 	}
 	sort.Strings(shares)
 	out = append(out, shares...)
@@ -189,13 +223,20 @@ func (n *NS) Names(ctx context.Context) []string {
 	sort.Strings(names)
 	for _, name := range names {
 		d := disks[name]
-		if _, err := OpenFS(ctx, d); err == nil {
-			out = append(out, name)
+		if !seen[name] {
+			if _, err := OpenFS(ctx, d); err == nil {
+				seen[name] = true
+				out = append(out, name)
+			}
 		}
 		parts, _, _ := block.Partitions(ctx, d)
 		for _, p := range parts {
-			if _, err := OpenFS(ctx, p); err == nil {
-				out = append(out, fmt.Sprintf("%sp%d", name, p.Index))
+			pn := fmt.Sprintf("%sp%d", name, p.Index)
+			if !seen[pn] {
+				if _, err := OpenFS(ctx, p); err == nil {
+					seen[pn] = true
+					out = append(out, pn)
+				}
 			}
 		}
 	}

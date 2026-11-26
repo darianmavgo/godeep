@@ -86,6 +86,14 @@ func (d *Device) Ready(service any) { d.e.set(Ready, service, nil) }
 // driver that restarts and rescans finds its children already there).
 func (d *Device) Add(n Node) bool { return d.m.add(n) }
 
+// Replace publishes n in place of the device with the same name and
+// compatible: its driver restarts with n (its Config), and whoever follows
+// the name (Get, netd) gets the new service. A controller that restarts
+// uses it for what it finds again: Apple's DWC3 runs a new xHCI instance
+// for every USB-C cable. Without such a device it is Add; a device of
+// another kind under that name is left alone (false).
+func (d *Device) Replace(n Node) bool { return d.m.replace(n) }
+
 func (m *Manager) add(n Node) bool {
 	m.mu.Lock()
 	if _, ok := m.entries[n.Name]; ok || m.devmgr == nil {
@@ -98,12 +106,47 @@ func (m *Manager) add(n Node) bool {
 		st = NoDriver
 	}
 	e := &entry{node: n, state: st, changed: make(chan struct{})}
+	e.supervised = ok
 	m.entries[n.Name] = e
 	mgr := m.devmgr
 	m.mu.Unlock()
 	if ok {
 		mgr.Go(func(ctx context.Context) { m.supervise(ctx, mgr, drv, e) })
 	}
+	return true
+}
+
+func (m *Manager) replace(n Node) bool {
+	m.mu.Lock()
+	e, ok := m.entries[n.Name]
+	mgr := m.devmgr
+	m.mu.Unlock()
+	if !ok {
+		return m.add(n)
+	}
+	drv, hasDrv := drivers[n.Compatible]
+	if mgr == nil || !hasDrv {
+		return false
+	}
+	e.mu.Lock()
+	if e.node.Compatible != n.Compatible {
+		e.mu.Unlock()
+		return false
+	}
+	e.node = n
+	e.restarts = 0
+	pid, active := e.pid, e.supervised
+	if active && pid != 0 {
+		e.replaced = true // supervise restarts it at once, uncounted
+	}
+	e.supervised = true
+	e.mu.Unlock()
+	switch {
+	case !active: // its driver had finished: start it again
+		mgr.Go(func(ctx context.Context) { m.supervise(ctx, mgr, drv, e) })
+	case pid != 0:
+		m.tab.Kill(pid)
+	} // else: backing off after a crash; the next start takes n
 	return true
 }
 
@@ -135,6 +178,9 @@ type entry struct {
 	pid      int
 	restarts int
 	changed  chan struct{} // closed and replaced on every change
+
+	supervised bool // a supervise loop runs for it
+	replaced   bool // Replace stopped its driver: start the new node at once
 }
 
 func (e *entry) set(s State, svc any, err error) {
@@ -175,7 +221,7 @@ func (m *Manager) Start(ctx context.Context, nodes []Node) *proc.Proc {
 		if _, ok := drivers[n.Compatible]; !ok {
 			st = NoDriver
 		}
-		m.entries[n.Name] = &entry{node: n, state: st, changed: make(chan struct{})}
+		m.entries[n.Name] = &entry{node: n, state: st, changed: make(chan struct{}), supervised: st == Waiting}
 	}
 	m.mu.Unlock()
 
@@ -201,7 +247,15 @@ func (m *Manager) entry(name string) *entry {
 }
 
 func (m *Manager) supervise(ctx context.Context, mgr *proc.Proc, drv Driver, e *entry) {
-	for _, dep := range e.node.Needs {
+	defer func() {
+		e.mu.Lock()
+		e.supervised = false
+		e.mu.Unlock()
+	}()
+	e.mu.Lock()
+	needs := e.node.Needs
+	e.mu.Unlock()
+	for _, dep := range needs {
 		if _, err := m.Get(ctx, dep); err != nil {
 			if ctx.Err() == nil {
 				e.set(Failed, nil, fmt.Errorf("dependency %s: %w", dep, err))
@@ -211,8 +265,11 @@ func (m *Manager) supervise(ctx context.Context, mgr *proc.Proc, drv Driver, e *
 	}
 	for {
 		e.set(Starting, nil, nil)
-		d := &Device{Node: e.node, Bridge: m.irq, DMA: m.dma, m: m, e: e}
-		p := m.tab.Spawn(ctx, mgr.PID, proc.Spec{Name: "drv/" + e.node.Name, Main: func(ctx context.Context, p *proc.Proc) error {
+		e.mu.Lock()
+		node := e.node
+		e.mu.Unlock()
+		d := &Device{Node: node, Bridge: m.irq, DMA: m.dma, m: m, e: e}
+		p := m.tab.Spawn(ctx, mgr.PID, proc.Spec{Name: "drv/" + node.Name, Main: func(ctx context.Context, p *proc.Proc) error {
 			d.Proc = p
 			return drv.Run(ctx, d)
 		}})
@@ -225,7 +282,12 @@ func (m *Manager) supervise(ctx context.Context, mgr *proc.Proc, drv Driver, e *
 		e.mu.Lock()
 		e.pid = 0
 		st, svc := e.state, e.svc
+		replaced := e.replaced
+		e.replaced = false
 		e.mu.Unlock()
+		if replaced && ctx.Err() == nil {
+			continue
+		}
 
 		switch {
 		case ctx.Err() != nil || errors.Is(err, proc.ErrKilled):

@@ -97,3 +97,36 @@ func TestLoadStore32(t *testing.T) {
 		}()
 	}
 }
+
+func TestTranslatedView(t *testing.T) {
+	a := newTest(1 << 20)
+	v := a.Translated(0x8000_0000)
+	if base, size := v.Region(); base != 0x1_2000_0000 || size != 1<<20 {
+		t.Fatalf("Region = %#x, %d", base, size)
+	}
+	b1, err := a.Alloc(100, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b1.Bus != b1.Phys {
+		t.Fatalf("untranslated Bus %#x != Phys %#x", b1.Bus, b1.Phys)
+	}
+	b2, err := v.Alloc(5000, 16384)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b2.Bus != b2.Phys-0x1_2000_0000+0x8000_0000 || b2.Bus%16384 != 0 {
+		t.Fatalf("Bus %#x for Phys %#x", b2.Bus, b2.Phys)
+	}
+	if b2.Phys < b1.Phys+uint64(b1.Size()) && b1.Phys < b2.Phys+uint64(b2.Size()) {
+		t.Fatal("the view and its allocator handed out overlapping memory")
+	}
+	if s := a.Stats(); s.Buffers != 2 || v.Stats() != s {
+		t.Fatalf("stats not shared: %+v vs %+v", s, v.Stats())
+	}
+	b2.Free()
+	b1.Free()
+	if s := v.Stats(); s.Used != 0 || s.FreeSpans != 1 {
+		t.Fatalf("not fully freed: %+v", s)
+	}
+}

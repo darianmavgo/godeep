@@ -214,6 +214,7 @@ check-virt: wasm
 	@if [ "$(ARCH)" != arm64 ] || [ "$(BOARD)" = applem1 ]; then echo "check-virt is for ARCH=arm64 on QEMU virt"; exit 1; fi
 	@$(MAKE) -s image $(DISK)
 	@cp $(DISK) $(DISK_RW)
+	@rm -rf bin/ninep-check && mkdir -p bin/ninep-check && printf 'hello over tcp 9p\n' > bin/ninep-check/seed.txt
 	go run ./tools/qemucheck \
 	  -step 'lsdev pci nvme=>nvme0,QEMU NVMe Ctrl,ready' \
 	  -step 'lsblk=>nvme0p1,FAT32,GODEEPFAT,nvme0p2,ext4,godeep-ext4' \
@@ -254,9 +255,16 @@ check-virt: wasm
 	  -step 'ram:/hello.wasm from the console=>args: ["from" "the" "console"]' \
 	  -step 'df=>host,9p' -step 'cat host:/go.mod=>module godeep' \
 	  -step 'host:/bin/wasm/hello.wasm straight from the repo=>hello from WebAssembly,"straight",/host' \
+	  -step 'mount9p 10.0.2.2:5641 dev=>mounted 10.0.2.2:5641 as dev: (rw)' \
+	  -step 'df=>dev,9p,rw' \
+	  -step 'cat dev:/seed.txt=>hello over tcp 9p' \
+	  -step 'GREETING=hi WRITE_FILE=/dev/sub/from-wasm.txt host:/bin/wasm/hello.wasm written over 9p=>env: GREETING=hi,wrote /dev/sub/from-wasm.txt' \
+	  -step 'cat dev:/sub/from-wasm.txt=>written over 9p' \
+	  -step 'local:cat bin/ninep-check/sub/from-wasm.txt=>written over 9p' \
+	  -step 'umount dev=>' \
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 dmesg=>sshd: listening,logged in' \
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 pprof heap > bin/check-heap.pb.gz && go tool pprof -top bin/check-heap.pb.gz=>flat%' \
-	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. \
+	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. -ninep 127.0.0.1:5641=bin/ninep-check \
 	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(QEMU_NET) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
 	@$(MAKE) -s check-usbnet
 

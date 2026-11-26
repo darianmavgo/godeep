@@ -12,8 +12,10 @@ import (
 
 	_ "golang.org/x/crypto/x509roots/fallback"
 
+	"godeep/fs/ninep"
 	"godeep/kernel/cap"
 	"godeep/kernel/proc"
+	"godeep/kernel/vfs"
 )
 
 // network returns the shell's network once it's up.
@@ -81,4 +83,43 @@ func getCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	}
 	_, err = io.Copy(env.TTY, ctxReader{ctx, resp.Body})
 	return err
+}
+
+// mount9p HOST:PORT NAME: mount a 9P2000.L TCP server (e.g. tools/ninepd)
+// as volume NAME in the shell's namespace.
+func mount9pCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: mount9p HOST:PORT NAME (e.g. mount9p 10.0.2.2:5640 dev)")
+	}
+	if env.FS == nil {
+		return errors.New("no filesystems")
+	}
+	addr, name := args[0], args[1]
+	if name == "" || name == "ram" || strings.ContainsAny(name, ":/ \t") {
+		return fmt.Errorf("invalid volume name %q", name)
+	}
+	n, err := network(ctx, env)
+	if err != nil {
+		return err
+	}
+	tr, err := ninep.DialTCP(ctx, n.Dial, addr, 64<<10)
+	if err != nil {
+		return err
+	}
+	// Cancel a stalled handshake on ^C/kill without cancelling the mounted
+	// client after mount9p returns.
+	stop := context.AfterFunc(ctx, func() { tr.Close() })
+	c, err := ninep.Mount(env.FS.Context(), tr, addr)
+	stop()
+	if err != nil {
+		tr.Close()
+		return err
+	}
+	env.FS.Mount(name, c)
+	mode := "ro"
+	if vfs.IsWritable(c) {
+		mode = "rw"
+	}
+	fmt.Fprintf(env.TTY, "mounted %s as %s: (%s)\n", addr, name, mode)
+	return nil
 }

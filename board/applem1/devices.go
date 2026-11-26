@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"unsafe"
 
+	"godeep/drivers/apple/dwc3"
+	"godeep/drivers/apple/i2c"
+	"godeep/drivers/apple/pmgr"
 	"godeep/drivers/apple/spihid"
 	"godeep/drivers/simplefb"
+	"godeep/drivers/usb/xhci"
 	"godeep/kernel/dev"
 	"godeep/kernel/fdt"
 )
@@ -129,4 +133,39 @@ func withNode(nodes []dev.Node, n dev.Node) []dev.Node {
 		}
 	}
 	return append(nodes, n)
+}
+
+// usbPorts configures the USB-C controllers (dwc3) and the I2C buses their
+// port controllers are on, in place in nodes. Keyboards type into keys.
+func usbPorts(root *fdt.Node, nodes []dev.Node, keys chan<- byte) {
+	names := &xhci.Names{} // usbdisk<N>, usbnet<N>: shared by every port
+	byName := map[string]*fdt.Node{}
+	root.Walk(func(n *fdt.Node) { byName[n.Name] = n })
+	for i := range nodes {
+		n := &nodes[i]
+		fn := byName[n.Name]
+		if fn == nil {
+			continue
+		}
+		switch n.Compatible {
+		case i2c.Compatible:
+			doms, err := pmgr.FromFDT(fn)
+			if err != nil {
+				n.Config = err
+				continue
+			}
+			n.Config = i2c.Config{Power: doms}
+		case dwc3.Compatible:
+			c, err := dwc3.ConfigFromFDT(fn)
+			if err != nil {
+				n.Config = err // lsdev shows why
+				continue
+			}
+			c.Keys, c.Names = keys, names
+			if c.I2C != "" {
+				n.Needs = append(n.Needs, c.I2C)
+			}
+			n.Config = c
+		}
+	}
 }

@@ -236,7 +236,7 @@ func (h *file) Readdir(n int) ([]experimentalsys.Dirent, experimentalsys.Errno) 
 		}
 		h.ents, h.read = ents, true
 	}
-	if n < 0 || n > len(h.ents) {
+	if n <= 0 || n > len(h.ents) {
 		n = len(h.ents)
 	}
 	out := make([]experimentalsys.Dirent, 0, n)

@@ -15,9 +15,10 @@ import (
 // of its ports changed; the driver asks each for its status, resets newly
 // connected ones, and enumerates the device behind them with a route
 // string (one 4-bit port number per tier) the controller uses to reach it.
-// Devices behind a high-speed hub at a lower speed would also need the
-// hub's transaction translator in their slot context: not done yet (QEMU's
-// usb-hub is full speed, so nothing behind it needs one).
+// A low- or full-speed device behind a high-speed hub (any USB-C dock with
+// a keyboard or mouse on it) is reached through that hub's transaction
+// translator: its slot context names the hub's slot and port (device.tt),
+// and the hub's own slot context says how long the TT may think (TTT).
 
 // Hub class requests and features.
 const (
@@ -62,6 +63,10 @@ func (h *hc) newHub(ctx context.Context, d *device, it usb.Interface) error {
 		return fmt.Errorf("hub descriptor: %v", err)
 	}
 	hb := &hub{h: h, d: d, ports: int(b[2]), kids: map[int]*device{}, buf: buf}
+	var ttt uint32
+	if d.speed == usb.High && len(b) >= 5 { // wHubCharacteristics bits 6:5
+		ttt = uint32(binary.LittleEndian.Uint16(b[3:]) >> 5 & 3)
+	}
 	var status usb.Endpoint
 	for _, e := range it.Endpoints {
 		if e.IsInterruptIn() {
@@ -72,7 +77,7 @@ func (h *hc) newHub(ctx context.Context, d *device, it usb.Interface) error {
 		return errors.New("no status-change endpoint")
 	}
 	// The slot context says it's a hub with this many ports.
-	ep, err := h.interruptIn(ctx, d, status, [2]uint32{slotHub, uint32(hb.ports) << 24})
+	ep, err := h.interruptIn(ctx, d, status, [3]uint32{slotHub, uint32(hb.ports) << 24, ttt << 16})
 	if err != nil {
 		return err
 	}
@@ -137,7 +142,7 @@ func (hb *hub) scan(ctx context.Context) {
 			depth++
 		}
 		route := hb.d.route | uint32(p)<<(4*depth)
-		d, err := h.enumerate(ctx, hb.d.port, route, where, speed)
+		d, err := h.enumerate(ctx, hb.d.port, route, where, speed, hb.d.childTT(p, speed))
 		if d == nil {
 			d = &device{}
 		}

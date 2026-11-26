@@ -26,10 +26,16 @@ const (
 // netdev.NIC, runs the TCP/IP stack on it, configures it (cfg if it has an
 // address; else DHCP, then fallback if DHCP fails), and resolves the
 // returned PendingNet with it (or with the error saying why there is none).
-func startNet(ctx context.Context, tab *proc.Table, mgr *dev.Manager, cfg, fallback netstack.Config, log io.Writer) *cap.PendingNet {
+func startNet(ctx context.Context, tab *proc.Table, mgr *dev.Manager, cfg, fallback netstack.Config, wait time.Duration, log io.Writer) *cap.PendingNet {
+	switch {
+	case wait == 0:
+		wait = nicWait
+	case wait < 0:
+		wait = 100 * 365 * 24 * time.Hour
+	}
 	pn := cap.NewPendingNet()
 	tab.Spawn(ctx, 0, proc.Spec{Name: "netd", Stdout: log, Main: func(ctx context.Context, p *proc.Proc) error {
-		name, nic, err := findNIC(ctx, mgr, nicWait)
+		name, nic, err := findNIC(ctx, mgr, wait)
 		if err != nil {
 			pn.Resolve(nil, err)
 			return nil

@@ -161,11 +161,13 @@ lsblk     disks, partitions and their filesystems
 lsdev     lsdev [NAME...]: devices (or those whose name starts with NAME), drivers, state
 mem       memory and scheduler stats
 mkdir     mkdir VOLUME:PATH...: make directories (on a writable volume)
+mount9p   mount9p HOST:PORT NAME: mount a 9P2000.L TCP share (e.g. tools/ninepd)
 mv        mv VOLUME:FROM VOLUME:TO: rename in a writable volume
 pprof     pprof NAME [1|2]: runtime profile (goroutine, heap, allocs, ...)
 ps        ps [-g] [PID]: processes, or goroutines with -g
 reboot    reset the machine (needs a reboot device, e.g. a watchdog)
 rm        rm VOLUME:PATH...: remove files or empty directories (on a writable volume)
+umount    umount NAME: unmount a mounted volume
 uptime    time since boot
 write     write VOLUME:PATH TEXT...: write a line to a file (on a writable volume)
 

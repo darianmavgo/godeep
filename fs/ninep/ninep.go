@@ -130,6 +130,14 @@ func Mount(ctx context.Context, t Transport, tag string) (*Client, error) {
 func (c *Client) Type() string  { return "9p" }
 func (c *Client) Label() string { return c.tag }
 
+// Close closes the underlying transport if it implements io.Closer (e.g. TCPTransport).
+func (c *Client) Close() error {
+	if cl, ok := c.t.(io.Closer); ok {
+		return cl.Close()
+	}
+	return nil
+}
+
 // ---- messages ----
 
 type msg struct{ b []byte }

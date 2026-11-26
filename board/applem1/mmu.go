@@ -44,7 +44,10 @@ func hwinit0() {
 	check(pt.Add(DRAM_BASE, ramStart, pgtable.NormalNC)) // firmware, m1n1, U-Boot
 	check(pt.Add(ramStart, textEnd, pgtable.NormalExec))
 	check(pt.Add(textEnd, ramEnd, pgtable.Normal))
-	check(pt.Add(DMA_BASE, DMA_BASE+DMA_SIZE, pgtable.Normal))
+	// Non-cacheable: the USB controllers' DMA isn't cache-coherent (the
+	// tree marks only PCIe dma-coherent), so the CPU must not cache what
+	// they read and write.
+	check(pt.Add(DMA_BASE, DMA_BASE+DMA_SIZE, pgtable.NormalNC))
 	check(pt.Add(DMA_BASE+DMA_SIZE, DRAM_BASE+DRAM_SIZE, pgtable.NormalNC)) // framebuffer, carve-outs
 	root, err := pt.Build()
 	check(err)
