@@ -1,0 +1,1690 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>godeep on Apple M1 Pro (TargetMyMac.md Reference)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    body {
+      background-color: #020617;
+      color: #e2e8f0;
+      background-image:
+        linear-gradient(to right, rgba(30, 41, 59, 0.25) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(30, 41, 59, 0.25) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+    .blueprint-card {
+      background: rgba(15, 23, 42, 0.88);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(51, 65, 85, 0.8);
+    }
+    .svg-container {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    /* Custom scrollbar for diagrams and tables */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="min-h-screen antialiased selection:bg-sky-500/30 selection:text-sky-200">
+  <!-- Sticky Navigation Header -->
+  <header class="sticky top-0 z-40 border-b border-slate-800 bg-slate-950/90 backdrop-blur-md">
+    <div class="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-3.5 sm:px-6">
+      <div class="flex items-center gap-3">
+        <div class="flex h-9 w-9 items-center justify-center rounded-lg border border-sky-500/40 bg-sky-500/10 font-mono text-sm font-bold text-sky-400">
+          t6k
+        </div>
+        <div>
+          <h1 class="text-base font-bold tracking-tight text-slate-100 sm:text-lg">
+            godeep <span class="font-normal text-slate-400">on</span> Apple M1 Pro
+          </h1>
+          <p class="font-mono text-xs text-slate-400">
+            MacBookPro18,1 · J316sAP · TargetMyMac.md Reference
+          </p>
+        </div>
+      </div>
+
+      <nav class="flex flex-wrap items-center gap-2 text-xs font-medium sm:text-sm">
+        <a href="#acronyms" class="rounded-lg border border-slate-700/80 bg-slate-900 px-3 py-1.5 text-slate-300 transition hover:border-sky-500/50 hover:text-sky-300">
+          1. Acronym Glossary
+        </a>
+        <a href="#boot-flow" class="rounded-lg border border-slate-700/80 bg-slate-900 px-3 py-1.5 text-slate-300 transition hover:border-emerald-500/50 hover:text-emerald-300">
+          2. Boot Flowchart
+        </a>
+        <a href="#io-arch" class="rounded-lg border border-slate-700/80 bg-slate-900 px-3 py-1.5 text-slate-300 transition hover:border-amber-500/50 hover:text-amber-300">
+          3. Hardware I/O Map
+        </a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl space-y-12 px-4 py-8 sm:px-6">
+    <!-- Top Spec Summary Banner -->
+    <section class="blueprint-card rounded-xl p-5 shadow-xl">
+      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div class="rounded-lg border border-slate-800 bg-slate-950/60 p-3.5">
+          <div class="font-mono text-[11px] uppercase tracking-wider text-slate-400">Target Silicon</div>
+          <div class="mt-1 font-mono text-sm font-semibold text-sky-300">Apple M1 Pro (t6000)</div>
+          <div class="mt-0.5 text-xs text-slate-400">8x Firestorm P + 2x Icestorm E</div>
+        </div>
+        <div class="rounded-lg border border-slate-800 bg-slate-950/60 p-3.5">
+          <div class="font-mono text-[11px] uppercase tracking-wider text-slate-400">DRAM Base & MMU</div>
+          <div class="mt-1 font-mono text-sm font-semibold text-emerald-300">0x100_0000_0000 (16 GB)</div>
+          <div class="mt-0.5 text-xs text-slate-400">LPDDR5 · 48-bit VA (T0SZ=16)</div>
+        </div>
+        <div class="rounded-lg border border-slate-800 bg-slate-950/60 p-3.5">
+          <div class="font-mono text-[11px] uppercase tracking-wider text-slate-400">Boot Chain Entry</div>
+          <div class="mt-1 font-mono text-sm font-semibold text-amber-300">m1n1 → EL2 → EL1</div>
+          <div class="mt-0.5 text-xs text-slate-400">FDT in x0 · TamaGo bare-metal Go</div>
+        </div>
+        <div class="rounded-lg border border-slate-800 bg-slate-950/60 p-3.5">
+          <div class="font-mono text-[11px] uppercase tracking-wider text-slate-400">Current Milestone</div>
+          <div class="mt-1 font-mono text-sm font-semibold text-emerald-400">Early Interactive Console</div>
+          <div class="mt-0.5 text-xs text-slate-400">disp0 Framebuffer + SPI-HID KB/TP</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- SECTION 1: ACRONYM REFERENCE TABLE                                  -->
+    <!-- =================================================================== -->
+    <section id="acronyms" class="space-y-5 scroll-mt-20">
+      <div class="flex flex-col justify-between gap-4 border-b border-slate-800 pb-4 md:flex-row md:items-end">
+        <div>
+          <div class="inline-flex items-center gap-2 rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-0.5 font-mono text-xs font-medium text-sky-400">
+            SECTION 01 · TERMINOLOGY
+          </div>
+          <h2 class="mt-2 text-2xl font-bold tracking-tight text-slate-100">
+            Hardware, Firmware & Kernel Acronym Reference
+          </h2>
+          <p class="mt-1 text-sm text-slate-400">
+            Complete reference of every technical acronym referenced in <code class="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-xs text-sky-300">godeep/docs/TargetMyMac.md</code> and its role on the M1 Pro.
+          </p>
+        </div>
+
+        <!-- Search Input & Counter -->
+        <div class="flex w-full flex-col gap-2 sm:flex-row md:w-auto">
+          <div class="relative flex-1 sm:w-72">
+            <input
+              id="acronymSearch"
+              type="text"
+              placeholder="Search acronym, full name, or role..."
+              class="w-full rounded-lg border border-slate-700 bg-slate-900 py-2 pl-9 pr-8 text-sm text-slate-100 placeholder-slate-500 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+            />
+            <svg class="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+            <button
+              id="clearSearch"
+              title="Clear search"
+              class="hidden absolute right-2.5 top-2 text-xs text-slate-400 hover:text-slate-200"
+            >
+              ✕
+            </button>
+          </div>
+          <div id="resultCount" class="flex items-center justify-center rounded-lg border border-slate-800 bg-slate-900/70 px-3 py-2 font-mono text-xs text-slate-400">
+            79 acronyms
+          </div>
+        </div>
+      </div>
+
+      <!-- Category Filter Pills -->
+      <div id="categoryFilters" class="flex flex-wrap gap-2">
+        <!-- Populated dynamically via JS -->
+      </div>
+
+      <!-- Responsive Table Card -->
+      <div class="blueprint-card overflow-hidden rounded-xl shadow-xl">
+        <div class="overflow-x-auto">
+          <table class="w-full border-collapse text-left text-sm">
+            <thead>
+              <tr class="border-b border-slate-800 bg-slate-900/90 font-mono text-xs uppercase tracking-wider text-slate-400">
+                <th class="px-4 py-3.5 font-semibold">Acronym</th>
+                <th class="px-4 py-3.5 font-semibold">Full Name</th>
+                <th class="px-4 py-3.5 font-semibold">Category</th>
+                <th class="px-4 py-3.5 font-semibold">Plain-English Role in godeep / M1 Pro (t6000)</th>
+              </tr>
+            </thead>
+            <tbody id="acronymTableBody" class="divide-y divide-slate-800/70">
+              <!-- Populated dynamically via JS -->
+            </tbody>
+          </table>
+        </div>
+        <div id="emptyState" class="hidden py-12 text-center">
+          <p class="font-mono text-sm text-slate-400">No acronyms matched your filter criteria.</p>
+          <button id="resetFiltersBtn" class="mt-3 rounded-lg border border-sky-500/40 bg-sky-500/10 px-3 py-1.5 font-mono text-xs text-sky-300 hover:bg-sky-500/20">
+            Reset Filters
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- SECTION 2: BOOT SEQUENCE FLOWCHART (SVG DIAGRAM)                    -->
+    <!-- =================================================================== -->
+    <section id="boot-flow" class="space-y-5 scroll-mt-20">
+      <div class="flex flex-col justify-between gap-4 border-b border-slate-800 pb-4 md:flex-row md:items-end">
+        <div>
+          <div class="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-xs font-medium text-emerald-400">
+            SECTION 02 · BARE-METAL BOOT CHAIN
+          </div>
+          <h2 class="mt-2 text-2xl font-bold tracking-tight text-slate-100">
+            MacBookPro18,1 (J316sAP) Boot Sequence Flowchart
+          </h2>
+          <p class="mt-1 text-sm text-slate-400">
+            Execution path from Apple Silicon immutable Boot ROM through <code class="font-mono text-xs text-sky-300">m1n1</code> hypervisor/loader into <code class="font-mono text-xs text-emerald-300">godeep</code> bare-metal Go at EL1.
+          </p>
+        </div>
+
+        <!-- Legend -->
+        <div class="flex flex-wrap items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/80 px-3.5 py-2 text-xs">
+          <span class="flex items-center gap-1.5 text-slate-300">
+            <span class="h-2.5 w-2.5 rounded-full bg-slate-400"></span> Apple Firmware
+          </span>
+          <span class="flex items-center gap-1.5 text-sky-300">
+            <span class="h-2.5 w-2.5 rounded-full bg-sky-400"></span> m1n1 Loader
+          </span>
+          <span class="flex items-center gap-1.5 text-emerald-300">
+            <span class="h-2.5 w-2.5 rounded-full bg-emerald-400"></span> Working / Built
+          </span>
+          <span class="flex items-center gap-1.5 text-amber-300">
+            <span class="h-2.5 w-2.5 rounded-full bg-amber-400"></span> Next Milestone
+          </span>
+        </div>
+      </div>
+
+      <div class="blueprint-card rounded-xl p-4 sm:p-6 shadow-xl">
+        <div class="svg-container">
+          <svg viewBox="0 0 1040 1350" class="mx-auto w-full min-w-[820px] max-w-5xl" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <!-- Arrowhead markers -->
+              <marker id="arrow-slate" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#94a3b8" />
+              </marker>
+              <marker id="arrow-sky" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
+              </marker>
+              <marker id="arrow-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399" />
+              </marker>
+              <marker id="arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
+              </marker>
+              <marker id="arrow-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#60a5fa" />
+              </marker>
+            </defs>
+
+            <!-- Background Stage Swimlane Labels (Left Margin) -->
+            <text x="20" y="75" fill="#64748b" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">STAGE 0</text>
+            <text x="20" y="92" fill="#475569" font-family="Inter, sans-serif" font-size="11">Silicon RoT</text>
+
+            <text x="20" y="235" fill="#64748b" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">STAGE 1</text>
+            <text x="20" y="252" fill="#475569" font-family="Inter, sans-serif" font-size="11">Boot Policy</text>
+
+            <text x="20" y="395" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">STAGE 2</text>
+            <text x="20" y="412" fill="#475569" font-family="Inter, sans-serif" font-size="11">Bootloader</text>
+
+            <text x="20" y="575" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">STAGE 3</text>
+            <text x="20" y="592" fill="#475569" font-family="Inter, sans-serif" font-size="11">ASM Entry</text>
+
+            <text x="20" y="745" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">STAGE 4</text>
+            <text x="20" y="762" fill="#475569" font-family="Inter, sans-serif" font-size="11">Go Runtime</text>
+
+            <text x="20" y="925" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">STAGE 5</text>
+            <text x="20" y="942" fill="#10b981" font-family="Inter, sans-serif" font-size="11">Built Today</text>
+
+            <text x="20" y="1145" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">STAGE 6</text>
+            <text x="20" y="1162" fill="#d97706" font-family="Inter, sans-serif" font-size="11">Target Path</text>
+
+            <!-- ============================================================ -->
+            <!-- NODE 1: Boot ROM / iBoot1 & iBoot2                           -->
+            <!-- ============================================================ -->
+            <rect x="140" y="25" width="620" height="108" rx="10" fill="#0f172a" stroke="#64748b" stroke-width="1.5" />
+            <rect x="140" y="25" width="6" height="108" rx="3" fill="#94a3b8" />
+            <text x="164" y="50" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="15" font-weight="700">
+              1. Apple Boot ROM → iBoot1 &amp; iBoot2
+            </text>
+            <rect x="630" y="34" width="114" height="22" rx="5" fill="#1e293b" stroke="#475569" />
+            <text x="687" y="49" text-anchor="middle" fill="#cbd5e1" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">
+              SILICON RoT
+            </text>
+            <text x="164" y="74" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Immutable mask ROM verifies signed LLB / iBoot1 (SPI NOR) and iBoot2 (APFS Preboot).
+            </text>
+            <text x="164" y="95" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Initializes 16 GB LPDDR5 DRAM at base <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">0x100_0000_0000</tspan> &amp; brings up DCP linear framebuffer.
+            </text>
+            <text x="164" y="116" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Generates hardware entropy (<tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">FEAT_RNG</tspan>) and populates <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">/chosen/random-seed</tspan> in ADT.
+            </text>
+
+            <!-- Side Callout: Hardware Hand-off -->
+            <rect x="795" y="42" width="225" height="74" rx="8" fill="#0f172a" stroke="#334155" stroke-dasharray="4 3" />
+            <text x="810" y="63" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10.5" font-weight="700">PRE-INITIALIZED STATE</text>
+            <text x="810" y="81" fill="#cbd5e1" font-family="JetBrains Mono, monospace" font-size="11">• DRAM: 0x100_0000_0000</text>
+            <text x="810" y="98" fill="#cbd5e1" font-family="JetBrains Mono, monospace" font-size="11">• Display: Linear RGB FB</text>
+            <line x1="760" y1="79" x2="795" y2="79" stroke="#475569" stroke-dasharray="3 3" />
+
+            <!-- Connector 1 -> 2 -->
+            <line x1="450" y1="133" x2="450" y2="177" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow-slate)" />
+            <text x="462" y="159" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10.5">Apple Device Tree (ADT) + SEP Policy</text>
+
+            <!-- ============================================================ -->
+            <!-- NODE 2: 1TR / RecoveryOS & Boot Policy                       -->
+            <!-- ============================================================ -->
+            <rect x="140" y="182" width="620" height="96" rx="10" fill="#0f172a" stroke="#64748b" stroke-width="1.5" />
+            <rect x="140" y="182" width="6" height="96" rx="3" fill="#94a3b8" />
+            <text x="164" y="207" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="15" font-weight="700">
+              2. 1TR (One True Recovery) &amp; Local Boot Policy
+            </text>
+            <rect x="630" y="191" width="114" height="22" rx="5" fill="#1e293b" stroke="#475569" />
+            <text x="687" y="206" text-anchor="middle" fill="#cbd5e1" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">
+              SEP / NVRAM
+            </text>
+            <text x="164" y="231" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">bputil</tspan> / SEP-signed LocalPolicy permits a custom third-party Mach-O payload on the godeep APFS stub.
+            </text>
+            <text x="164" y="253" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • iBoot2 loads <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">m1n1.macho</tspan> from the dedicated APFS stub volume / <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">ESP</tspan> and jumps to it.
+            </text>
+
+            <!-- Connector 2 -> 3 -->
+            <line x1="450" y1="278" x2="450" y2="324" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow-sky)" />
+            <text x="462" y="305" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="10.5">Jumps to m1n1 Stage 1 (EL2)</text>
+
+            <!-- ============================================================ -->
+            <!-- NODE 3: m1n1 (Stage 1 & Stage 2)                             -->
+            <!-- ============================================================ -->
+            <rect x="140" y="329" width="620" height="122" rx="10" fill="#0f172a" stroke="#0284c7" stroke-width="1.75" />
+            <rect x="140" y="329" width="6" height="122" rx="3" fill="#38bdf8" />
+            <text x="164" y="354" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="15" font-weight="700">
+              3. m1n1 Bootloader &amp; Hardware Proxy (Stage 1 → Stage 2)
+            </text>
+            <rect x="630" y="338" width="114" height="22" rx="5" fill="#0c4a6e" stroke="#0284c7" />
+            <text x="687" y="353" text-anchor="middle" fill="#7dd3fc" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">
+              ASAHI LOADER
+            </text>
+            <text x="164" y="378" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Converts Apple's proprietary ADT into a standard Linux/BSD Flattened Device Tree (<tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">FDT</tspan>).
+            </text>
+            <text x="164" y="399" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Enables USB-C serial/proxy console, wakes secondary CPU cores, and configures PCIe/USB clocks.
+            </text>
+            <text x="164" y="420" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Loads raw arm64 <tspan fill="#34d399" font-family="JetBrains Mono, monospace">Image</tspan> (stripped from godeep <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">ELF</tspan>) into RAM and enters at <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">EL2</tspan>.
+            </text>
+
+            <!-- Register Handoff Callout -->
+            <rect x="795" y="346" width="225" height="88" rx="8" fill="#082f49" fill-opacity="0.55" stroke="#0284c7" />
+            <text x="810" y="367" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="10.5" font-weight="700">ARM64 LINUX BOOT ABI</text>
+            <text x="810" y="386" fill="#e0f2fe" font-family="JetBrains Mono, monospace" font-size="11">• x0 = *FDT (phys addr)</text>
+            <text x="810" y="403" fill="#e0f2fe" font-family="JetBrains Mono, monospace" font-size="11">• x1..x3 = 0 (reserved)</text>
+            <text x="810" y="420" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="11">• CurrentEL = EL2</text>
+            <line x1="760" y1="390" x2="795" y2="390" stroke="#0284c7" stroke-width="1.5" />
+
+            <!-- Connector 3 -> 4 -->
+            <line x1="450" y1="451" x2="450" y2="497" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)" />
+            <text x="462" y="478" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="10.5">Branch to godeep _start (x0 = FDT)</text>
+
+            <!-- ============================================================ -->
+            <!-- NODE 4: godeep Entry (entry_arm64.s)                         -->
+            <!-- ============================================================ -->
+            <rect x="140" y="502" width="620" height="122" rx="10" fill="#0f172a" stroke="#10b981" stroke-width="1.75" />
+            <rect x="140" y="502" width="6" height="122" rx="3" fill="#34d399" />
+            <text x="164" y="527" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="15" font-weight="700">
+              4. godeep Assembly Entry (<tspan fill="#34d399" font-family="JetBrains Mono, monospace">entry_arm64.s</tspan>)
+            </text>
+            <rect x="630" y="511" width="114" height="22" rx="5" fill="#064e3b" stroke="#10b981" />
+            <text x="687" y="526" text-anchor="middle" fill="#6ee7b7" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">
+              EL2 → EL1 DROP
+            </text>
+            <text x="164" y="551" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Saves <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">x0</tspan> (FDT physical pointer), reads <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">CurrentEL</tspan>, and executes <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">eret</tspan> drop from <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">EL2</tspan> to <tspan fill="#34d399" font-family="JetBrains Mono, monospace">EL1</tspan>.
+            </text>
+            <text x="164" y="572" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Configures <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">TCR_EL1</tspan> for 48-bit Virtual Addressing (<tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">T0SZ = 16</tspan>) &amp; identity-maps DRAM + MMIO.
+            </text>
+            <text x="164" y="593" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Enables <tspan fill="#34d399" font-family="JetBrains Mono, monospace">MMU</tspan>, instruction/data caches, and NEON/SIMD FP (<tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">CPACR_EL1</tspan>), then enters Go runtime.
+            </text>
+
+            <!-- Connector 4 -> 5 -->
+            <line x1="450" y1="624" x2="450" y2="670" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)" />
+            <text x="462" y="651" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="10.5">Go Runtime &amp; Kernel Init</text>
+
+            <!-- ============================================================ -->
+            <!-- NODE 5: TamaGo Runtime & Kernel Init                         -->
+            <!-- ============================================================ -->
+            <rect x="140" y="675" width="620" height="122" rx="10" fill="#0f172a" stroke="#10b981" stroke-width="1.75" />
+            <rect x="140" y="675" width="6" height="122" rx="3" fill="#34d399" />
+            <text x="164" y="700" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="15" font-weight="700">
+              5. TamaGo Bare-Metal Runtime &amp; Kernel Init (<tspan fill="#34d399" font-family="JetBrains Mono, monospace">kernel/fdt</tspan>, <tspan fill="#34d399" font-family="JetBrains Mono, monospace">kernel/dev</tspan>)
+            </text>
+            <rect x="630" y="684" width="114" height="22" rx="5" fill="#064e3b" stroke="#10b981" />
+            <text x="687" y="699" text-anchor="middle" fill="#6ee7b7" font-family="JetBrains Mono, monospace" font-size="10" font-weight="600">
+              ACTIVE / BUILT
+            </text>
+            <text x="164" y="724" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Parses <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">FDT</tspan> <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">compatible</tspan> strings to enumerate M1 Pro (<tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">apple,t6000</tspan>) MMIO bases &amp; IRQ lines.
+            </text>
+            <text x="164" y="745" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Initializes ARM Generic Timer (<tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">CNTFRQ_EL0 = 24 MHz</tspan>) for Go scheduler preemption &amp; <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">time.Now()</tspan>.
+            </text>
+            <text x="164" y="766" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12.5">
+              • Seeds Go <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">crypto/rand</tspan> DRBG from <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">/chosen/random-seed</tspan> &amp; arms <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">wdt,t6000</tspan> hardware watchdog.
+            </text>
+
+            <!-- Connector 5 -> 6 -->
+            <line x1="450" y1="797" x2="450" y2="843" stroke="#34d399" stroke-width="2" marker-end="url(#arrow-emerald)" />
+            <text x="462" y="824" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="10.5">Binds Early Console Drivers (Polled I/O)</text>
+
+            <!-- ============================================================ -->
+            <!-- NODE 6: Early Interactive Console (CURRENT MILESTONE)        -->
+            <!-- ============================================================ -->
+            <rect x="140" y="848" width="620" height="136" rx="10" fill="#064e3b" fill-opacity="0.35" stroke="#34d399" stroke-width="2.2" />
+            <rect x="140" y="848" width="8" height="136" rx="4" fill="#10b981" />
+            <text x="164" y="874" fill="#ecfdf5" font-family="Inter, sans-serif" font-size="15.5" font-weight="700">
+              6. Early Interactive Console (Current Milestone — Built 2026-11-26)
+            </text>
+            <rect x="614" y="857" width="130" height="22" rx="5" fill="#10b981" />
+            <text x="679" y="872" text-anchor="middle" fill="#022c22" font-family="JetBrains Mono, monospace" font-size="10" font-weight="700">
+              ✓ WORKING TODAY
+            </text>
+            <text x="164" y="899" fill="#d1fae5" font-family="Inter, sans-serif" font-size="12.5">
+              • <tspan font-weight="600" fill="#ffffff">Display Output:</tspan> Binds pre-configured linear framebuffer (<tspan fill="#6ee7b7" font-family="JetBrains Mono, monospace">disp0</tspan>) for crisp text console rendering.
+            </text>
+            <text x="164" y="921" fill="#d1fae5" font-family="Inter, sans-serif" font-size="12.5">
+              • <tspan font-weight="600" fill="#ffffff">Human Input:</tspan> Polled <tspan fill="#6ee7b7" font-family="JetBrains Mono, monospace">SPI-HID</tspan> driver (<tspan fill="#6ee7b7" font-family="JetBrains Mono, monospace">spi-1,spimc</tspan>) reads internal keyboard &amp; multitouch trackpad.
+            </text>
+            <text x="164" y="943" fill="#d1fae5" font-family="Inter, sans-serif" font-size="12.5">
+              • <tspan font-weight="600" fill="#ffffff">Low-Power Idle:</tspan> Uses <tspan fill="#6ee7b7" font-family="JetBrains Mono, monospace">WFE</tspan> idle loop — zero dependency on <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">AIC2</tspan> interrupts or full <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">DCP</tspan> display bringup.
+            </text>
+
+            <!-- Connector 6 -> 7 (Branching to 3 Foundational Adapters) -->
+            <line x1="450" y1="984" x2="450" y2="1016" stroke="#fbbf24" stroke-width="2" />
+            <line x1="255" y1="1016" x2="785" y2="1016" stroke="#fbbf24" stroke-width="2" />
+            <line x1="255" y1="1016" x2="255" y2="1042" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber)" />
+            <line x1="520" y1="1016" x2="520" y2="1042" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber)" />
+            <line x1="785" y1="1016" x2="785" y2="1042" stroke="#fbbf24" stroke-width="2" marker-end="url(#arrow-amber)" />
+
+            <!-- ============================================================ -->
+            <!-- STAGE 6: NEXT HARDWARE ADAPTER MILESTONES (3 PILLARS)        -->
+            <!-- ============================================================ -->
+            <!-- Pillar A: AIC2 -->
+            <rect x="135" y="1047" width="240" height="128" rx="10" fill="#0f172a" stroke="#f59e0b" stroke-width="1.75" />
+            <rect x="135" y="1047" width="240" height="26" rx="8" fill="#78350f" fill-opacity="0.6" />
+            <text x="255" y="1064" text-anchor="middle" fill="#fcd34d" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">
+              ADAPTER 1: AIC2 IRQ
+            </text>
+            <text x="150" y="1092" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="12" font-weight="600">
+              Apple Interrupt Controller v2
+            </text>
+            <text x="150" y="1112" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Replaces GICv3 on M1 Pro
+            </text>
+            <text x="150" y="1130" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Routes external IRQs &amp; IPIs
+            </text>
+            <text x="150" y="1148" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Timer &amp; core wakeups via FIQ
+            </text>
+
+            <!-- Pillar B: DART / SART -->
+            <rect x="400" y="1047" width="240" height="128" rx="10" fill="#0f172a" stroke="#f59e0b" stroke-width="1.75" />
+            <rect x="400" y="1047" width="240" height="26" rx="8" fill="#78350f" fill-opacity="0.6" />
+            <text x="520" y="1064" text-anchor="middle" fill="#fcd34d" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">
+              ADAPTER 2: DART &amp; SART
+            </text>
+            <text x="415" y="1092" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="12" font-weight="600">
+              IOMMU &amp; DMA Allocator
+            </text>
+            <text x="415" y="1112" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Maps IOVA ↔ Physical DRAM
+            </text>
+            <text x="415" y="1130" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • SART gates ANS2 NVMe DMA
+            </text>
+            <text x="415" y="1148" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • DART isolates PCIe/USB/Audio
+            </text>
+
+            <!-- Pillar C: ASC + RTKit -->
+            <rect x="665" y="1047" width="240" height="128" rx="10" fill="#0f172a" stroke="#f59e0b" stroke-width="1.75" />
+            <rect x="665" y="1047" width="240" height="26" rx="8" fill="#78350f" fill-opacity="0.6" />
+            <text x="785" y="1064" text-anchor="middle" fill="#fcd34d" font-family="JetBrains Mono, monospace" font-size="11" font-weight="700">
+              ADAPTER 3: ASC + RTKit
+            </text>
+            <text x="680" y="1092" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="12" font-weight="600">
+              Coprocessor Mailbox IPC
+            </text>
+            <text x="680" y="1112" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • 64-bit doorbell ring buffers
+            </text>
+            <text x="680" y="1130" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • RTKit endpoint handshake
+            </text>
+            <text x="680" y="1148" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Manages ~9 embedded cores
+            </text>
+
+            <!-- Converging Arrows into Final Unlocked Capabilities Box -->
+            <line x1="255" y1="1175" x2="255" y2="1202" stroke="#60a5fa" stroke-width="1.8" />
+            <line x1="520" y1="1175" x2="520" y2="1202" stroke="#60a5fa" stroke-width="1.8" />
+            <line x1="785" y1="1175" x2="785" y2="1202" stroke="#60a5fa" stroke-width="1.8" />
+            <line x1="255" y1="1202" x2="785" y2="1202" stroke="#60a5fa" stroke-width="1.8" />
+            <line x1="520" y1="1202" x2="520" y2="1226" stroke="#60a5fa" stroke-width="2" marker-end="url(#arrow-blue)" />
+
+            <!-- Final Unlocked Full OS Capabilities -->
+            <rect x="135" y="1231" width="770" height="96" rx="10" fill="#172554" fill-opacity="0.55" stroke="#3b82f6" stroke-width="1.75" />
+            <text x="520" y="1256" text-anchor="middle" fill="#93c5fd" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              UNLOCKED FULL HARDWARE SUBSYSTEMS (TARGET ARCHITECTURE)
+            </text>
+            <text x="520" y="1280" text-anchor="middle" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12.5">
+              <tspan fill="#60a5fa" font-weight="600">ANS2 NVMe SSD</tspan> (APFS / FAT32 / ext4)  ·  <tspan fill="#60a5fa" font-weight="600">SMC</tspan> (Battery, Thermals, Clean Shutdown)  ·  <tspan fill="#60a5fa" font-weight="600">SMP</tspan> (All 10 CPU Cores via PSCI/PMGR)
+            </text>
+            <text x="520" y="1303" text-anchor="middle" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="12">
+              <tspan fill="#60a5fa" font-weight="600">PCIe Root Complex</tspan> (BCM4387 Wi-Fi 6 &amp; GL9755 SDHCI)  ·  <tspan fill="#60a5fa" font-weight="600">USB4 / TB4 (DWC3)</tspan>  ·  <tspan fill="#60a5fa" font-weight="600">DCP Display &amp; MCA Audio</tspan>
+            </text>
+          </svg>
+        </div>
+      </div>
+    </section>
+
+    <!-- =================================================================== -->
+    <!-- SECTION 3: HARDWARE I/O & SUBSYSTEM ARCHITECTURE CHART (SVG)        -->
+    <!-- =================================================================== -->
+    <section id="io-arch" class="space-y-5 scroll-mt-20">
+      <div class="flex flex-col justify-between gap-4 border-b border-slate-800 pb-4 md:flex-row md:items-end">
+        <div>
+          <div class="inline-flex items-center gap-2 rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 font-mono text-xs font-medium text-amber-400">
+            SECTION 03 · SILICON INTERCONNECT & I/O TOPOLOGY
+          </div>
+          <h2 class="mt-2 text-2xl font-bold tracking-tight text-slate-100">
+            Apple M1 Pro (t6000) Hardware I/O &amp; Subsystem Architecture
+          </h2>
+          <p class="mt-1 text-sm text-slate-400">
+            Three-tier block diagram mapping how <code class="font-mono text-xs text-emerald-300">godeep</code> at EL1 communicates across Apple's custom interrupt, IOMMU, and RTKit coprocessor fabrics.
+          </p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-3 rounded-lg border border-slate-800 bg-slate-900/80 px-3.5 py-2 text-xs">
+          <span class="flex items-center gap-1.5 text-emerald-300">
+            <span class="h-2.5 w-2.5 rounded-sm bg-emerald-400"></span> Active in godeep
+          </span>
+          <span class="flex items-center gap-1.5 text-amber-300">
+            <span class="h-2.5 w-2.5 rounded-sm bg-amber-400"></span> Next Core Adapters
+          </span>
+          <span class="flex items-center gap-1.5 text-sky-300">
+            <span class="h-2.5 w-2.5 rounded-sm bg-sky-400"></span> Target Peripherals
+          </span>
+        </div>
+      </div>
+
+      <div class="blueprint-card rounded-xl p-4 sm:p-6 shadow-xl">
+        <div class="svg-container">
+          <svg viewBox="0 0 1120 960" class="mx-auto w-full min-w-[920px] max-w-6xl" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <marker id="io-arrow-emerald" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#34d399" />
+              </marker>
+              <marker id="io-arrow-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#fbbf24" />
+              </marker>
+              <marker id="io-arrow-sky" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 1 L 10 5 L 0 9 z" fill="#38bdf8" />
+              </marker>
+            </defs>
+
+            <!-- ============================================================ -->
+            <!-- TIER 1: CPU COMPLEX & GODEEP KERNEL (TOP)                    -->
+            <!-- ============================================================ -->
+            <rect x="20" y="16" width="1080" height="196" rx="12" fill="#0f172a" stroke="#10b981" stroke-width="2" />
+            <rect x="20" y="16" width="1080" height="32" rx="10" fill="#064e3b" fill-opacity="0.7" />
+            <text x="40" y="37" fill="#ecfdf5" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              TIER 1 · APPLE M1 PRO (t6000) CPU COMPLEX &amp; GODEEP KERNEL SPACE (EL1)
+            </text>
+            <text x="1080" y="37" text-anchor="end" fill="#6ee7b7" font-family="JetBrains Mono, monospace" font-size="11">
+              ARMv8.5-A · 64-bit Little-Endian
+            </text>
+
+            <!-- CPU Cores Cluster -->
+            <rect x="40" y="62" width="350" height="134" rx="8" fill="#020617" stroke="#34d399" stroke-width="1.5" />
+            <text x="56" y="84" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              10-Core Heterogeneous CPU Cluster
+            </text>
+            <!-- P-Cores -->
+            <rect x="56" y="96" width="318" height="42" rx="6" fill="#064e3b" fill-opacity="0.4" stroke="#059669" />
+            <text x="70" y="114" fill="#f1f5f9" font-family="Inter, sans-serif" font-size="12" font-weight="600">
+              8× Firestorm P-Cores (2 Clusters × 4)
+            </text>
+            <text x="70" y="130" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10.5">
+              Up to 3.2 GHz · 12 MB L2/cluster · AMX/NEON
+            </text>
+            <!-- E-Cores -->
+            <rect x="56" y="146" width="318" height="38" rx="6" fill="#1e293b" fill-opacity="0.7" stroke="#475569" />
+            <text x="70" y="163" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12" font-weight="600">
+              2× Icestorm E-Cores (1 Cluster)
+            </text>
+            <text x="70" y="178" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10.5">
+              Efficiency cluster · 4 MB L2 · SMP via PSCI/PMGR
+            </text>
+
+            <!-- MMU & Architectural Timers -->
+            <rect x="408" y="62" width="320" height="134" rx="8" fill="#020617" stroke="#34d399" stroke-width="1.5" />
+            <text x="424" y="84" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              MMU, Timers &amp; Crypto Extensions
+            </text>
+            <text x="424" y="106" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">MMU:</tspan> 48-bit VA (<tspan font-family="JetBrains Mono, monospace" font-size="11">T0SZ=16</tspan>), 16 KB/4 KB pages
+            </text>
+            <text x="424" y="126" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">Generic Timer:</tspan> 24 MHz <tspan font-family="JetBrains Mono, monospace" font-size="11">CNTPCT_EL0</tspan> / FIQ
+            </text>
+            <text x="424" y="146" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">ISA:</tspan> AES, PMULL, SHA, LSE, PAuth, FEAT_RNG
+            </text>
+            <text x="424" y="166" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">LPDDR5 Unified RAM:</tspan> <tspan font-family="JetBrains Mono, monospace" font-size="11">0x100_0000_0000</tspan>
+            </text>
+
+            <!-- godeep Kernel Subsystems -->
+            <rect x="746" y="62" width="334" height="134" rx="8" fill="#020617" stroke="#34d399" stroke-width="1.5" />
+            <text x="762" y="84" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              godeep Kernel Core (TamaGo Runtime)
+            </text>
+            <text x="762" y="106" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#6ee7b7" font-family="JetBrains Mono, monospace">kernel/fdt</tspan> &amp; <tspan fill="#6ee7b7" font-family="JetBrains Mono, monospace">kernel/dev</tspan> (Device registry)
+            </text>
+            <text x="762" y="126" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">kernel/irq</tspan> (FIQ/IRQ dispatch table)
+            </text>
+            <text x="762" y="146" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">DMA Allocator</tspan> (Uncached coherent buffers)
+            </text>
+            <text x="762" y="166" fill="#e2e8f0" font-family="Inter, sans-serif" font-size="12">
+              • <tspan fill="#6ee7b7" font-family="JetBrains Mono, monospace">DRBG</tspan> (Seeded via <tspan font-family="JetBrains Mono, monospace" font-size="11">/chosen/random-seed</tspan>)
+            </text>
+
+            <!-- ============================================================ -->
+            <!-- TIER 2: INTERCONNECTS, PROTECTION & HOUSEKEEPING (MIDDLE)    -->
+            <!-- ============================================================ -->
+            <rect x="20" y="252" width="1080" height="202" rx="12" fill="#0f172a" stroke="#f59e0b" stroke-width="1.8" />
+            <rect x="20" y="252" width="1080" height="32" rx="10" fill="#78350f" fill-opacity="0.55" />
+            <text x="40" y="273" fill="#fef3c7" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              TIER 2 · APPLE SILICON SYSTEM FABRIC, IOMMU ISOLATION &amp; COPROCESSOR IPC
+            </text>
+            <text x="1080" y="273" text-anchor="end" fill="#fcd34d" font-family="JetBrains Mono, monospace" font-size="11">
+              MMIO Base: 0x2_0000_0000+
+            </text>
+
+            <!-- Box 2A: AIC2 -->
+            <rect x="40" y="298" width="245" height="140" rx="8" fill="#020617" stroke="#f59e0b" stroke-width="1.5" />
+            <text x="54" y="320" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              AIC2 Interrupt Ctrl
+            </text>
+            <text x="54" y="340" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Replaces ARM GICv3
+            </text>
+            <text x="54" y="358" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Delivers external device
+            </text>
+            <text x="62" y="374" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              IRQs via CPU <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">FIQ</tspan> / <tspan fill="#fbbf24" font-family="JetBrains Mono, monospace">IRQ</tspan>
+            </text>
+            <text x="54" y="394" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Handles IPIs across cores
+            </text>
+            <text x="54" y="422" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10">
+              compat: apple,aic2
+            </text>
+
+            <!-- Box 2B: PMGR / WDT -->
+            <rect x="302" y="298" width="245" height="140" rx="8" fill="#020617" stroke="#34d399" stroke-width="1.5" />
+            <text x="316" y="320" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              PMGR &amp; WDT
+            </text>
+            <text x="316" y="340" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#6ee7b7" font-weight="600">PMGR:</tspan> Clock &amp; power-domain
+            </text>
+            <text x="324" y="356" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              gates for every SoC block
+            </text>
+            <text x="316" y="376" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#6ee7b7" font-weight="600">WDT:</tspan> Hardware watchdog
+            </text>
+            <text x="324" y="392" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              (<tspan fill="#38bdf8" font-family="JetBrains Mono, monospace">wdt,t6000</tspan>) resets hung SoC
+            </text>
+            <text x="316" y="422" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10">
+              compat: apple,t6000-pmgr
+            </text>
+
+            <!-- Box 2C: DART & SART IOMMUs -->
+            <rect x="564" y="298" width="255" height="140" rx="8" fill="#020617" stroke="#f59e0b" stroke-width="1.5" />
+            <text x="578" y="320" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              DART &amp; SART IOMMUs
+            </text>
+            <text x="578" y="340" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#fcd34d" font-weight="600">DART:</tspan> Page-table IOMMU
+            </text>
+            <text x="586" y="356" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              isolating PCIe, USB4, Audio
+            </text>
+            <text x="578" y="376" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#fcd34d" font-weight="600">SART:</tspan> Address-filter IOMMU
+            </text>
+            <text x="586" y="392" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              protecting LPDDR5 from ANS2
+            </text>
+            <text x="578" y="422" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10">
+              IOVA ↔ PA (0x100_0000_0000)
+            </text>
+
+            <!-- Box 2D: ASC Mailboxes + RTKit -->
+            <rect x="836" y="298" width="244" height="140" rx="8" fill="#020617" stroke="#f59e0b" stroke-width="1.5" />
+            <text x="850" y="320" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              ASC Mailboxes + RTKit
+            </text>
+            <text x="850" y="340" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#fcd34d" font-weight="600">ASC:</tspan> 64-bit HW FIFO queues
+            </text>
+            <text x="858" y="356" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              with doorbell interrupts
+            </text>
+            <text x="850" y="376" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#fcd34d" font-weight="600">RTKit:</tspan> Binary IPC protocol
+            </text>
+            <text x="858" y="392" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              for ~9 ARM coprocessors
+            </text>
+            <text x="850" y="422" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10">
+              Endpoints: Mgmt, Crash, App
+            </text>
+
+            <!-- Tier 1 <-> Tier 2 Vertical Interconnect Arrows -->
+            <line x1="162" y1="252" x2="162" y2="215" stroke="#fbbf24" stroke-width="2" marker-end="url(#io-arrow-amber)" />
+            <text x="172" y="237" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="10">FIQ / IRQ</text>
+
+            <line x1="424" y1="212" x2="424" y2="250" stroke="#34d399" stroke-width="2" marker-end="url(#io-arrow-emerald)" />
+            <text x="434" y="237" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="10">MMIO Gate / Kick</text>
+
+            <line x1="690" y1="212" x2="690" y2="250" stroke="#fbbf24" stroke-width="2" marker-end="url(#io-arrow-amber)" />
+            <text x="700" y="237" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="10">DMA Map</text>
+
+            <line x1="958" y1="212" x2="958" y2="250" stroke="#fbbf24" stroke-width="2" marker-end="url(#io-arrow-amber)" />
+            <text x="968" y="237" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="10">Doorbell IPC</text>
+
+            <!-- ============================================================ -->
+            <!-- TIER 3: PERIPHERAL BUSES & DEVICES (3 COLUMNS AT BOTTOM)     -->
+            <!-- ============================================================ -->
+            <rect x="20" y="494" width="1080" height="446" rx="12" fill="#0f172a" stroke="#0284c7" stroke-width="1.8" />
+            <rect x="20" y="494" width="1080" height="32" rx="10" fill="#0c4a6e" fill-opacity="0.65" />
+            <text x="40" y="515" fill="#e0f2fe" font-family="JetBrains Mono, monospace" font-size="12" font-weight="700">
+              TIER 3 · PERIPHERAL BUSES, COPROCESSOR ENGINES &amp; BOARD I/O DEVICES
+            </text>
+
+            <!-- Tier 2 -> Tier 3 Arrows -->
+            <line x1="210" y1="454" x2="210" y2="492" stroke="#34d399" stroke-width="2" marker-end="url(#io-arrow-emerald)" />
+            <text x="220" y="478" fill="#34d399" font-family="JetBrains Mono, monospace" font-size="10">Direct MMIO / Polled</text>
+
+            <line x1="560" y1="454" x2="560" y2="492" stroke="#fbbf24" stroke-width="2" marker-end="url(#io-arrow-amber)" />
+            <text x="570" y="478" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="10">ASC / RTKit + SART</text>
+
+            <line x1="910" y1="454" x2="910" y2="492" stroke="#38bdf8" stroke-width="2" marker-end="url(#io-arrow-sky)" />
+            <text x="920" y="478" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="10">DART + PCIe / PHY</text>
+
+            <!-- COLUMN 1: Direct Polled / MMIO Buses -->
+            <rect x="38" y="542" width="336" height="380" rx="8" fill="#020617" stroke="#10b981" stroke-width="1.5" />
+            <rect x="38" y="542" width="336" height="28" rx="6" fill="#064e3b" fill-opacity="0.55" />
+            <text x="52" y="560" fill="#6ee7b7" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              A. Direct Polled / MMIO Buses
+            </text>
+
+            <!-- SPI HID (Active) -->
+            <rect x="52" y="582" width="308" height="62" rx="6" fill="#064e3b" fill-opacity="0.3" stroke="#34d399" />
+            <text x="64" y="601" fill="#ecfdf5" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              SPI (<tspan fill="#6ee7b7">spi-1,spimc</tspan>)  <tspan fill="#34d399" font-size="10">[✓ ACTIVE]</tspan>
+            </text>
+            <text x="64" y="619" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              Apple SPI-HID transport → Internal MacBook
+            </text>
+            <text x="64" y="635" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              Keyboard &amp; Force Touch Multitouch Trackpad
+            </text>
+
+            <!-- Framebuffer (Active) -->
+            <rect x="52" y="654" width="308" height="58" rx="6" fill="#064e3b" fill-opacity="0.3" stroke="#34d399" />
+            <text x="64" y="673" fill="#ecfdf5" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              Linear Framebuffer (<tspan fill="#6ee7b7">disp0</tspan>) <tspan fill="#34d399" font-size="10">[✓ ACTIVE]</tspan>
+            </text>
+            <text x="64" y="691" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              Pre-initialized RAM scanout → Liquid Retina XDR
+            </text>
+
+            <!-- I2C & SPMI -->
+            <rect x="52" y="722" width="308" height="64" rx="6" fill="#0f172a" stroke="#334155" />
+            <text x="64" y="741" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              I2C &amp; SPMI Buses
+            </text>
+            <text x="64" y="759" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan font-family="JetBrains Mono, monospace" font-size="10.5">CD3217</tspan> USB-C PD controllers · <tspan font-family="JetBrains Mono, monospace" font-size="10.5">TMP103</tspan> thermals
+            </text>
+            <text x="64" y="775" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan font-family="JetBrains Mono, monospace" font-size="10.5">SPMI</tspan> links to <tspan font-family="JetBrains Mono, monospace" font-size="10.5">PMU</tspan> (power rails) &amp; <tspan font-family="JetBrains Mono, monospace" font-size="10.5">RTC</tspan>
+            </text>
+
+            <!-- UART / GPIO / PWM / NOR -->
+            <rect x="52" y="796" width="308" height="112" rx="6" fill="#0f172a" stroke="#334155" />
+            <text x="64" y="815" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              UART, GPIO, PWM &amp; SPI NOR
+            </text>
+            <text x="64" y="834" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">UART:</tspan> Debug serial console over USB-C VDM
+            </text>
+            <text x="64" y="852" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">GPIO:</tspan> Lid hall sensor, resets, IRQ triggers
+            </text>
+            <text x="64" y="870" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">PWM:</tspan> Keyboard &amp; mini-LED backlight control
+            </text>
+            <text x="64" y="888" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">SPI NOR:</tspan> Boot firmware &amp; NVRAM variables
+            </text>
+
+            <!-- COLUMN 2: RTKit Coprocessor Fabric -->
+            <rect x="392" y="542" width="336" height="380" rx="8" fill="#020617" stroke="#f59e0b" stroke-width="1.5" />
+            <rect x="392" y="542" width="336" height="28" rx="6" fill="#78350f" fill-opacity="0.5" />
+            <text x="406" y="560" fill="#fcd34d" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              B. RTKit Coprocessor Fabric
+            </text>
+
+            <!-- ANS2 NVMe -->
+            <rect x="406" y="582" width="308" height="76" rx="6" fill="#0f172a" stroke="#f59e0b" />
+            <text x="418" y="601" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              ANS2 + SART → 500 GB NVMe SSD
+            </text>
+            <text x="418" y="619" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              Apple NVMe Storage v2 coprocessor; linear
+            </text>
+            <text x="418" y="635" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              submission queues → <tspan fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="10.5">GPT / APFS / FAT32 / ext4</tspan>
+            </text>
+
+            <!-- SMC -->
+            <rect x="406" y="668" width="308" height="66" rx="6" fill="#0f172a" stroke="#f59e0b" />
+            <text x="418" y="687" fill="#fbbf24" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              SMC (System Management Controller)
+            </text>
+            <text x="418" y="705" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              Battery gauge (<tspan font-family="JetBrains Mono, monospace" font-size="10.5">bq40z651</tspan>), fans, thermal sensors,
+            </text>
+            <text x="418" y="721" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              lid state, MagSafe charging &amp; clean power-off
+            </text>
+
+            <!-- DCP -->
+            <rect x="406" y="744" width="308" height="58" rx="6" fill="#0f172a" stroke="#334155" />
+            <text x="418" y="763" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              DCP (Display Coprocessor)
+            </text>
+            <text x="418" y="781" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              Modesetting, ProMotion 120Hz, DP / HDMI timing
+            </text>
+
+            <!-- AOP, SEP, NPU/GPU/Media -->
+            <rect x="406" y="812" width="308" height="96" rx="6" fill="#0f172a" stroke="#334155" />
+            <text x="418" y="831" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              AOP, SEP &amp; Specialized Engines
+            </text>
+            <text x="418" y="850" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">AOP:</tspan> Always-On Processor (PDM mics, IMU)
+            </text>
+            <text x="418" y="868" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">SEP:</tspan> Secure Enclave (Touch ID, boot keys)
+            </text>
+            <text x="418" y="886" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">Engines:</tspan> 16-core GPU, NPU/ANE, ISP, AVD/AVE
+            </text>
+
+            <!-- COLUMN 3: PCIe & High-Speed I/O -->
+            <rect x="746" y="542" width="336" height="380" rx="8" fill="#020617" stroke="#0284c7" stroke-width="1.5" />
+            <rect x="746" y="542" width="336" height="28" rx="6" fill="#0c4a6e" fill-opacity="0.55" />
+            <text x="760" y="560" fill="#7dd3fc" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              C. PCIe &amp; High-Speed I/O
+            </text>
+
+            <!-- apcie Root Complex -->
+            <rect x="760" y="582" width="308" height="94" rx="6" fill="#0f172a" stroke="#0284c7" />
+            <text x="772" y="601" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              apcie Root Complex (PCIe Gen4 + DART)
+            </text>
+            <text x="772" y="620" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">Port 0:</tspan> Broadcom <tspan font-family="JetBrains Mono, monospace" font-size="10.5">BCM4387</tspan> (Wi-Fi 6 + BT 5)
+            </text>
+            <text x="772" y="638" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">Port 1:</tspan> Genesys <tspan font-family="JetBrains Mono, monospace" font-size="10.5">GL9755</tspan> (<tspan font-family="JetBrains Mono, monospace" font-size="10.5">SDHCI</tspan> SDXC slot)
+            </text>
+            <text x="772" y="656" fill="#94a3b8" font-family="Inter, sans-serif" font-size="11">
+              • Requires DART IOMMU &amp; MSI/AIC2 interrupts
+            </text>
+
+            <!-- USB4 / Thunderbolt 4 -->
+            <rect x="760" y="686" width="308" height="94" rx="6" fill="#0f172a" stroke="#0284c7" />
+            <text x="772" y="705" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              ATC-PHY / DWC3 / ACIO (3× TB4 / USB4)
+            </text>
+            <text x="772" y="724" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">ATC-PHY:</tspan> Apple Type-C multi-protocol PHY
+            </text>
+            <text x="772" y="742" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">DWC3:</tspan> Synopsys xHCI USB 3.2/2.0 controller
+            </text>
+            <text x="772" y="760" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">ACIO:</tspan> Thunderbolt 4 / USB4 &amp; DP Alt-Mode
+            </text>
+
+            <!-- Audio Subsystem -->
+            <rect x="760" y="790" width="308" height="118" rx="6" fill="#0f172a" stroke="#334155" />
+            <text x="772" y="809" fill="#38bdf8" font-family="JetBrains Mono, monospace" font-size="11.5" font-weight="700">
+              MCA / I2S / ADMAC Audio Fabric
+            </text>
+            <text x="772" y="828" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">MCA + I2S:</tspan> Multi-Channel Audio serial bus
+            </text>
+            <text x="772" y="846" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • <tspan fill="#e2e8f0" font-weight="600">ADMAC:</tspan> Dedicated audio DMA engine
+            </text>
+            <text x="772" y="864" fill="#cbd5e1" font-family="Inter, sans-serif" font-size="11.5">
+              • Drives 6× <tspan font-family="JetBrains Mono, monospace" font-size="10.5">TAS2764</tspan> amps &amp; <tspan font-family="JetBrains Mono, monospace" font-size="10.5">CS42L84</tspan> jack
+            </text>
+            <text x="772" y="886" fill="#94a3b8" font-family="JetBrains Mono, monospace" font-size="10">
+              Also includes AVE / AVD / JPEG codecs
+            </text>
+          </svg>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="mt-12 border-t border-slate-800/80 bg-slate-950 py-6 text-center text-xs text-slate-500">
+    <p class="font-mono">
+      godeep · Bare-Metal Go OS on Apple Silicon (t6000 / MacBookPro18,1) · Reference Generated for TargetMyMac.md
+    </p>
+  </footer>
+
+  <script>
+    // Complete dataset of all 79 requested acronyms grouped into the 7 canonical categories
+    const ACRONYMS = [
+      // 1. Boot & Privilege
+      {
+        acronym: "EL1",
+        fullName: "Exception Level 1",
+        category: "Boot & Privilege",
+        role: "Unprivileged OS kernel mode on ARM64 where godeep runs after dropping down from EL2."
+      },
+      {
+        acronym: "EL2",
+        fullName: "Exception Level 2",
+        category: "Boot & Privilege",
+        role: "Hypervisor privilege level in which m1n1 enters godeep's entry_arm64.s before godeep drops to EL1."
+      },
+      {
+        acronym: "FDT",
+        fullName: "Flattened Device Tree",
+        category: "Boot & Privilege",
+        role: "Binary hardware description blob built by m1n1 from Apple's ADT and passed in register x0 at boot."
+      },
+      {
+        acronym: "EFI",
+        fullName: "Extensible Firmware Interface",
+        category: "Boot & Privilege",
+        role: "Standard PC/UEFI boot firmware interface; Apple Silicon uses iBoot2 + m1n1 instead of traditional UEFI."
+      },
+      {
+        acronym: "ESP",
+        fullName: "EFI System Partition",
+        category: "Boot & Privilege",
+        role: "FAT32 boot partition on GPT disks used alongside Apple's APFS stub volume to stage bootloaders."
+      },
+      {
+        acronym: "ELF",
+        fullName: "Executable and Linkable Format",
+        category: "Boot & Privilege",
+        role: "Standard binary format produced by the Go linker before objcopy strips it into a raw arm64 Image for m1n1."
+      },
+      {
+        acronym: "NVRAM",
+        fullName: "Non-Volatile Random-Access Memory",
+        category: "Boot & Privilege",
+        role: "Persistent SPI-NOR variable storage holding boot-args, default boot volume, and iBoot2 policy state."
+      },
+      {
+        acronym: "WFE",
+        fullName: "Wait For Event",
+        category: "Boot & Privilege",
+        role: "Low-power ARM64 CPU sleep instruction used in godeep's early polled console idle loop."
+      },
+
+      // 2. SoC & CPU/Memory
+      {
+        acronym: "SoC",
+        fullName: "System on a Chip",
+        category: "SoC & CPU/Memory",
+        role: "The single-package Apple M1 Pro (t6000) silicon integrating CPU, GPU, NPU, memory controllers, and I/O."
+      },
+      {
+        acronym: "CPU",
+        fullName: "Central Processing Unit",
+        category: "SoC & CPU/Memory",
+        role: "The 10 ARMv8.5-A cores (8 Firestorm P-cores + 2 Icestorm E-cores) executing godeep kernel and Go goroutines."
+      },
+      {
+        acronym: "MMU",
+        fullName: "Memory Management Unit",
+        category: "SoC & CPU/Memory",
+        role: "Hardware page-table walker configured in entry_arm64.s to map virtual memory and device MMIO regions."
+      },
+      {
+        acronym: "VA",
+        fullName: "Virtual Address",
+        category: "SoC & CPU/Memory",
+        role: "48-bit CPU memory addresses translated by the MMU into physical LPDDR5 DRAM or MMIO addresses."
+      },
+      {
+        acronym: "PA",
+        fullName: "Physical Address",
+        category: "SoC & CPU/Memory",
+        role: "Actual hardware bus addresses on the M1 Pro (e.g., MMIO at 0x2_0000_0000+, DRAM at 0x100_0000_0000)."
+      },
+      {
+        acronym: "T0SZ",
+        fullName: "Translation Table 0 Size Offset",
+        category: "SoC & CPU/Memory",
+        role: "TCR_EL1 bitfield set to 16 in godeep to configure a 48-bit (64 - 16) virtual address space."
+      },
+      {
+        acronym: "DRAM",
+        fullName: "Dynamic Random-Access Memory",
+        category: "SoC & CPU/Memory",
+        role: "Unified system main memory (16 GB on MacBookPro18,1) mapped starting at physical base 0x100_0000_0000."
+      },
+      {
+        acronym: "LPDDR5",
+        fullName: "Low-Power Double Data Rate 5",
+        category: "SoC & CPU/Memory",
+        role: "High-bandwidth unified memory technology (200 GB/s across 256-bit bus) shared by CPU, GPU, and DMA."
+      },
+      {
+        acronym: "MMIO",
+        fullName: "Memory-Mapped Input/Output",
+        category: "SoC & CPU/Memory",
+        role: "Hardware control registers mapped into the physical address space so Go code reads/writes devices via pointers."
+      },
+      {
+        acronym: "DMA",
+        fullName: "Direct Memory Access",
+        category: "SoC & CPU/Memory",
+        role: "Allows peripherals (NVMe, USB, Audio, PCIe) to transfer data directly to/from DRAM without CPU copy loops."
+      },
+      {
+        acronym: "IOMMU",
+        fullName: "Input-Output Memory Management Unit",
+        category: "SoC & CPU/Memory",
+        role: "Hardware address translator and firewall between peripheral DMA engines and physical LPDDR5 DRAM."
+      },
+      {
+        acronym: "DART",
+        fullName: "Device Address Resolution Table",
+        category: "SoC & CPU/Memory",
+        role: "Apple's custom page-table IOMMU isolating PCIe, USB4, Display, and Audio DMA transactions."
+      },
+      {
+        acronym: "SART",
+        fullName: "Static Address Resolution Table",
+        category: "SoC & CPU/Memory",
+        role: "Apple's region-based address filter IOMMU specifically gating ANS2 NVMe SSD access to DRAM."
+      },
+      {
+        acronym: "ISA",
+        fullName: "Instruction Set Architecture",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.5-A 64-bit instruction set (with Apple extensions) targeted by GOOS=tamago GOARCH=arm64."
+      },
+      {
+        acronym: "AES",
+        fullName: "Advanced Encryption Standard (HW Extensions)",
+        category: "SoC & CPU/Memory",
+        role: "Hardware ARMv8 crypto instructions accelerated by Go's crypto/aes package on M1 Pro."
+      },
+      {
+        acronym: "PMULL",
+        fullName: "Polynomial Multiply Long",
+        category: "SoC & CPU/Memory",
+        role: "ARM64 crypto instruction accelerating Galois/Counter Mode (AES-GCM) authentication in Go TLS/SSH."
+      },
+      {
+        acronym: "SHA",
+        fullName: "Secure Hash Algorithm (HW Extensions)",
+        category: "SoC & CPU/Memory",
+        role: "Hardware SHA-1/SHA-256/SHA-512 instructions accelerating hashing and integrity checks in Go."
+      },
+      {
+        acronym: "DotProd",
+        fullName: "Dot Product SIMD Extension",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.2-A vector dot-product instructions supported on Firestorm/Icestorm cores."
+      },
+      {
+        acronym: "FP16",
+        fullName: "Half-Precision (16-bit) Floating Point",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.2-A native 16-bit float arithmetic supported by the M1 Pro CPU and GPU."
+      },
+      {
+        acronym: "LSE",
+        fullName: "Large System Extensions",
+        category: "SoC & CPU/Memory",
+        role: "Single-instruction atomic operations (CAS, LDADD) heavily used by Go's sync/atomic and runtime scheduler."
+      },
+      {
+        acronym: "PAuth",
+        fullName: "Pointer Authentication",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.3-A cryptographic pointer signing feature present on M1 Pro cores to prevent ROP/JOP exploits."
+      },
+      {
+        acronym: "SSBS",
+        fullName: "Speculative Store Bypass Safe",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.5-A hardware mitigation bit controlling speculative load/store bypass vulnerabilities."
+      },
+      {
+        acronym: "FEAT_RNG",
+        fullName: "Random Number Generator Feature",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.5-A RNDR/RNDRRS hardware true-random instructions available on M1 Pro silicon."
+      },
+      {
+        acronym: "SME",
+        fullName: "Scalable Matrix Extension",
+        category: "SoC & CPU/Memory",
+        role: "ARMv9 matrix extension (absent on M1 Pro; Apple uses proprietary AMX coprocessor blocks instead)."
+      },
+      {
+        acronym: "SVE",
+        fullName: "Scalable Vector Extension",
+        category: "SoC & CPU/Memory",
+        role: "Variable-width ARM vector ISA (not implemented on M1 Pro, which uses 128-bit NEON SIMD)."
+      },
+      {
+        acronym: "BF16",
+        fullName: "Brain Floating Point (16-bit)",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.6-A ML float format noted in CPU feature matrix comparisons (introduced on M2/t6020+)."
+      },
+      {
+        acronym: "I8MM",
+        fullName: "Int8 Matrix Multiplication",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.6-A integer matrix instructions noted in CPU feature detection (introduced on M2+)."
+      },
+      {
+        acronym: "MTE",
+        fullName: "Memory Tagging Extension",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.5-A hardware memory safety tagging (not enabled on M1 Pro)."
+      },
+      {
+        acronym: "BTI",
+        fullName: "Branch Target Identification",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.5-A control-flow integrity landing-pad instruction feature tracked in CPU capability checks."
+      },
+      {
+        acronym: "WFxT",
+        fullName: "WFE / WFI with Timeout",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.7-A timed wait instructions (M1 Pro uses classic WFE paired with the 24 MHz Generic Timer)."
+      },
+      {
+        acronym: "ECV",
+        fullName: "Enhanced Counter Virtualization",
+        category: "SoC & CPU/Memory",
+        role: "ARMv8.6-A timer virtualization extension tracked in CPU capability identification."
+      },
+      {
+        acronym: "SIMD",
+        fullName: "Single Instruction, Multiple Data",
+        category: "SoC & CPU/Memory",
+        role: "Vector processing units enabled via CPACR_EL1 in entry_arm64.s for Go compiler vectorization."
+      },
+      {
+        acronym: "NEON",
+        fullName: "Advanced SIMD Architecture (128-bit)",
+        category: "SoC & CPU/Memory",
+        role: "ARM64 128-bit vector engine used by Go runtime memory copy/zeroing routines and crypto."
+      },
+      {
+        acronym: "DRBG",
+        fullName: "Deterministic Random Bit Generator",
+        category: "SoC & CPU/Memory",
+        role: "Cryptographic PRNG inside Go's runtime/crypto seeded at boot from /chosen/random-seed."
+      },
+      {
+        acronym: "TRNG",
+        fullName: "True Random Number Generator",
+        category: "SoC & CPU/Memory",
+        role: "Physical silicon entropy source used by iBoot2/SEP to populate the boot random seed."
+      },
+      {
+        acronym: "SMP",
+        fullName: "Symmetric Multi-Processing",
+        category: "SoC & CPU/Memory",
+        role: "Bringing up all 10 CPU cores simultaneously under Go's multi-threaded M:N scheduler."
+      },
+      {
+        acronym: "PSCI",
+        fullName: "Power State Coordination Interface",
+        category: "SoC & CPU/Memory",
+        role: "Standard ARM CPU bringup/power ABI (emulated by m1n1 or replaced by direct PMGR/RVBAR writes on M1)."
+      },
+
+      // 3. Interrupts, Timers & Power
+      {
+        acronym: "AIC / AIC2",
+        fullName: "Apple Interrupt Controller (v1 / v2)",
+        category: "Interrupts/Timers/Power",
+        role: "Apple's custom interrupt controller on t6000 (AIC2) replacing ARM GIC; routes IRQs and IPIs via FIQ."
+      },
+      {
+        acronym: "GIC",
+        fullName: "Generic Interrupt Controller",
+        category: "Interrupts/Timers/Power",
+        role: "Standard ARM interrupt controller used in QEMU virt, which must be swapped for AIC2 on real M1 Pro hardware."
+      },
+      {
+        acronym: "IRQ",
+        fullName: "Interrupt Request",
+        category: "Interrupts/Timers/Power",
+        role: "Hardware asynchronous interrupt signal managed by godeep's kernel/irq subsystem."
+      },
+      {
+        acronym: "FIQ",
+        fullName: "Fast Interrupt Request",
+        category: "Interrupts/Timers/Power",
+        role: "ARM64 high-priority interrupt vector used by Apple Silicon for both the 24 MHz Generic Timer and AIC2."
+      },
+      {
+        acronym: "RTC",
+        fullName: "Real-Time Clock",
+        category: "Interrupts/Timers/Power",
+        role: "Battery-backed wall-clock counter accessed via SPMI/PMU to persist calendar time across reboots."
+      },
+      {
+        acronym: "SPMI",
+        fullName: "System Power Management Interface",
+        category: "Interrupts/Timers/Power",
+        role: "Two-wire serial bus connecting the M1 Pro SoC to Apple's Power Management Unit (PMU) chips."
+      },
+      {
+        acronym: "PMU",
+        fullName: "Power Management Unit",
+        category: "Interrupts/Timers/Power",
+        role: "Companion power-delivery IC regulating voltage rails, RTC, and system power-button/reset events."
+      },
+      {
+        acronym: "PMGR",
+        fullName: "Power Manager",
+        category: "Interrupts/Timers/Power",
+        role: "On-die MMIO clock-gating and power-domain controller required to power up peripheral blocks and CPU cores."
+      },
+      {
+        acronym: "WDT",
+        fullName: "Watchdog Timer",
+        category: "Interrupts/Timers/Power",
+        role: "Hardware countdown timer (wdt,t6000) that automatically resets the MacBook if godeep hangs."
+      },
+      {
+        acronym: "SMC",
+        fullName: "System Management Controller",
+        category: "Interrupts/Timers/Power",
+        role: "RTKit coprocessor managing battery telemetry (bq40z651), thermal sensors, fans, lid switch, and shutdown."
+      },
+      {
+        acronym: "GPIO",
+        fullName: "General-Purpose Input/Output",
+        category: "Interrupts/Timers/Power",
+        role: "Pin controller handling discrete board signals like device resets, lid state, and interrupt lines."
+      },
+      {
+        acronym: "UART",
+        fullName: "Universal Asynchronous Receiver-Transmitter",
+        category: "Interrupts/Timers/Power",
+        role: "Hardware serial port exposed over USB-C debug cables (via m1n1/VUART) for low-level kernel logs."
+      },
+      {
+        acronym: "PWM",
+        fullName: "Pulse-Width Modulation",
+        category: "Interrupts/Timers/Power",
+        role: "Hardware duty-cycle generator controlling keyboard LED and display backlight brightness."
+      },
+
+      // 4. Storage & Filesystems
+      {
+        acronym: "NVMe",
+        fullName: "Non-Volatile Memory Express",
+        category: "Storage & Filesystems",
+        role: "High-speed flash storage protocol used by the MacBookPro18,1's internal 500 GB SSD via ANS2."
+      },
+      {
+        acronym: "ANS2",
+        fullName: "Apple NVMe Storage v2",
+        category: "Storage & Filesystems",
+        role: "Apple's RTKit-based NVMe controller coprocessor using linear submission queues and SART DMA isolation."
+      },
+      {
+        acronym: "SSD",
+        fullName: "Solid-State Drive",
+        category: "Storage & Filesystems",
+        role: "On-board raw NAND flash array managed directly by the ANS2 controller for persistent OS storage."
+      },
+      {
+        acronym: "APFS",
+        fullName: "Apple File System",
+        category: "Storage & Filesystems",
+        role: "macOS native filesystem housing the stub boot container required by iBoot2 to launch m1n1."
+      },
+      {
+        acronym: "GPT",
+        fullName: "GUID Partition Table",
+        category: "Storage & Filesystems",
+        role: "Disk partitioning scheme on the internal SSD separating macOS, recovery, stub, and godeep partitions."
+      },
+      {
+        acronym: "FAT32",
+        fullName: "File Allocation Table (32-bit)",
+        category: "Storage & Filesystems",
+        role: "Simple filesystem supported in Go for boot/ESP partitions and removable SD cards."
+      },
+      {
+        acronym: "ext4",
+        fullName: "Fourth Extended Filesystem",
+        category: "Storage & Filesystems",
+        role: "POSIX journaling filesystem target for native read/write root storage inside godeep."
+      },
+      {
+        acronym: "SDHCI",
+        fullName: "Secure Digital Host Controller Interface",
+        category: "Storage & Filesystems",
+        role: "Standardized register interface implemented by the PCIe-attached Genesys GL9755 SDXC card reader."
+      },
+      {
+        acronym: "SPI",
+        fullName: "Serial Peripheral Interface",
+        category: "Storage & Filesystems",
+        role: "High-speed synchronous serial bus used both for boot NOR flash and the internal keyboard/trackpad."
+      },
+      {
+        acronym: "NOR",
+        fullName: "NOR Flash Memory",
+        category: "Storage & Filesystems",
+        role: "On-board SPI flash chip storing iBoot1, hardware calibration data, and NVRAM."
+      },
+
+      // 5. I/O & Buses
+      {
+        acronym: "HID",
+        fullName: "Human Interface Device",
+        category: "I/O & Buses",
+        role: "Input report protocol spoken over SPI (spi-1,spimc) by the MacBook's built-in keyboard and trackpad."
+      },
+      {
+        acronym: "I2C",
+        fullName: "Inter-Integrated Circuit",
+        category: "I/O & Buses",
+        role: "Two-wire peripheral bus connecting USB-C PD controllers (CD3217), audio amps, and temperature sensors."
+      },
+      {
+        acronym: "I2S",
+        fullName: "Inter-IC Sound",
+        category: "I/O & Buses",
+        role: "Serial PCM audio bus linking the M1 Pro MCA block to the speaker amplifiers and headphone codec."
+      },
+      {
+        acronym: "MCA",
+        fullName: "Multi-Channel Audio",
+        category: "I/O & Buses",
+        role: "Apple Silicon audio serial controller routing multichannel digital audio streams to speakers and jack."
+      },
+      {
+        acronym: "ADMAC",
+        fullName: "Audio DMA Controller",
+        category: "I/O & Buses",
+        role: "Dedicated DMA engine feeding ring-buffered PCM audio samples from DRAM into the MCA peripheral."
+      },
+      {
+        acronym: "PDM",
+        fullName: "Pulse-Density Modulation",
+        category: "I/O & Buses",
+        role: "Digital microphone interface connected to the Always-On Processor (AOP) for the 3-mic studio array."
+      },
+      {
+        acronym: "USB-C",
+        fullName: "Universal Serial Bus Type-C",
+        category: "I/O & Buses",
+        role: "Reversible physical connector on the 3 Thunderbolt/USB4 ports supporting data, display, and serial debug."
+      },
+      {
+        acronym: "USB4",
+        fullName: "Universal Serial Bus 4",
+        category: "I/O & Buses",
+        role: "40 Gbps tunneled protocol stack managed by Apple's ATC-PHY and DWC3 controllers."
+      },
+      {
+        acronym: "TB4",
+        fullName: "Thunderbolt 4",
+        category: "I/O & Buses",
+        role: "High-speed PCIe + DisplayPort + USB tunneling over the 3 USB-C ports via ACIO and ATC-PHY."
+      },
+      {
+        acronym: "DWC3",
+        fullName: "DesignWare USB 3.0 Controller",
+        category: "I/O & Buses",
+        role: "Synopsys xHCI-compatible USB host controller IP integrated into Apple Silicon for USB 2.0/3.x devices."
+      },
+      {
+        acronym: "PD",
+        fullName: "Power Delivery (USB-PD)",
+        category: "I/O & Buses",
+        role: "Negotiates charging voltage/current and USB-C Alternate Modes via TI/Apple CD3217 I2C controllers."
+      },
+      {
+        acronym: "PCIe",
+        fullName: "Peripheral Component Interconnect Express",
+        category: "I/O & Buses",
+        role: "High-speed serial expansion bus (apcie) connecting the Broadcom Wi-Fi/BT chip and GL9755 SD reader."
+      },
+      {
+        acronym: "ACIO",
+        fullName: "Apple Thunderbolt / USB4 Controller",
+        category: "I/O & Buses",
+        role: "Apple's hardware controller managing Thunderbolt 4 / USB4 link bringup and PCIe/DP tunneling."
+      },
+      {
+        acronym: "ATC-PHY",
+        fullName: "Apple Type-C Physical Layer",
+        category: "I/O & Buses",
+        role: "Multi-protocol high-speed SerDes PHY muxing USB3, USB4, Thunderbolt, and DisplayPort onto USB-C pins."
+      },
+      {
+        acronym: "ASC",
+        fullName: "Apple System Coprocessor",
+        category: "I/O & Buses",
+        role: "Embedded ARM core + 64-bit hardware mailbox architecture powering ANS2, SMC, DCP, AOP, and SEP."
+      },
+      {
+        acronym: "RTKit",
+        fullName: "Real-Time Kit (Apple IPC Protocol)",
+        category: "I/O & Buses",
+        role: "Standardized endpoint messaging protocol used over ASC mailboxes to boot and talk to coprocessors."
+      },
+
+      // 6. Display, GPU & Media
+      {
+        acronym: "GPU",
+        fullName: "Graphics Processing Unit",
+        category: "Display/GPU/Media",
+        role: "16-core Apple AGX G13X graphics processor (early console bypasses it via linear DRAM framebuffer)."
+      },
+      {
+        acronym: "NPU / ANE",
+        fullName: "Neural Processing Unit / Apple Neural Engine",
+        category: "Display/GPU/Media",
+        role: "16-core dedicated matrix/ML accelerator on the M1 Pro die."
+      },
+      {
+        acronym: "ISP",
+        fullName: "Image Signal Processor",
+        category: "Display/GPU/Media",
+        role: "Hardware camera pipeline processing raw sensor data from the 1080p FaceTime HD camera."
+      },
+      {
+        acronym: "SEP",
+        fullName: "Secure Enclave Processor",
+        category: "Display/GPU/Media",
+        role: "Isolated cryptographic coprocessor managing boot policy verification, Touch ID, and hardware keys."
+      },
+      {
+        acronym: "AOP",
+        fullName: "Always-On Processor",
+        category: "Display/GPU/Media",
+        role: "Ultra-low-power RTKit coprocessor handling built-in microphones, motion sensors, and wake triggers."
+      },
+      {
+        acronym: "DCP",
+        fullName: "Display Coprocessor",
+        category: "Display/GPU/Media",
+        role: "RTKit coprocessor driving the Liquid Retina XDR panel, ProMotion refresh rates, and external displays."
+      },
+      {
+        acronym: "XDR",
+        fullName: "Extreme Dynamic Range",
+        category: "Display/GPU/Media",
+        role: "Built-in 16.2-inch mini-LED display panel (3456×2234) pre-initialized by iBoot2 for godeep's console."
+      },
+      {
+        acronym: "DP",
+        fullName: "DisplayPort",
+        category: "Display/GPU/Media",
+        role: "Digital display interface tunneled over USB-C / Thunderbolt 4 via ATC-PHY and DCP."
+      },
+      {
+        acronym: "HDMI",
+        fullName: "High-Definition Multimedia Interface",
+        category: "Display/GPU/Media",
+        role: "Dedicated full-size HDMI 2.0 video output port on the MacBookPro18,1 chassis driven by DCP."
+      },
+      {
+        acronym: "AVD",
+        fullName: "Apple Video Decoder",
+        category: "Display/GPU/Media",
+        role: "Dedicated hardware video decode engine (H.264, HEVC, ProRes) on the M1 Pro SoC."
+      },
+      {
+        acronym: "AVE",
+        fullName: "Apple Video Encoder",
+        category: "Display/GPU/Media",
+        role: "Dedicated hardware video encode engine for low-power hardware-accelerated video compression."
+      },
+      {
+        acronym: "JPEG",
+        fullName: "Joint Photographic Experts Group (HW Codec)",
+        category: "Display/GPU/Media",
+        role: "Dedicated hardware JPEG encode/decode accelerator block integrated on the t6000 die."
+      },
+
+      // 7. Virtualization & Tools
+      {
+        acronym: "QEMU",
+        fullName: "Quick Emulator",
+        category: "Virtualization & Tools",
+        role: "Fast local development target (qemu-system-aarch64 -M virt) used to test godeep kernel changes rapidly."
+      },
+      {
+        acronym: "HVF",
+        fullName: "Hypervisor.framework",
+        category: "Virtualization & Tools",
+        role: "macOS native hypervisor API allowing QEMU to run arm64 godeep VMs at near-native speed on M-series Macs."
+      }
+    ];
+
+    const CATEGORIES = [
+      "All",
+      "Boot & Privilege",
+      "SoC & CPU/Memory",
+      "Interrupts/Timers/Power",
+      "Storage & Filesystems",
+      "I/O & Buses",
+      "Display/GPU/Media",
+      "Virtualization & Tools"
+    ];
+
+    const CATEGORY_COLORS = {
+      "Boot & Privilege": "border-purple-500/40 bg-purple-500/10 text-purple-300",
+      "SoC & CPU/Memory": "border-sky-500/40 bg-sky-500/10 text-sky-300",
+      "Interrupts/Timers/Power": "border-amber-500/40 bg-amber-500/10 text-amber-300",
+      "Storage & Filesystems": "border-emerald-500/40 bg-emerald-500/10 text-emerald-300",
+      "I/O & Buses": "border-cyan-500/40 bg-cyan-500/10 text-cyan-300",
+      "Display/GPU/Media": "border-rose-500/40 bg-rose-500/10 text-rose-300",
+      "Virtualization & Tools": "border-indigo-500/40 bg-indigo-500/10 text-indigo-300"
+    };
+
+    let activeCategory = "All";
+    let searchQuery = "";
+
+    const categoryFiltersEl = document.getElementById("categoryFilters");
+    const tableBodyEl = document.getElementById("acronymTableBody");
+    const searchInputEl = document.getElementById("acronymSearch");
+    const clearSearchEl = document.getElementById("clearSearch");
+    const resultCountEl = document.getElementById("resultCount");
+    const emptyStateEl = document.getElementById("emptyState");
+    const resetFiltersBtn = document.getElementById("resetFiltersBtn");
+
+    function renderCategoryButtons() {
+      categoryFiltersEl.innerHTML = "";
+      CATEGORIES.forEach((cat) => {
+        const count =
+          cat === "All"
+            ? ACRONYMS.length
+            : ACRONYMS.filter((item) => item.category === cat).length;
+
+        const isActive = activeCategory === cat;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = isActive
+          ? "rounded-lg border border-sky-400 bg-sky-500/20 px-3 py-1.5 font-mono text-xs font-semibold text-sky-200 shadow-sm transition"
+          : "rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 font-mono text-xs text-slate-400 transition hover:border-slate-700 hover:text-slate-200";
+
+        btn.innerHTML = `${cat} <span class="ml-1 opacity-70">(${count})</span>`;
+        btn.addEventListener("click", () => {
+          activeCategory = cat;
+          renderCategoryButtons();
+          renderTable();
+        });
+        categoryFiltersEl.appendChild(btn);
+      });
+    }
+
+    function renderTable() {
+      const q = searchQuery.trim().toLowerCase();
+      const filtered = ACRONYMS.filter((item) => {
+        const matchesCategory =
+          activeCategory === "All" || item.category === activeCategory;
+        if (!matchesCategory) return false;
+        if (!q) return true;
+        return (
+          item.acronym.toLowerCase().includes(q) ||
+          item.fullName.toLowerCase().includes(q) ||
+          item.category.toLowerCase().includes(q) ||
+          item.role.toLowerCase().includes(q)
+        );
+      });
+
+      resultCountEl.textContent = `${filtered.length} of ${ACRONYMS.length}`;
+
+      if (filtered.length === 0) {
+        tableBodyEl.innerHTML = "";
+        emptyStateEl.classList.remove("hidden");
+        return;
+      }
+
+      emptyStateEl.classList.add("hidden");
+      tableBodyEl.innerHTML = filtered
+        .map((item) => {
+          const badgeStyle =
+            CATEGORY_COLORS[item.category] ||
+            "border-slate-700 bg-slate-800 text-slate-300";
+          return `
+            <tr class="transition-colors hover:bg-slate-800/40">
+              <td class="whitespace-nowrap px-4 py-3 align-top">
+                <span class="inline-block rounded-md border border-slate-700 bg-slate-950 px-2.5 py-1 font-mono text-xs font-bold text-sky-300">
+                  ${item.acronym}
+                </span>
+              </td>
+              <td class="px-4 py-3 align-top font-medium text-slate-100">
+                ${item.fullName}
+              </td>
+              <td class="whitespace-nowrap px-4 py-3 align-top">
+                <span class="inline-block rounded-full border px-2.5 py-0.5 font-mono text-[11px] font-medium ${badgeStyle}">
+                  ${item.category}
+                </span>
+              </td>
+              <td class="px-4 py-3 align-top text-slate-300 leading-relaxed">
+                ${item.role}
+              </td>
+            </tr>
+          `;
+        })
+        .join("");
+    }
+
+    searchInputEl.addEventListener("input", (e) => {
+      searchQuery = e.target.value;
+      clearSearchEl.classList.toggle("hidden", searchQuery.length === 0);
+      renderTable();
+    });
+
+    clearSearchEl.addEventListener("click", () => {
+      searchQuery = "";
+      searchInputEl.value = "";
+      clearSearchEl.classList.add("hidden");
+      renderTable();
+      searchInputEl.focus();
+    });
+
+    resetFiltersBtn.addEventListener("click", () => {
+      activeCategory = "All";
+      searchQuery = "";
+      searchInputEl.value = "";
+      clearSearchEl.classList.add("hidden");
+      renderCategoryButtons();
+      renderTable();
+    });
+
+    // Initial render
+    renderCategoryButtons();
+    renderTable();
+  </script>
+</body>
+</html>

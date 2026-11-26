@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse commits that edit (rather than append to) the progress log, or
+# delete one of its parts. Enable: git config core.hooksPath tools/githooks
+exec "$(git rev-parse --show-toplevel)/tools/progress-log.sh" --check HEAD --staged

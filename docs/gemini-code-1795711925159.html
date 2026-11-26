@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Storage Safety Layers Across OS &amp; Runtime Stacks</title>
+  <style>
+    :root {
+      --bg: #0f1117;
+      --surface: #161b22;
+      --surface-alt: #1c222b;
+      --border: #30363d;
+      --text: #e6edf3;
+      --muted: #8b949e;
+      --accent: #58a6ff;
+      --badge-yes: #1f6feb33;
+      --badge-yes-text: #79c0ff;
+      --badge-partial: #d2992233;
+      --badge-partial-text: #e3b341;
+      --badge-no: #f8514926;
+      --badge-no-text: #ff7b72;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.5;
+    }
+
+    h1 {
+      font-size: 1.35rem;
+      margin: 0 0 6px 0;
+      color: var(--text);
+    }
+
+    p.subtitle {
+      margin: 0 0 20px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 920px;
+      font-size: 0.88rem;
+    }
+
+    thead th {
+      background-color: var(--surface-alt);
+      color: var(--accent);
+      text-align: left;
+      padding: 14px 16px;
+      border-bottom: 2px solid var(--border);
+      font-weight: 600;
+      vertical-align: bottom;
+    }
+
+    thead th span.sub {
+      display: block;
+      font-size: 0.76rem;
+      font-weight: 400;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+
+    tbody tr {
+      border-bottom: 1px solid var(--border);
+    }
+
+    tbody tr:last-child {
+      border-bottom: none;
+    }
+
+    tbody tr:nth-child(even) {
+      background-color: rgba(255, 255, 255, 0.015);
+    }
+
+    td {
+      padding: 14px 16px;
+      vertical-align: top;
+      border-right: 1px solid var(--border);
+    }
+
+    td:last-child {
+      border-right: none;
+    }
+
+    td.layer-col {
+      width: 18%;
+      background-color: rgba(22, 27, 34, 0.7);
+      font-weight: 600;
+    }
+
+    .layer-num {
+      display: inline-block;
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--accent);
+      margin-bottom: 4px;
+    }
+
+    .layer-desc {
+      display: block;
+      font-weight: 400;
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-top: 6px;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 0.73rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    .yes {
+      background: var(--badge-yes);
+      color: var(--badge-yes-text);
+    }
+
+    .partial {
+      background: var(--badge-partial);
+      color: var(--badge-partial-text);
+    }
+
+    .no {
+      background: var(--badge-no);
+      color: var(--badge-no-text);
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.8rem;
+      background: rgba(110, 118, 129, 0.2);
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: #c9d1d9;
+    }
+  </style>
+</head>
+<body>
+  <h1>Storage Safety Layers: Bare Metal to OS Concept</h1>
+  <p class="subtitle">Comparison across Apple macOS/iBoot, Asahi Linux, Go Standard Library, and TamaGo (ARM64)</p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Safety Layer<span class="sub">Hardware &rarr; OS Abstraction</span></th>
+          <th>Apple Stack Solution<span class="sub">iBoot / XNU / DriverKit</span></th>
+          <th>Asahi Linux Solution<span class="sub">m1n1 / Linux Kernel (C &amp; Rust)</span></th>
+          <th>Go Std Library<span class="sub">Userspace Runtime &amp; Packages</span></th>
+          <th>TamaGo Solution<span class="sub">Bare-Metal Go Unikernel</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Row 1: IOMMU / DMA Safety -->
+        <tr>
+          <td class="layer-col">
+            <span class="layer-num">1. Silicon Boundary</span>
+            IOMMU / DMA Safety
+            <span class="layer-desc">Restricts physical RAM access from NVMe / ANS2 controllers.</span>
+          </td>
+          <td>
+            <span class="badge yes">Native Hardware + XNU</span><br />
+            <code>AppleSART</code> &amp; <code>AppleDART</code> drivers in XNU program hardware page tables and physical address filters before <code>AppleANS2NVMeController</code> issues DMA.
+          </td>
+          <td>
+            <span class="badge yes">Native Kernel Drivers</span><br />
+            <code>apple-sart.c</code> &amp; <code>apple-dart.c</code> bind via the Linux <code>iommu</code> subsystem, isolating DMA bounce buffers per device.
+          </td>
+          <td>
+            <span class="badge no">Not Applicable</span><br />
+            Userspace runtime has no visibility into physical addresses, IOMMUs, or DMA engines; relies on host OS syscalls.
+          </td>
+          <td>
+            <span class="badge partial">DMA Allocator Only</span><br />
+            <code>tamago/dma</code> allocates contiguous uncached/aligned buffers, but contains <strong>no</strong> Apple <code>DART</code> or <code>SART</code> IOMMU drivers (must be supplied by <code>godeep</code>).
+          </td>
+        </tr>
+
+        <!-- Row 2: Block Safety -->
+        <tr>
+          <td class="layer-col">
+            <span class="layer-num">2. Raw Device Layer</span>
+            Block Safety
+            <span class="layer-desc">Enforces sector alignment, device LBA limits, and queue integrity.</span>
+          </td>
+          <td>
+            <span class="badge yes">IOKit Storage Family</span><br />
+            <code>IOBlockStorageDriver</code> &amp; <code>IONVMeController</code> enforce 4 KB block alignment, command timeouts, and device max-LBA bounds.
+          </td>
+          <td>
+            <span class="badge yes">Linux Block Layer</span><br />
+            <code>nvme-apple.c</code> (RTKit + ANS2) feeds <code>blk-mq</code>; <code>bio_check_eod()</code> rejects out-of-range sectors and unaligned requests.
+          </td>
+          <td>
+            <span class="badge partial">Interface Only</span><br />
+            <code>io.ReaderAt</code> / <code>io.WriterAt</code> pass byte offsets; no built-in sector alignment or hardware block queue enforcement.
+          </td>
+          <td>
+            <span class="badge partial">Minimal / Board-Specific</span><br />
+            Provides basic SD/MMC helpers on select SoCs, but has <strong>no</strong> NVMe, PCIe, or Apple ANS2/RTKit block driver.
+          </td>
+        </tr>
+
+        <!-- Row 3: Partition Safety -->
+        <tr>
+          <td class="layer-col">
+            <span class="layer-num">3. Multi-OS Boundary</span>
+            Partition Safety
+            <span class="layer-desc">Fences LBA ranges so neighboring OSes cannot be overwritten.</span>
+          </td>
+          <td>
+            <span class="badge yes">IOGUIDPartitionScheme</span><br />
+            Parses GPT headers/CRC32s, creates bounded <code>IOMedia</code> child objects per slice, and hides system/recovery containers from casual writes.
+          </td>
+          <td>
+            <span class="badge yes">Kernel Partition Parser</span><br />
+            <code>block/partitions/efi.c</code> validates primary/backup GPT CRC32s, rejects overlapping LBAs, and maps <code>part-&gt;bd_start_sect</code> offsets.
+          </td>
+          <td>
+            <span class="badge no">No Native Parser</span><br />
+            No GPT or MBR parser in stdlib. Would be built using Go slice bounds-checking concepts over a custom block interface.
+          </td>
+          <td>
+            <span class="badge no">None</span><br />
+            TamaGo targets single-purpose unikernels/payloads and omits disk partition table parsing entirely.
+          </td>
+        </tr>
+
+        <!-- Row 4: Volume Safety -->
+        <tr>
+          <td class="layer-col">
+            <span class="layer-num">4. Storage Abstraction</span>
+            Volume Safety
+            <span class="layer-desc">Manages logical volumes, read-only flags, and container pooling.</span>
+          </td>
+          <td>
+            <span class="badge yes">APFS Container / CoreStorage</span><br />
+            APFS dynamically shares space across volumes inside one partition with copy-on-write snapshots, volume roles, and read-only system seals (SSV).
+          </td>
+          <td>
+            <span class="badge yes">Device Mapper / Btrfs / LVM</span><br />
+            <code>dm-crypt</code>, <code>dm-verity</code>, or Btrfs subvolumes enforce read-only mounts, block-level checksums, and logical volume isolation.
+          </td>
+          <td>
+            <span class="badge partial">Abstract Interfaces</span><br />
+            <code>io/fs.FS</code> provides read-only filesystem abstraction by design, but lacks block-level volume pooling or device-mapper semantics.
+          </td>
+          <td>
+            <span class="badge no">None</span><br />
+            No logical volume manager or block device abstraction layer.
+          </td>
+        </tr>
+
+        <!-- Row 5: File System Safety -->
+        <tr>
+          <td class="layer-col">
+            <span class="layer-num">5. OS Data Integrity</span>
+            File System Safety
+            <span class="layer-desc">Protects metadata, journals, inodes, and directory trees.</span>
+          </td>
+          <td>
+            <span class="badge yes">APFS / HFS+ VFS</span><br />
+            Copy-on-write metadata trees, atomic safe-save transactions, hardware-accelerated AES-XTS file encryption, and VFS sandbox enforcement.
+          </td>
+          <td>
+            <span class="badge yes">Linux VFS (ext4 / APFS / FAT)</span><br />
+            <code>ext4</code> journaling (JBD2), <code>fs/fat</code>, and VFS path resolution (`openat2`) prevent directory traversal and recover cleanly after power loss.
+          </td>
+          <td>
+            <span class="badge partial">Path &amp; Read Safety</span><br />
+            <code>os.Root</code> (Go 1.24+) blocks directory traversal; <code>io/fs</code> is read-only. Contains <strong>no</strong> on-disk filesystem driver (no FAT32/ext4).
+          </td>
+          <td>
+            <span class="badge no">None</span><br />
+            Relies on Go's in-memory <code>embed.FS</code> or external libraries; no native on-disk <code>FAT32</code> or <code>ext4</code> driver.
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
