@@ -34,6 +34,9 @@ This doc covers everything about running godeep on the actual machine it's devel
   - [7.5 Definition of done for a native driver](#75-definition-of-done-for-a-native-driver)
   - [7.6 What's still worth building on QEMU, and what needs two machines](#76-whats-still-worth-building-on-qemu-and-what-needs-two-machines)
 - [8. Recommendation and milestones](#8-recommendation-and-milestones)
+  - [8.1 Track 1: Worth doing in the QEMU environment](#81-track-1-worth-doing-in-the-qemu-environment)
+  - [8.2 Track 2: Needs native Mac hardware and native install](#82-track-2-needs-native-mac-hardware-and-native-install)
+  - [8.3 Suggested execution order](#83-suggested-execution-order)
 - [References](#references)
 
 **How the inventory was gathered (2026-11-25).** Everything came from the running machine through system tools; no web lookups were needed:
@@ -581,31 +584,55 @@ A row in §2 moves from ✗/◐ to ✅ when the driver has:
 
 ## 8. Recommendation and milestones
 
-**Keep QEMU `virt` + HVF as the main target.** On this Mac it already gives godeep:
+**Keep QEMU `virt` + HVF as the main daily target.** On this Mac it already gives godeep:
 - the real CPU, natively: Firestorm cores with AES, SHA3 and NEON;
-- through virtio: network (Wi-Fi via QEMU's NAT), disk (an image file on the SSD), files (9P) and display (virtio-gpu in a window).
+- through virtio, PCIe, and xHCI: network (NAT + SSH/SFTP/HTTPS), writable NVMe & USB disks, 9P host shares, and `ramfb` graphics — all exercised automatically by `make check-virt` in seconds.
 
-The driver foundation (§3) is developed and tested there first anyway, and §7 explains how each native driver climbs from host tests to QEMU to the real Mac.
+Because the kernel and portable drivers are shared across boards (§7.1), work splits cleanly into **two milestone tracks**: everything that can be built and verified fast in QEMU (and carries straight into `bin/godeep-applem1.img`), and everything that requires real Apple Silicon (tethered via m1n1 or installed natively via `make native`).
 
-For real-metal godeep, this order gives a visible result quickly:
+---
 
-| Milestone | What | Uses existing Go code | New Go code |
-|---|---|---|---|
-| **M0: foundation** ✅ | DMA + IOMMU interface, interrupt bridge, device manager, RTKit engine (§3) | — | **done** |
-| **M0.7: boot like Linux** ✅ | `make image`, EL2 → EL1 entry, device tree from `x0` → device list, PSCI conduit from the tree, `kernel/mmio`, first portable `drivers/` (§3.1) | `kernel/fdt`, `kernel/mmio` | **done**, tested in QEMU at EL1 and EL2 |
-| **M0.5: a place to boot** | the godeep stub, ESP and GODEEPDATA partition (§6); optionally the tethered-boot entry for m1n1 development | Asahi installer | none: just §6 |
-| **M1: hello on the laptop screen** ✅ | `board/applem1`: self-relocation, 4-level MMU, RAM + DMA layout, framebuffer console, autorun of `lsdev`/`ps`/`mem`/`uptime` (§3.1). **Booted on the Mac 2026-11-25** (§6.8, `screens/IMG_2341.JPG`). Then WFE idle and watchdog/`reboot`, confirmed on the Mac 2026-11-26 | TamaGo arm64, generic timer, godeep's EL2 entry, Image format and FDT device list (M0.7), `x/image/font` | done: relocation, `kernel/pgtable`, `drivers/simplefb`, `board/applem1` |
-| **M2: interactive** ◐ | Keyboard via SPI-HID as a managed driver, polled (no AIC): the godeep shell on the built-in screen and keyboard. **Works on the Mac (2026-11-26, `screens/IMG_2342.JPG`)**: typing, and the trackpad in multitouch mode. Then AIC2 (`irq.Controller`) to replace polling and spinning-free WFI | `kernel/irq`, `kernel/dev`, `kernel/fdt` phandles, godeep `tty`, `sh` | done: `drivers/apple/{pmgr,gpio,spi,spihid}`; next: AIC2 |
-| **M3: coprocessors** (next) | ASC mailbox (`rtkit.Mailbox`) + DART (`dma.IOMMU`); verify the RTKit encodings; SMC (battery, lid, power button, power-off) as the first client | `kernel/rtkit`, `kernel/dma` | ASC mailbox, DART, SMC protocol |
-| **M4: networking** ◐ | DWC3 device mode + CDC-ECM, so godeep gets an IP over a USB-C cable; SSH into it | gVisor, `x/crypto/ssh` | done on QEMU (§3.4): `net/netstack`, DHCP/DNS, `netd`, `programs/sshd` with SFTP, WASM loading; next: the DWC3 gadget driver (a `netdev.NIC`) |
-| **M5: storage** ◐ | ANS2 NVMe on RTKit + SART, read-only; read the Omarchy ext4 partition; use GODEEPDATA | `kernel/rtkit`, `kernel/dma` | done on QEMU (§3.3): `drivers/nvme` command layer, `kernel/block` (GPT), `fs/fat`, `fs/ext4`, `lsblk`/`ls`/`cat`; next: ANS2's differences, SART, RTKit boot (after M3) |
-| M6: everything else | SMP, Wi-Fi, audio | — | large |
+### 8.1 Track 1: Worth doing in the QEMU environment
 
-- **Order from here (2026-11-26, after the QEMU build-out):** the keyboard, trackpad, idle and watchdog work on the Mac. Two checks are left from that boot: steady-state idle (`lsdev idle` after a quiet minute) and the watchdog past 30 s; the next boot also tries the trackpad pointer and scrollback on the console, and the `/chosen` entropy seed (XS). Then the second-computer loop (`docs/Using2Computers.md`, starting with `drivers/apple/uart`), M3 (mailbox, RTKit check, SMC), then M5's Apple layer, which connects the storage stack already running on QEMU to the real SSD. AIC2 when polling's cost matters. Without a second computer for m1n1's hypervisor, each native test is a reboot and a photo, so every driver reports its progress in `lsdev`.
-- **M0.5 needs no code.** Do it whenever you're ready (§6).
-- **M1** is a weekend-sized experiment once you have a boot path. It's worth doing just to see the gopher-made shell on the XDR display.
-- **M3** is where the foundation pays off: every RTKit device after it is "a protocol on an endpoint channel".
-- **M4** is where real hardware becomes as useful as QEMU, and **M6** is where it stops being worth it.
+Build here whenever QEMU emulates the bus, protocol, or standard device (`virtio`, PCIe, NVMe, xHCI, SDHCI, `ramfb`, `sbsa-ref`), or when the work is pure kernel/userland Go. Iteration uses `make test`, `make hot`, `make check-virt`, and `make check-applem1` (seconds per change, zero reboots of the Mac).
+
+| Milestone | Status | What it delivers | Why QEMU / how it carries to the Mac | Test bed & exit criteria |
+|---|---|---|---|---|
+| **Q1: Driver foundation & Linux-style boot** *(M0 + M0.7)* | ✅ done | `kernel/dma`, `kernel/irq`, `kernel/dev`, `kernel/rtkit` (against fake), `kernel/fdt`, `kernel/mmio`, 4-level 48-bit `kernel/pgtable`, `tools/mkimage`, EL2→EL1 entry, `tools/fakem1n1` | Proves boot protocol, self-relocation, 1 TB page tables, and fault screens before touching hardware | `make test`, `make qemu EL2=1`, `make check-applem1` |
+| **Q2: Standard storage & writable filesystems** | ✅ done | `drivers/pci`, `drivers/nvme` (read/write), `kernel/block` (GPT/MBR + `Writer`), `fs/fat` (FAT16/32 rw with LFN & FSInfo), `fs/ext4` (ro), `fs/memfs` (`ram:`), `kernel/vfs` | Same NVMe command layer, partition parser, and FAT/ext4 stack the Mac's SSD (`GODEEPDATA` + Omarchy) will use once ANS2+SART lands | `make check-virt` + `fs/fat` / `fs/ext4` host tests (`testing/fstest`) |
+| **Q3: Networking, SSH/SFTP, 9P, & USB stack** | ✅ done | `drivers/virtio/{mmio,net,rng,p9}`, `net/netstack` (gVisor TCP/IP, DHCP + renewal, DNS, HTTPS with Mozilla roots), `netd`, `programs/sshd` (SSH + SFTP v3), `fs/ninep` (rw) + `tools/ninepd` (TCP 9P server), `drivers/usb/xhci` (HID kbd/mouse, hubs, BOT/SCSI storage rw + `REQUEST SENSE`/stall recovery, CDC-ECM `usb-net`) | Everything above `netdev.NIC` and `xhci` runs unchanged on the Mac once DWC3 gadget/host exists | `make check-virt`, `make check-usbnet`, `FuzzPreAuth` |
+| **Q4: Console, input, diagnostics, & WASM** | ✅ done | `drivers/simplefb` (scrollback, pointer, select/paste), `drivers/qemu/fwcfg` (`ramfb`), `kernel/input` + `inputd`, `kbd` layouts (`us`/`uk`/`dvorak`/`colemak`), `kernel/tty` (cursor editing + 100-line history), `kernel/klog` (`dmesg`), `pprof`, `programs/wasm` (`wazero` WASI, `make push`) | Same console, shell, logging, and dynamic WASM loader run inside `bin/godeep-applem1.img` | `make check-virt` (QMP keyboard/mouse/paste, WASM from `ram:` and `host:`, `pprof`) |
+| **Q5: WASM & TCP-9P dev ergonomics** *(Size: S)* | ⬜ next | Shell `mount9p HOST:PORT NAME` command wiring `fs/ninep` over `cap.Net` to `tools/ninepd`; writable `host:`/9P access from WASI; cached compiled `wazero` modules for faster startup; fuller WASI coverage | Turns any network link on the Mac (UART/USB-C) into instant edit–run on dev-host files without reboots | `make check-virt` mounts a writable `tools/ninepd` dir over QEMU NAT (`10.0.2.2`) and runs/writes from a `.wasm` program |
+| **Q6: Kernel services, IPC, & capability hardening** *(Size: M)* | ⬜ planned | `kernel/ipc` (named channel ports), shell pipelines (`a \| b`), synthetic `procfs`/`devfs`, narrower per-Proc / per-SSH-session capabilities (scoping `cap.Net` and `vfs.NS`), `top`/accounting, persistent `klog` dump to writable FAT (`GODEEPDATA`) | 100% board-independent Go core; makes native debugging logs survive a reboot once storage lands | `go test -race -count=50`, `make check-virt` verifying pipes, scoped sessions, and `klog` file dump |
+| **Q7: Portable QEMU-testable drivers (`SDHCI`, `virtio-gpu 2D`)** *(Size: M)* | ⬜ planned | `drivers/sdhci` (standard SD host controller over PCIe, reusable for the Mac's GL9755 SD card reader); `drivers/virtio/gpu` 2D + `gpu.Display`/`Surface` + local SIMD+goroutine `gpu.Compute` (`GoGpuSupport.md` G1–G3) | Exercises standard PCIe SDHCI and graphics/compositor interfaces in QEMU without Apple-specific bring-up | `make check-virt` reads an SD image via QEMU `sdhci-pci`; `make qemu QEMU_DISPLAY=cocoa` renders `virtio-gpu` surfaces |
+| **Q8: ARM64 SMP groundwork (multi-core Go runtime)** *(Size: L)* | ⬜ planned | Secondary-core bring-up in TamaGo + `board/virt` via PSCI `CPU_ON`, per-CPU idle/timer handling, `GOMAXPROCS > 1` safety audit across drivers | Isolates all runtime/scheduler/locking SMP bugs in QEMU `-smp 4` so the Mac only needs Apple's PMGR `cpu-start` hook later | `make check-virt` passes with `-smp 4`, `mem` reports `GOMAXPROCS=4`, idle CPU stays low |
+
+---
+
+### 8.2 Track 2: Needs native Mac hardware and native install
+
+Work here requires real Apple Silicon (`t6000` / `J316sAP`) because QEMU cannot emulate proprietary `apple,*` IP, real RTKit coprocessor firmware, USB-C PHY/PD role switching, or silicon power/idle timing. Each milestone notes whether it runs via **standalone native install** (`make native`, [`PartitioningMac.md`](PartitioningMac.md)) or **tethered native boot** from a second PC over USB-C (`m1n1` proxy/hypervisor, [`Using2Computers.md`](Using2Computers.md)) before graduating to `make native`.
+
+| Milestone | Status | Mode needed | What it delivers | Builds on / new Go code | Exit criteria on real Mac |
+|---|---|---|---|---|---|
+| **N1: Partitioning & standalone boot entry** *(M0.5)* | ✅ done | Native install | Dedicated `godeep` APFS stub, ESP, `GODEEPDATA` FAT32 partition, `tools/m1n1boot` direct-boot `boot.bin`, `make native` ([`PartitioningMac.md`](PartitioningMac.md)). *(Optional follow-up: add a `godeep-dev` tethered proxy entry for N3+)* | Asahi installer, `tools/godeep-partition.sh`, `tools/m1n1boot` | Mac startup picker shows `godeep` alongside macOS and Omarchy; `make native` installs cleanly |
+| **N2: Native boot, display, idle, watchdog, & polled input** *(M1 + M2 polled)* | ◐ mostly done | Native install | **Done on hardware:** EL2 VHE (`E2H=1`) boot, 1 TB 4-level MMU, XDR framebuffer console (`screens/IMG_2341.JPG`), WFE event-stream idle, 30 s watchdog + `reboot`, polled SPI-HID keyboard & multitouch trackpad (`screens/IMG_2342.JPG`). **Remaining quick checks (single-Mac):** (1) steady-state `lsdev idle` after a quiet minute & uptime past 30 s; (2) trackpad pointer, two-finger scrollback & select/paste on XDR; (3) mix `/chosen` `rng-seed`/`kaslr-seed` into `board/applem1/rng.go` (`XS`) | Done: `board/applem1`, `drivers/simplefb`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`. New: ~30 lines for `/chosen` entropy seed | `lsdev idle` >90% after 1 min, uptime >60 s, trackpad scrolls/selects on XDR, `lsdev` / boot info confirms `/chosen` seed mixed |
+| **N3: Samsung debug UART & tethered two-machine loop** *(Size: XS–S)* | ⬜ next | Tethered native (m1n1 HV) → Native install | `drivers/apple/uart` (`apple,s5l-uart`, `serial@39b200000`) wired into `board/applem1/early.go`, plus `Using2Computers.md` §9 workflow (`make m1-load`, `make m1-guest`, `tools/m1n1boot -extract-dtb`, `godeep.faultreboot`). Enables live text console on `/dev/ttyACM1` and **SSH-over-UART** (`SSHServer.md` §2.3) before USB networking exists | New: `drivers/apple/uart` (~100 lines) + Makefile/tool targets | Console text and interactive shell work over `/dev/ttyACM1` under `run_guest.py`; `ssh godeep-serial lsdev` succeeds |
+| **N4: Apple AIC2 interrupt controller** *(M2 completion; Size: S–M)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/aic` implementing `irq.Controller` + ack loop, FDT interrupt-cell mapping, and EL1 timer FIQ routing under m1n1. Replaces 5 ms SPI polling and upgrades WFE event-stream idle to deadline-driven WFI | Existing: `kernel/irq`. New: `drivers/apple/aic` + HV MMIO trace fixtures | `irqstat` counts real keyboard/timer IRQs with no storms; `irqlat` measured on silicon; idle wake-ups drop sharply |
+| **N5: Coprocessors, DART IOMMU, & SMC** *(M3; Size: M)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/asc` (`rtkit.Mailbox`), `drivers/apple/dart` (`dma.IOMMU`, 16 KB pages), hardware verification of `kernel/rtkit` wire encodings, and `drivers/apple/smc` (clean `halt` power-off, power button, lid, battery, sensors, RTC) | Existing: `kernel/rtkit`, `kernel/dma`. New: `drivers/apple/{asc,dart,smc}` + HV trace fixtures | `halt` cleanly powers off the Mac; `lsdev smc` reports battery/sensors; RTKit encodings verified against real firmware |
+| **N6: Native USB-C networking & USB host** *(M4; Size: M–L)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/dwc3` device mode + CDC-ECM (`netdev.NIC`) for high-speed IP/SSH/SFTP/9P/WASM over USB-C; `drivers/apple/i2c` + `apple,cd321x` PD controllers + ATC PHY for role switching and host mode; xHCI **transaction translators** tested on a real USB-C dock | Existing (Q3): `net/netstack`, `netd`, `programs/sshd`, `fs/ninep`, `drivers/usb/xhci`. New: `drivers/apple/{i2c,cd321x,atcphy,dwc3}` + xHCI TT | Standalone `make native` Mac gets IP over USB-C cable (`ssh`, `scp`, `mount9p` work without hypervisor); USB stick & keyboard work behind a USB-C dock |
+| **N7: Native SSD storage (ANS2 + SART)** *(M5; Size: M)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/sart` (`sart@393c50000`) + `drivers/apple/ans` (ANS2 linear submission / NVMMU / TCBs over RTKit) feeding the QEMU-tested NVMe/block/filesystem stack. **Safety gate:** read-only first after HV trace review; writes restricted strictly to `GODEEPDATA` (never APFS) | Existing (Q2, N5): `drivers/nvme` command layer, `kernel/block`, `fs/fat` (rw), `fs/ext4` (ro), `kernel/rtkit`. New: `drivers/apple/{sart,ans}` | `lsblk` lists the Mac's NVMe partitions; `cat` reads Omarchy ext4; writes to `GODEEPDATA` pass `fsck.fat` under macOS |
+| **N8: Native stretch goals** *(M6; Size: L–XL)* | ⬜ optional | Tethered native (m1n1 HV) → Native install | Apple PMGR `cpu-start` wired into Q8's SMP groundwork (10 cores), `apple,t6000-spmi`, keyboard backlight PWM (`apple,t6000-fpwm`, XS), Apple PCIe root complex + GL9755 SD reader (reusing Q7's `sdhci`), SIO/audio, BCM4387 Wi-Fi | Existing (Q7, Q8): `sdhci`, SMP runtime. New: Apple-specific drivers per block | Pick selectively; stop before Wi-Fi/AGX GPU unless explicitly desired |
+
+---
+
+### 8.3 Suggested execution order
+
+1. **Finish N2's single-Mac checks** (steady-state idle, watchdog >30 s, trackpad console pointer/scrollback, `/chosen` entropy seed) — zero extra hardware needed, validates everything already in `bin/godeep-applem1.img`.
+2. **Do Q5 (`mount9p` + WASM polish) and Q6 (`ipc`, pipes, capability scoping, `klog` persistence) in QEMU** whenever you are on one machine — fast loop, pays off immediately on both QEMU and the Mac.
+3. **Bring up the two-machine loop with N3 (`drivers/apple/uart`)** as soon as the Windows/WSL2 host (`Using2Computers.md`, `tools/setup-windows.ps1`) is cabled to the Mac — text console and SSH-over-UART eliminate screen photos for every Apple driver after it.
+4. **Climb the Apple silicon stack in dependency order: N5 (ASC/DART/RTKit/SMC) → N6 (DWC3 USB-C gadget networking) or N7 (ANS2+SART SSD)**, with **N4 (AIC2 interrupts)** whenever polling overhead or WFI sleep matters. Save every hypervisor MMIO log from N3–N7 as a rung-2 `mmio.Fake` fixture so `make test` locks in hardware behavior permanently.
+5. **Tackle Q7 (`sdhci`, `virtio-gpu`) and Q8 (ARM64 SMP on QEMU `-smp 4`)** in QEMU whenever you want big portable leaps before hooking them into N8 on the Mac.
 
 ---
 
