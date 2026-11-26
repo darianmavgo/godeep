@@ -27,6 +27,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -243,6 +244,10 @@ func deviceTree(c *config) ([]byte, error) {
 		bootargs = fmt.Sprintf("godeep.testfault=%d", c.fault)
 	}
 	b.PropStrings("bootargs", bootargs)
+	seed := make([]byte, 64) // m1n1 copies iBoot's random-seed here
+	rand.Read(seed)
+	b.Prop("rng-seed", seed)
+	b.Prop("kaslr-seed", seed[:8])
 	b.Begin(fmt.Sprintf("framebuffer@%x", uint64(fbBase)))
 	b.PropStrings("compatible", "apple,simple-framebuffer", "simple-framebuffer")
 	b.PropRegs(2, 2, fdt.Range{Base: fbBase, Size: c.fbSize()})
@@ -283,9 +288,11 @@ func deviceTree(c *config) ([]byte, error) {
 	b.End()
 	b.End()
 
-	// Apple-style devices so lsdev has a Mac-like list. Nothing in godeep
-	// touches them yet, and QEMU has nothing at these addresses, except the
-	// watchdog (fakeWdt, RAM) and the keyboard path (keyboard.go, RAM).
+	// Apple-style devices so lsdev has a Mac-like list. QEMU has nothing at
+	// these addresses: the smc and nvme nodes lack the parts their drivers
+	// need, so the drivers stop with a configuration error (lsdev shows
+	// it), and nothing touches them. The watchdog (fakeWdt), the keyboard
+	// path and the AIC (keyboard.go) are RAM pages the drivers can use.
 	b.Begin("soc")
 	b.PropStrings("compatible", "simple-bus")
 	b.PropU32("#address-cells", 2)
@@ -295,10 +302,8 @@ func deviceTree(c *config) ([]byte, error) {
 		name, compat string
 		base, size   uint64
 	}{
-		{"interrupt-controller", "apple,t6000-aic", 0x2_8e10_0000, 0xc000},
 		{"serial", "apple,s5l-uart", 0x3_9b20_0000, 0x4000},
 		{"spi", "apple,t6000-spi", 0x3_9b10_c000, 0x4000},
-		{"i2c", "apple,t6000-i2c", 0x3_9b04_0000, 0x4000},
 		{"smc", "apple,t6000-smc", 0x2_9040_0000, 0x4000},
 		{"nvme", "apple,t6000-nvme-ans2", 0x3_9340_0000, 0x40000},
 		{"watchdog", "apple,t6000-wdt", fakeWdt, 0x4000},
@@ -439,7 +444,7 @@ func cmdCheck(args []string) error {
 	image := fs.String("image", "bin/godeep-applem1.img", "kernel Image")
 	qemu := fs.String("qemu", "qemu-system-aarch64", "QEMU binary")
 	timeout := fs.Duration("timeout", 90*time.Second, "how long to wait for the shell")
-	want := fs.String("want", "board:,memory layout OK,uptime,wake-ups/s,bites in,power domains (0 switched on)", "comma-separated strings the serial output must contain")
+	want := fs.String("want", "board:,memory layout OK,entropy: 72 bytes,AIC2: 64 IRQs, 1 dies,keyboard backlight 0%,uptime,wake-ups/s,bites in,power domains (0 switched on)", "comma-separated strings the serial output must contain")
 	typed := fs.String("type", "help\r", "then typed on the serial console (input check; empty: skip)")
 	reply := fs.String("reply", "BUILTIN", "what the typed input must produce")
 	fs.Parse(args)

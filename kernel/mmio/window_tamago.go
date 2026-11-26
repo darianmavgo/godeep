@@ -19,3 +19,12 @@ func (w Window) Write32(off uint64, v uint32) { atomic.StoreUint32(w.p(off), v) 
 // Read8 is a single byte load (for registers narrower than 32 bits, like
 // the end of a virtio device's configuration).
 func (w Window) Read8(off uint64) uint8 { return *(*uint8)(unsafe.Pointer(uintptr(w.Base + off))) }
+
+// Read64 and Write64 are single 64-bit accesses, for registers that must be
+// written whole (Apple's ASC mailbox: the second word of a message sends it).
+func (w Window) Read64(off uint64) uint64 {
+	return atomic.LoadUint64((*uint64)(unsafe.Pointer(uintptr(w.Base + off))))
+}
+func (w Window) Write64(off uint64, v uint64) {
+	atomic.StoreUint64((*uint64)(unsafe.Pointer(uintptr(w.Base+off))), v)
+}

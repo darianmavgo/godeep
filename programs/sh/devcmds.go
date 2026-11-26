@@ -118,8 +118,52 @@ func dmastat(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 }
 
 func date(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
-	fmt.Fprintln(env.TTY, time.Now().UTC().Format("Mon Jan 2 15:04:05 UTC 2006"))
+	now := time.Now()
+	if clk := rtc(env); clk != nil {
+		now = clk.Now()
+	}
+	fmt.Fprintln(env.TTY, now.UTC().Format("Mon Jan 2 15:04:05 UTC 2006"))
 	return nil
+}
+
+// rtc returns a ready real-time clock device (the Mac's SMC RTC), or nil
+// when the system clock is the wall clock (QEMU, hosted).
+func rtc(env Env) dev.Clock {
+	if env.Dev == nil {
+		return nil
+	}
+	for _, s := range env.Dev.List() {
+		if c, ok := s.Service.(dev.Clock); ok && s.State == dev.Ready && s.Name == "rtc" {
+			if t := c.Now(); !t.IsZero() {
+				return c
+			}
+		}
+	}
+	return nil
+}
+
+// kbdlight [PERCENT]: show or set the keyboard backlight.
+func kbdlight(_ context.Context, env Env, _ *proc.Proc, args []string) error {
+	type light interface {
+		Set(int)
+		Get() int
+	}
+	for _, s := range env.Dev.List() {
+		l, ok := s.Service.(light)
+		if !ok || s.State != dev.Ready {
+			continue
+		}
+		if len(args) > 1 {
+			n, err := strconv.Atoi(strings.TrimSuffix(args[1], "%"))
+			if err != nil {
+				return errors.New("usage: kbdlight [0-100]")
+			}
+			l.Set(n)
+		}
+		fmt.Fprintf(env.TTY, "keyboard backlight %d%%\n", l.Get())
+		return nil
+	}
+	return errors.New("no keyboard backlight on this board")
 }
 
 func reboot(_ context.Context, env Env, _ *proc.Proc, _ []string) error {

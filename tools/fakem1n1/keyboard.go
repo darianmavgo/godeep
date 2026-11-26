@@ -24,6 +24,14 @@ const (
 	fakeNub  = fakeRegs + 0x8000
 	fakeSPI  = fakeRegs + 0xc000
 
+	// AIC2: a core page whose INFO registers describe one die of 64 IRQs,
+	// and an event page that reads 0 (nothing pending). The board masks
+	// every line, enables the controller and polls the event register.
+	fakeAIC      = fakeRegs + 0x10000
+	fakeAICEvent = fakeRegs + 0x14000
+	// The keyboard backlight PWM: a RAM page takes its writes.
+	fakeFPWM = fakeRegs + 0x18000
+
 	spiFIFOSTAT = 0x10c
 	nubReady    = 6
 )
@@ -44,8 +52,24 @@ var fakeDomains = []struct {
 	{"ps_gpio", 0x120, 107, []uint32{104}},
 }
 
-// keyboardNodes adds the keyboard path (inside /soc).
+// keyboardNodes adds the keyboard path and the AIC2 (inside /soc).
 func keyboardNodes(b *fdt.Builder) {
+	b.Begin(fmt.Sprintf("interrupt-controller@%x", uint64(fakeAIC)))
+	b.PropStrings("compatible", "apple,t6000-aic", "apple,aic2")
+	b.PropU32("#interrupt-cells", 4)
+	b.Prop("interrupt-controller", nil)
+	b.PropRegs(2, 2, fdt.Range{Base: fakeAIC, Size: 0x4000}, fdt.Range{Base: fakeAICEvent, Size: 4})
+	b.PropStrings("reg-names", "core", "event")
+	b.End()
+
+	b.Begin(fmt.Sprintf("pwm@%x", uint64(fakeFPWM)))
+	b.PropStrings("compatible", "apple,t6000-fpwm", "apple,s5l-fpwm")
+	b.PropRegs(2, 2, fdt.Range{Base: fakeFPWM, Size: 0x4000})
+	b.PropU32("clocks", 113)
+	b.PropU32("#pwm-cells", 2)
+	b.PropU32("phandle", 114)
+	b.End()
+
 	b.Begin(fmt.Sprintf("power-management@%x", uint64(fakePmgr)))
 	b.PropStrings("compatible", "apple,t6000-pmgr", "apple,pmgr", "syscon", "simple-mfd")
 	b.PropRegs(2, 2, fdt.Range{Base: fakePmgr, Size: 0x4000})
@@ -127,5 +151,7 @@ func regsImage() []byte {
 	}
 	put(fakeNub+4*nubReady, 1<<9|7<<1|1) // input, interrupt off, level high (idle)
 	put(fakeSPI+spiFIFOSTAT, 16<<24)     // RX FIFO: 16 bytes waiting, TX empty
+	put(fakeAIC+0x4, 64)                 // INFO1: 64 IRQs, one die
+	put(fakeAIC+0xc, 64)                 // INFO3: at most 64
 	return img
 }

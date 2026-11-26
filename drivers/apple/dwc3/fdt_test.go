@@ -60,6 +60,9 @@ func tree(t *testing.T) *fdt.Node {
 		fdt.Range{Base: 0x7_0000_0000, Size: 0x4000}, fdt.Range{Base: 0x7_02a9_0000, Size: 0x4000},
 		fdt.Range{Base: 0x7_02a8_4000, Size: 0x4000})
 	b.PropStrings("reg-names", "core", "lpdptx", "axi2af", "usb2phy", "pipehandler")
+	for _, n := range []string{"axi2af", "common-a", "common-b", "lane0-usb", "lane1-usb", "lane0-dp", "lane1-dp"} {
+		b.PropU32("apple,tunable-"+n, 0x10, 0xff, 0x42, 0x14, 0x1, 0x1)
+	}
 	b.PropU32("#phy-cells", 1)
 	b.PropU32("power-domains", 1)
 	b.PropU32("phandle", 4)
@@ -115,6 +118,10 @@ func TestConfigFromFDT(t *testing.T) {
 	}
 	if len(c.Power) != 1 || c.Power[0].Addr != 0x2_8e08_02b0 {
 		t.Fatalf("power: %+v", c.Power)
+	}
+	if c.ATC != 0x7_0300_0000 || c.AXI2AF != 0x7_0000_0000 || c.Tunables == nil ||
+		len(c.Tunables.LaneDP[1]) != 2 || c.Tunables.CommonA[0] != (Tunable{0x10, 0xff, 0x42}) {
+		t.Fatalf("USB 3: atc %#x axi2af %#x tunables %+v", c.ATC, c.AXI2AF, c.Tunables)
 	}
 	if c.I2C != "i2c@39b040000" || c.HPM != 0x38 || c.Label != "USB-C Left Back" {
 		t.Fatalf("port controller: %s", c.Summary())

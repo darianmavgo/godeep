@@ -3,18 +3,28 @@
 package applem1
 
 import (
+	"time"
+
 	"errors"
 	"fmt"
 	"unsafe"
 
+	"godeep/drivers/apple/aic"
+	"godeep/drivers/apple/ans"
 	"godeep/drivers/apple/dwc3"
+	"godeep/drivers/apple/fpwm"
 	"godeep/drivers/apple/i2c"
 	"godeep/drivers/apple/pmgr"
+	"godeep/drivers/apple/smc"
 	"godeep/drivers/apple/spihid"
+	"godeep/drivers/apple/spmi"
 	"godeep/drivers/simplefb"
 	"godeep/drivers/usb/xhci"
 	"godeep/kernel/dev"
 	"godeep/kernel/fdt"
+	"godeep/kernel/irq"
+	"godeep/kernel/mmio"
+	"godeep/kernel/proc"
 )
 
 // framebuffer finds m1n1's "simple-framebuffer" (under /chosen).
@@ -135,9 +145,9 @@ func withNode(nodes []dev.Node, n dev.Node) []dev.Node {
 	return append(nodes, n)
 }
 
-// usbPorts configures the USB-C controllers (dwc3) and the I2C buses their
+// configureNodes configures the SSD (named nvme0), the USB-C controllers (dwc3) and the I2C buses their
 // port controllers are on, in place in nodes. Keyboards type into keys.
-func usbPorts(root *fdt.Node, nodes []dev.Node, keys chan<- byte) {
+func configureNodes(root *fdt.Node, nodes []dev.Node, keys chan<- byte) (extra []dev.Node) {
 	names := &xhci.Names{} // usbdisk<N>, usbnet<N>: shared by every port
 	byName := map[string]*fdt.Node{}
 	root.Walk(func(n *fdt.Node) { byName[n.Name] = n })
@@ -155,6 +165,23 @@ func usbPorts(root *fdt.Node, nodes []dev.Node, keys chan<- byte) {
 				continue
 			}
 			n.Config = i2c.Config{Power: doms}
+		case ans.Compatible:
+			n.Name = "nvme0" // like QEMU's NVMe disk: nvme0p1, nvme0p2 ...
+			if c, err := ans.ConfigFromFDT(fn); err != nil {
+				n.Config = err
+			} else {
+				n.Config = c
+			}
+		case smc.Compatible:
+			n.Name = "smc"
+			n.Config = smcConfig(fn)
+			if rc, err := rtcConfig(fn); err == nil {
+				extra = append(extra, dev.Node{Name: "rtc", Compatible: smc.RTCCompatible, Config: rc,
+					Needs: []string{"smc", rc.SPMI}})
+			}
+		case fpwm.Compatible:
+			n.Name = "kbdlight"
+			n.Config = fpwmConfig(fn)
 		case dwc3.Compatible:
 			c, err := dwc3.ConfigFromFDT(fn)
 			if err != nil {
@@ -168,4 +195,162 @@ func usbPorts(root *fdt.Node, nodes []dev.Node, keys chan<- byte) {
 			n.Config = c
 		}
 	}
+	return extra
+}
+
+// bootEntropy mixes /chosen's rng-seed and kaslr-seed into the DRBG and
+// wipes them from the tree, and says how many bytes it found.
+func bootEntropy(root *fdt.Node) string {
+	ch := root.Find("/chosen")
+	n := 0
+	if ch != nil {
+		for _, p := range []string{"rng-seed", "kaslr-seed"} {
+			if b := ch.Props[p]; len(b) > 0 {
+				mixSeed(b)
+				n += len(b)
+				clear(b)
+			}
+		}
+	}
+	if n < 32 {
+		return fmt.Sprintf("WARNING: only %d bytes of boot entropy in /chosen: crypto/rand is predictable", n)
+	}
+	return fmt.Sprintf("entropy: %d bytes from /chosen seeds", n)
+}
+
+// smcConfig resolves the SMC node: "smc" (ASC CPU control), "sram", and
+// its mailbox.
+func smcConfig(n *fdt.Node) any {
+	var c smc.Config
+	reg := n.Reg()
+	for i, name := range n.Strings("reg-names") {
+		if i < len(reg) {
+			switch name {
+			case "smc":
+				c.CPU = reg[i].Base
+			case "sram":
+				c.SRAM, c.SRAMSize = reg[i].Base, reg[i].Size
+			}
+		}
+	}
+	mb, err := n.Refs("mboxes", "#mbox-cells")
+	if err != nil || len(mb) == 0 || len(mb[0].Node.Reg()) == 0 || c.CPU == 0 || c.SRAM == 0 {
+		return fmt.Errorf("smc: incomplete node %s (%v)", n.Path, err)
+	}
+	c.Mailbox = mb[0].Node.Reg()[0].Base
+	c.MailboxIRQs, _ = aic.IRQs(mb[0].Node)
+	return c
+}
+
+// interrupts finds the AIC2, masks every line and enables it, and starts
+// the "irq" kernel thread that reads its event register every IRQPoll and
+// dispatches to the bridge. nil if the tree has no AIC.
+func interrupts(root *fdt.Node) (*irq.Bridge, string) {
+	var n *fdt.Node
+	root.Walk(func(x *fdt.Node) {
+		if n == nil && x.Compatible(aic.Compatible) {
+			n = x
+		}
+	})
+	if n == nil {
+		return nil, "no AIC in the device tree: drivers poll"
+	}
+	reg := n.Reg()
+	var core, event uint64
+	for i, name := range n.Strings("reg-names") {
+		if i < len(reg) {
+			switch name {
+			case "core":
+				core = reg[i].Base
+			case "event":
+				event = reg[i].Base
+			}
+		}
+	}
+	if core == 0 || event == 0 {
+		return nil, "AIC node lacks core/event registers: drivers poll"
+	}
+	a, err := aic.New(mmio.Window{Base: core}, mmio.Window{Base: event})
+	if err != nil {
+		return nil, err.Error() + ": drivers poll"
+	}
+	a.Init()
+	b := irq.NewBridge(a)
+	proc.Kthread("irq", func() {
+		for {
+			for {
+				kind, id := a.Event()
+				if kind == 0 {
+					break
+				}
+				if kind == aic.EventIRQ {
+					b.Dispatch(id)
+				}
+			}
+			time.Sleep(IRQPoll)
+		}
+	})
+	return b, fmt.Sprintf("AIC2: %d IRQs, %d dies, events polled every %v", a.NrIRQ, a.NrDie, IRQPoll)
+}
+
+// IRQPoll is how often the irq thread reads the AIC's event register.
+const IRQPoll = time.Millisecond
+
+// rtcConfig follows the SMC's rtc child to the PMIC cell holding the RTC
+// offset: nvmem-cells -> rtc-offset@1411 (reg: address, size) inside
+// pmic@f (reg: slave ID) on the SPMI bus.
+func rtcConfig(smcNode *fdt.Node) (smc.RTCConfig, error) {
+	var c smc.RTCConfig
+	var rtc *fdt.Node
+	for _, ch := range smcNode.Children {
+		if ch.Name == "rtc" {
+			rtc = ch
+		}
+	}
+	if rtc == nil {
+		return c, errors.New("rtc: no rtc under the SMC")
+	}
+	cells := rtc.U32s("nvmem-cells")
+	if len(cells) == 0 {
+		return c, errors.New("rtc: no nvmem-cells")
+	}
+	cell := rtc.ByPhandle(cells[0])
+	if cell == nil || len(cell.U32s("reg")) < 2 {
+		return c, errors.New("rtc: bad rtc-offset cell")
+	}
+	var pmic *fdt.Node
+	for p := cell.Parent; p != nil; p = p.Parent {
+		if p.Parent != nil && p.Parent.Compatible(spmi.Compatible) {
+			pmic = p
+			break
+		}
+	}
+	if pmic == nil || len(pmic.U32s("reg")) == 0 {
+		return c, errors.New("rtc: the cell is not on an SPMI PMIC")
+	}
+	c.SPMI, c.SID, c.Addr = pmic.Parent.Name, byte(pmic.U32s("reg")[0]), uint16(cell.U32s("reg")[0])
+	return c, nil
+}
+
+// fpwmConfig resolves the backlight PWM: its clock, power domains, and the
+// period the pwm-leds node asks for.
+func fpwmConfig(n *fdt.Node) any {
+	c := fpwm.Config{ClockHz: 24_000_000, Period: 40 * time.Microsecond}
+	if clk, err := n.Refs("clocks", "#clock-cells"); err == nil && len(clk) > 0 {
+		if f := clk[0].Node.U32s("clock-frequency"); len(f) == 1 {
+			c.ClockHz = uint64(f[0])
+		}
+	}
+	ph := n.Phandle()
+	n.Root().Walk(func(x *fdt.Node) {
+		if p := x.U32s("pwms"); len(p) >= 3 && p[0] == ph && p[2] > 0 {
+			c.Period = time.Duration(p[2])
+		}
+	})
+	doms, err := pmgr.FromFDT(n)
+	if err != nil {
+		return err
+	}
+	c.Power = doms
+	return c
 }

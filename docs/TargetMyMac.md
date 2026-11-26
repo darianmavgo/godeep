@@ -23,6 +23,7 @@ This doc covers everything about running godeep on the actual machine it's devel
   - [3.3 After the first native boot: keyboard, idle, watchdog, storage (built 2026-11-25, keyboard and trackpad confirmed on the Mac 2026-11-26)](#33-after-the-first-native-boot-keyboard-idle-watchdog-storage-built-2026-11-25-keyboard-and-trackpad-confirmed-on-the-mac-2026-11-26)
   - [3.4 The QEMU build-out, and what carries to the Mac (2026-11-26)](#34-the-qemu-build-out-and-what-carries-to-the-mac-2026-11-26)
   - [3.5 Drivers the Mac's device tree asks for (from `lsdev`, 2026-11-25/26)](#35-drivers-the-macs-device-tree-asks-for-from-lsdev-2026-11-2526)
+  - [3.6 Native drivers: built, and what to write next (2026-11-26)](#36-native-drivers-built-and-what-to-write-next-2026-11-26)
 - [4. TamaGo blockers specific to this Mac](#4-tamago-blockers-specific-to-this-mac)
 - [5. How godeep would boot on this Mac](#5-how-godeep-would-boot-on-this-mac)
 - [6. Carving out a godeep partition next to Macintosh HD and Omarchy](#6-carving-out-a-godeep-partition-next-to-macintosh-hd-and-omarchy) *(moved to [`PartitioningMac.md`](PartitioningMac.md))*
@@ -57,6 +58,7 @@ The serial number is deliberately left out of this file, since the repo may be s
 - **godeep now boots like a Linux kernel** (§3.1): a raw arm64 Image (`make image`), entry at **EL2** with a drop to EL1, and its device list read from the **device tree** the boot loader passes in `x0`. That's exactly what m1n1 does on this Mac, and it's tested in QEMU (`make qemu EL2=1`). Of the §4 blockers, two are done; the MMU patch and AIC2 remain.
 - **Status (2026-11-26): godeep is interactive on this Mac.** First boot 2026-11-25 (m1n1 → godeep, shell output on the built-in display, `screens/IMG_2341.JPG`). Second boot 2026-11-26 (`screens/IMG_2342.JPG`, §3.3): the **internal keyboard** types into the shell (SPI-HID, polled, so no interrupt controller needed), the **trackpad** is in multitouch mode, **WFE idle** sleeps instead of spinning, and the **watchdog** is armed and petted. `make native` tests, rehearses on QEMU and installs. On QEMU, godeep now reads disks: **PCIe → NVMe → GPT → FAT32/ext4**, the stack the Mac's SSD will use once its Apple-specific layer exists.
 - **Since then, on QEMU (2026-11-26, §3.4):** networking (virtio-net, gVisor TCP/IP, DHCP, DNS), SSH with SFTP/scp, WASM programs that run without a reboot, a RAM filesystem and a host share (9P), USB hubs and USB sticks, a kernel log and profiles, and a framebuffer console that responds to the mouse. All of it is in the Mac image too; most of it waits for **one Mac driver**: a network link (USB-C gadget Ethernet, M4) or the debug UART under m1n1's hypervisor.
+- **USB-C host mode and USB Ethernet are built for the Mac (2026-11-26, §3.6)**, waiting for the next boot: DART, I2C, the DWC3/CD321x glue, CDC NCM/ECM adapters, keyboards behind docks. §3.6 also lists what to write next.
 - **Drivers the Mac's own device tree asks for** (§3.5): the `lsdev` photos list what m1n1 describes that godeep doesn't drive yet. The nearest: the **Samsung UART** (`serial@39b200000`), the **SMC** (`smc@290400000`), **DWC3** USB (three controllers) with their **CD321x** port controllers, **SPMI**, and the keyboard-backlight **PWM**.
 - **Through QEMU (today's setup)**, godeep uses this Mac's CPU natively via HVF and reaches everything else through virtio. That remains the practical target.
 - **For bare metal, this Mac is well placed.** The Omarchy install means Asahi's **m1n1** bootloader is already set up. §6 shows how to add a separate **godeep** boot entry and data partition between Macintosh HD and Omarchy without touching either. The first milestone is "godeep prints its shell on the laptop screen" via the framebuffer the firmware already set up, which needs **no display driver at all**.
@@ -192,10 +194,10 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 | **Debug UART (Samsung)** | none | ✗ | **Next driver** (`serial@39b200000`, `apple,s5l-uart`, in the tree). Linux `samsung_tty.c`, m1n1 `uart.c`; ~100 lines. Natively it needs Apple debug-USB tooling or a second Apple Silicon Mac (`macvdmtool`); **under m1n1's hypervisor it's forwarded to the second computer as a USB serial port** (`Using2Computers.md` §6), which gives text console and even SSH (`SSHServer.md` §2.3) | XS |
 | Watchdog | `drivers/apple/wdt` | ◐ | Built from Linux `apple_wdt.c`; **armed and petted on the Mac** (2026-11-26), `reboot`. Left: confirm it stays up past 30 s | XS |
 | GPIO / pin control | `drivers/apple/gpio` | ◐ | Outputs, input levels, pin mux (Linux `pinctrl-apple-gpio.c`, U-Boot `pinctrl-apple.c`); no interrupts yet | S |
-| I²C | none on bare metal (`periph.io` drivers need a host OS) | ✗ | Linux `i2c-pasemi-*.c`. The **CD321x** USB-C port controllers hang off it (four in the tree, `usb-pd@38/3a/3b/3f`) | S |
+| I²C | **`drivers/apple/i2c`** (built 2026-11-26) | ◐ | Polled PA Semi controller, TI-style register reads only (what the **CD321x** USB-C port controllers need: `usb-pd@38/3a/3b/3f`). Keeps m1n1's clock setup. Not yet run on the Mac | — |
 | **SPMI** (PMIC bus) | none | ✗ | `spmi@2920a1300` (`apple,t6000-spmi`) in the tree. Linux `spmi-apple-controller.c`; the PMIC behind it holds boot flags (NVMEM) | S |
 | PMGR power gates | `drivers/apple/pmgr` | ◐ | Turning domains on, parents first, from `power-domains` (Linux `apple-pmgr-pwrstate.c`) | S |
-| **DART IOMMU** | **godeep `kernel/dma`**: allocator outside the Go heap (16 KB alignment, ownership, stats) + the `dma.IOMMU` interface drivers already call | ◐ | Only the DART page tables and registers are left: implement `Map`/`Unmap`. Reference: Linux `apple-dart.c`, m1n1 `dart.c` | S–M |
+| **DART IOMMU** | **`drivers/apple/dart`** (built 2026-11-26) + `kernel/dma` (`Buffer.Bus`, `Allocator.Translated`) | ◐ | t6000 DART only: the whole DMA region mapped linearly once at bus `0x10000000` (16 KB pages, TTBR 0), used by the USB controllers. No per-buffer `Map`/`Unmap`. Not yet run on the Mac | — |
 | **RTKit coprocessors** | **godeep `kernel/rtkit`**: handshake, endpoint discovery, power states, shared-buffer requests (via `kernel/dma`), crash detection, per-endpoint channels | ◐ | Left: the ASC mailbox hardware driver (implements `rtkit.Mailbox`), and checking the message encodings on real hardware. Reference: Linux `apple-mailbox.c`, `drivers/soc/apple/rtkit*.c`, m1n1 `rtkit.c` | S |
 | SMC (battery, sensors, lid, power button) | rides on `kernel/rtkit` | ✗ | The SMC protocol on top of an RTKit endpoint. Asahi `macsmc` | S–M |
 | **Keyboard / trackpad** (HID over SPI) | `drivers/apple/spi` + `drivers/apple/spihid` + `kernel/input` | ✅ | **Working on the Mac (2026-11-26)**, polled like U-Boot's `apple_spi_kbd.c` (no AIC needed): reads the ready line (nub GPIO 6), 121/121 packets CRC-ok. Keyboard: US layout, Ctrl, Caps Lock, repeat. Trackpad (after Asahi's `hid-magicmouse.c`): multitouch on, one finger moves the console pointer, two scroll, click. Left: interrupts (AIC2), other layouts | — |
@@ -204,7 +206,7 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 | PCIe root complex | `tamago/soc/intel/pci` is x86 port I/O, doesn't apply | ✗ | Linux `pcie-apple.c`. m1n1 can bring the links up before handing over | M |
 | SD reader (GL9755, SDHCI) | `tamago/soc/nxp/usdhc` (different controller, same SD protocol) | ◐ | Linux `sdhci-pci-gli.c`; reuse the SD command logic from usdhc | M |
 | **USB-C in device mode** (gadget) | CDC-ECM framing: `usbarmory/go-net/imx-usb` (written for NXP's controller) as reference | ◐ | Needs a Go DWC3 *device-mode* driver (Linux `dwc3`) that publishes a `netdev.NIC`. Everything above it is **built** (§3.4): `netd` runs the TCP/IP stack on the first NIC it finds, then DHCP, sshd, SFTP, WASM loading, 9P all work over the cable | M–L |
-| USB host (DWC3 xHCI) | `drivers/usb/xhci` + `drivers/usb` | ◐ | The xHCI host driver runs on QEMU (`make check-virt`): HID boot keyboards and mice, **hubs**, **USB sticks** (Bulk-Only + SCSI, read-only, published as `usbdisk<N>`). Three DWC3 controllers in the tree (`usb@702280000`, `b02280000`, `f02280000`). Left for the Mac: DWC3 host-mode setup, the Type-C PHY (ATC), the CD321x port controllers (I²C), and **transaction translators**: a keyboard or mouse behind a *high-speed* hub (any USB-C dock) needs the hub's TT in its slot context, which the driver doesn't set yet | L |
+| USB host (DWC3 xHCI) | **`drivers/apple/dwc3`** + `drivers/usb/xhci` + `drivers/usb` (built 2026-11-26) | ◐ | Per cable (CD321x status polled): USB2 PHY up in host mode, DWC3 reset into host mode, a fresh xHCI instance behind the DARTs, torn down on unplug. **USB 2 speed only** (pipehandler on the dummy PHY). xHCI: HID keyboards/mice, hubs with **transaction translators** (docks), USB sticks, Ethernet adapters (CDC **NCM** and ECM). Not yet run on the Mac. Left: SuperSpeed (full ATC PHY), device mode | M (USB 3) |
 | USB-C PD controller (CD3217) | none | ✗ | Linux `tipd` driver; needed to switch port roles and modes | M |
 | Thunderbolt / USB4 | none | ✗ | Asahi work in progress | XL |
 | **Wi-Fi** (BCM4387) | none | ✗ | Linux `brcmfmac` plus the firmware blobs the Asahi installer copies from macOS | XL |
@@ -389,8 +391,8 @@ Progress is logged in `TargetMyMacProgress.log` (append-only). Both native boots
 | `serial@39b200000` | `apple,s5l-uart` | Samsung debug UART | **next** (§2): console over m1n1's hypervisor |
 | `smc@290400000` | `apple,t6000-smc` | System Management Controller (RTKit) | M3: power-off, power button, lid, battery, RTC |
 | `sart@393c50000` | `apple,t6000-sart` | the SSD's address filter | M5, with ANS2 |
-| `usb@702280000`, `usb@b02280000`, `usb@f02280000` | `apple,t6000-dwc3` | the USB-C controllers (host and device) | M4 (device mode, network) and host mode (xHCI above it is built) |
-| `usb-pd@38`, `@3a`, `@3b`, `@3f` | `apple,cd321x` | USB-C power-delivery/port controllers (on I²C) | with DWC3: role switching |
+| `usb@702280000`, `usb@b02280000`, `usb@f02280000` | `apple,t6000-dwc3` | the USB-C controllers (host and device) | **host mode built** (`drivers/apple/dwc3`, USB 2, §3.6); device mode later |
+| `usb-pd@38`, `@3a`, `@3b`, `@3f` | `apple,cd321x` | USB-C power-delivery/port controllers (on I²C) | plug state read by `drivers/apple/dwc3` over `drivers/apple/i2c` (built); no PD/role commands |
 | `spmi@2920a1300` | `apple,t6000-spmi` | bus to the PMIC | S; boot flags, maybe the RTC |
 | `sio@39bc00000`, `sio-firmware-data@…` | `apple,t6000-sio`, `apple,asc-mem` | DMA coprocessor for audio and DisplayPort | M6 |
 | `spi@39b104000`, `spi@39b10c000` | `apple,t6000-spi` | other SPI buses (the keyboard's is driven through `hid-transport@0`) | as needed |
@@ -399,7 +401,51 @@ Progress is logged in `TargetMyMacProgress.log` (append-only). Both native boots
 | `power-controller@…` (dozens), `power-management@…` | `apple,t6000-pmgr-pwrstate`, `-pmgr`, `-pmgr-misc` | power domains | driven as a library (`drivers/apple/pmgr`) by the drivers that need them; no standalone driver planned |
 | `region@…`, `report@…` | `apple,asc-mem`, `apple,t6000-pap-v2-report-entry` | coprocessor memory regions, PAP report entries | consumed by their coprocessor drivers; no driver of their own |
 
-Learned on QEMU and needed for the Mac too: **transaction translators** for low/full-speed devices behind high-speed hubs (any USB-C dock), **real entropy** (the `/chosen` seed), and **DHCP lease renewal** for long sessions over the cable.
+Learned on QEMU and needed for the Mac too: **real entropy** (the `/chosen` seed). Transaction translators and DHCP lease renewal are done.
+
+### 3.6 Native drivers: built, and what to write next (2026-11-26)
+
+Scope: this Mac only (t6000, J316sAP, the Asahi device tree m1n1 hands over), developed on the Mac itself with `make native`: no second computer. Class drivers over vendor ports; no fallbacks for other SoCs or older trees.
+
+**Built for the Mac** (every one host-tested; ✅ = confirmed on the Mac, ◐ = built, waiting for a boot):
+
+| Driver | Compatible / node | What it does | On the Mac |
+|---|---|---|---|
+| `board/applem1` | the board | EL2 entry, 1 TB MMU (DMA region Normal non-cacheable since 2026-11-26), framebuffer console, FDT devices, autorun | ✅ |
+| `drivers/simplefb` | `simple-framebuffer` | text console, history, mouse pointer/scroll/select/paste | ✅ |
+| `drivers/apple/wdt` | `apple,t6000-wdt` | watchdog (30 s) and `reboot` | ✅ |
+| `drivers/apple/pmgr` | `apple,pmgr-pwrstate` | power domains on (library) | ✅ |
+| `drivers/apple/gpio` | `apple,pinctrl` | pins and pinmux (library) | ✅ |
+| `drivers/apple/spi` | `apple,t6000-spi` | SPI controller, polled | ✅ |
+| `drivers/apple/spihid` | `apple,spi-hid-transport` | internal keyboard and trackpad (multitouch) | ✅ |
+| `drivers/apple/dart` | `apple,t6000-dart` | IOMMU: DMA region mapped linearly for the USB controllers | ◐ |
+| `drivers/apple/i2c` | `apple,t6000-i2c` | polled I2C, register reads | ◐ |
+| `drivers/apple/dwc3` | `apple,t6000-dwc3` (+ `apple,cd321x`, the ATC PHY's USB 2 half) | USB-C ports in USB 2 host mode, one xHCI instance per cable | ◐ |
+| `drivers/usb/xhci` | (under dwc3) | keyboards, mice, hubs + TTs, USB sticks (`usbdisk<N>`), Ethernet adapters CDC NCM/ECM (`usbnet<N>`) | ◐ |
+| `kernel/net.go` (`netd`) | — | waits for a USB Ethernet adapter as long as it takes (`Board.NetWait`), then DHCP, sshd, SFTP, 9P | ◐ |
+
+**First check on the next boot:** plug a USB-C Ethernet adapter (any CDC NCM/ECM one, e.g. RTL8153) and a USB keyboard into a USB-C port; the autorun's `lsdev usb` shows each port's state, its port-controller status and any DART fault; then `ifconfig`, and `ssh` in from another machine on the LAN.
+
+**Built next (2026-11-26, same day; host-tested against device models, the Mac image boots under `make check-applem1`; not yet run on the Mac):**
+
+| Driver | Compatible / node | What it does | QEMU rehearsal |
+|---|---|---|---|
+| `board/applem1/rng.go` | `/chosen` `rng-seed`, `kaslr-seed` | mixes m1n1's iBoot entropy into the DRBG at boot, wipes the seeds | fakem1n1 passes a seed; check expects "entropy: 72 bytes" |
+| `drivers/apple/asc` (+ `asctest`) | ASC CPU control + mailbox | RTKit transport, polled or on the recv-not-empty interrupt; `SendNow` for power-off | — |
+| `kernel/rtkit` (fixed) | — | Linux's boot handshake (wait IOP on, then AP power on), `Wake`, `Shutdown`, OSLog buffer layout | — |
+| `drivers/apple/sart` | `apple,t6000-sart` (v3) | allows the DMA region for the SSD firmware, keeps iBoot's entries | — |
+| `drivers/apple/ans` | `apple,t6000-nvme-ans2` → `nvme0` | internal SSD: RTKit boot, linear SQ + NVMMU TCBs, identify, reads with PRP lists. **Read-only** | placeholder node fails cleanly |
+| `drivers/apple/smc` | `apple,t6000-smc` → `smc` | keys over RTKit; `halt` powers off (MBSE=off1); battery, charger, lid in lsdev | placeholder node fails cleanly |
+| `drivers/apple/spmi` | `apple,t6000-spmi` | PMIC NVMEM reads | — |
+| RTC (`smc.RTCDriver`) | `rtc` (SMC `CLKM` + PMIC offset @0x1411) | wall time for `date` and TLS (`get https`); the system clock still counts from boot | — |
+| `drivers/apple/aic` | `apple,t6000-aic` | AIC2: mask all, enable, `irq.Controller`; the `irq` thread polls the event register every 1 ms (no IRQ exceptions yet) | fake AIC2: "AIC2: 64 IRQs, 1 dies" |
+| `drivers/apple/dwc3/atc.go` | ATC PHY (`apple,tunable-*` from m1n1) | USB 3 (5 Gb/s) per cable: tunables, lanes by plug orientation, pipehandler BIST; falls back to USB 2 | — |
+| `drivers/apple/dwc3/gadget.go` | (per port) → `usbgadget-usb@…` | device mode: the Mac as a CDC ECM Ethernet adapter when another computer is the host | — |
+| `drivers/apple/fpwm` | `apple,t6000-fpwm` → `kbdlight` | keyboard backlight; shell `kbdlight [0-100]` | fake page: "keyboard backlight 0%" |
+
+The autorun's last line is now `lsdev idle watchdog hid usb nvme smc rtc kbdlight`: one photo of the next boot covers everything above.
+
+**Still open:** taking real IRQ exceptions (AIC2 is polled), the power button (SMC notifications are only counted), SSD writes (limited to `GODEEPDATA`, after reads are confirmed), USB 3 hubs on the SuperSpeed side, NCM in device mode (Windows hosts), the PCIe root complex (SD reader, then Wi-Fi), Wi-Fi itself (BCM4387 firmware + driver: months), audio, GPU.
 
 ---
 
@@ -528,7 +574,7 @@ These keep native drivers testable on the host and shareable between boards:
 | Addition | Purpose |
 |---|---|
 | ✅ `kernel/mmio`: a `Regs` interface (`Read32`/`Write32` at an offset) with a real implementation (single atomic 32-bit accesses) and a **recording fake** that can assert or replay traces | rung 2; enforces the "no read-modify-write of W1S/W1C registers" lesson in one place. *Built.* |
-| ◐ `drivers/<vendor>/<device>`: driver code as ordinary Go packages, no build tags | host tests run on every driver; boards only wire them up. *Built: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/{mmio,net,rng,p9}`, `drivers/qemu/fwcfg`, `drivers/pci`, `drivers/nvme`, `drivers/usb/xhci` (with hubs and mass storage), `drivers/simplefb`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`. Next: `drivers/apple/{uart,asc,smc,dart,aic,ans,sart,dwc3}` (§3.5)* |
+| ◐ `drivers/<vendor>/<device>`: driver code as ordinary Go packages, no build tags | host tests run on every driver; boards only wire them up. *Built: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/{mmio,net,rng,p9}`, `drivers/qemu/fwcfg`, `drivers/pci`, `drivers/nvme`, `drivers/usb/xhci` (hubs + TTs, mass storage, CDC ECM/NCM Ethernet), `drivers/simplefb`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid,dart,i2c,dwc3}`. Next: §3.6* |
 | ✅ `board/applem1`: build-tagged `tamago && arm64 && applem1`; device list from the **FDT** m1n1 builds from the ADT (via `kernel/fdt`); registers the Apple drivers | the third board, next to `board/virt` |
 | ◐ Service interfaces as needed: ✅ `block.Device` (`kernel/block`), ✅ `dev.Rebooter`, ✅ `netdev.NIC` (`kernel/netdev`), ✅ `input.Source`, ✅ `vfs.Named` (volumes); later `dev.Framebuffer`. (The keyboard feeds the console's byte channel too.) | consumers (filesystems, netstack, shell) never depend on a specific driver |
 | `make test` stays host-only; `make qemu` (✅ Image + device tree) and `make qemu EL2=1` (✅ m1n1-style entry) run the rung-3 checks; a `make m1-guest` target wraps m1n1's `run_guest.py` | one command per rung |
@@ -620,7 +666,7 @@ Work here requires real Apple Silicon (`t6000` / `J316sAP`) because QEMU cannot 
 | **N3: Samsung debug UART & tethered two-machine loop** *(Size: XS–S)* | ⬜ next | Tethered native (m1n1 HV) → Native install | `drivers/apple/uart` (`apple,s5l-uart`, `serial@39b200000`) wired into `board/applem1/early.go`, plus `Using2Computers.md` §9 workflow (`make m1-load`, `make m1-guest`, `tools/m1n1boot -extract-dtb`, `godeep.faultreboot`). Enables live text console on `/dev/ttyACM1` and **SSH-over-UART** (`SSHServer.md` §2.3) before USB networking exists | New: `drivers/apple/uart` (~100 lines) + Makefile/tool targets | Console text and interactive shell work over `/dev/ttyACM1` under `run_guest.py`; `ssh godeep-serial lsdev` succeeds |
 | **N4: Apple AIC2 interrupt controller** *(M2 completion; Size: S–M)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/aic` implementing `irq.Controller` + ack loop, FDT interrupt-cell mapping, and EL1 timer FIQ routing under m1n1. Replaces 5 ms SPI polling and upgrades WFE event-stream idle to deadline-driven WFI | Existing: `kernel/irq`. New: `drivers/apple/aic` + HV MMIO trace fixtures | `irqstat` counts real keyboard/timer IRQs with no storms; `irqlat` measured on silicon; idle wake-ups drop sharply |
 | **N5: Coprocessors, DART IOMMU, & SMC** *(M3; Size: M)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/asc` (`rtkit.Mailbox`), `drivers/apple/dart` (`dma.IOMMU`, 16 KB pages), hardware verification of `kernel/rtkit` wire encodings, and `drivers/apple/smc` (clean `halt` power-off, power button, lid, battery, sensors, RTC) | Existing: `kernel/rtkit`, `kernel/dma`. New: `drivers/apple/{asc,dart,smc}` + HV trace fixtures | `halt` cleanly powers off the Mac; `lsdev smc` reports battery/sensors; RTKit encodings verified against real firmware |
-| **N6: Native USB-C networking & USB host** *(M4; Size: M–L)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/dwc3` device mode + CDC-ECM (`netdev.NIC`) for high-speed IP/SSH/SFTP/9P/WASM over USB-C; `drivers/apple/i2c` + `apple,cd321x` PD controllers + ATC PHY for role switching and host mode; xHCI **transaction translators** tested on a real USB-C dock | Existing (Q3): `net/netstack`, `netd`, `programs/sshd`, `fs/ninep`, `drivers/usb/xhci`. New: `drivers/apple/{i2c,cd321x,atcphy,dwc3}` + xHCI TT | Standalone `make native` Mac gets IP over USB-C cable (`ssh`, `scp`, `mount9p` work without hypervisor); USB stick & keyboard work behind a USB-C dock |
+| **N6: Native USB-C networking & USB host** *(M4; Size: M–L)* | ◐ host mode built (2026-11-26, §3.6) | Tethered native (m1n1 HV) → Native install | `drivers/apple/dwc3` device mode + CDC-ECM (`netdev.NIC`) for high-speed IP/SSH/SFTP/9P/WASM over USB-C; `drivers/apple/i2c` + `apple,cd321x` PD controllers + ATC PHY for role switching and host mode; xHCI **transaction translators** tested on a real USB-C dock | Existing (Q3): `net/netstack`, `netd`, `programs/sshd`, `fs/ninep`, `drivers/usb/xhci`. New: `drivers/apple/{i2c,cd321x,atcphy,dwc3}` + xHCI TT | Standalone `make native` Mac gets IP over USB-C cable (`ssh`, `scp`, `mount9p` work without hypervisor); USB stick & keyboard work behind a USB-C dock |
 | **N7: Native SSD storage (ANS2 + SART)** *(M5; Size: M)* | ⬜ planned | Tethered native (m1n1 HV) → Native install | `drivers/apple/sart` (`sart@393c50000`) + `drivers/apple/ans` (ANS2 linear submission / NVMMU / TCBs over RTKit) feeding the QEMU-tested NVMe/block/filesystem stack. **Safety gate:** read-only first after HV trace review; writes restricted strictly to `GODEEPDATA` (never APFS) | Existing (Q2, N5): `drivers/nvme` command layer, `kernel/block`, `fs/fat` (rw), `fs/ext4` (ro), `kernel/rtkit`. New: `drivers/apple/{sart,ans}` | `lsblk` lists the Mac's NVMe partitions; `cat` reads Omarchy ext4; writes to `GODEEPDATA` pass `fsck.fat` under macOS |
 | **N8: Native stretch goals** *(M6; Size: L–XL)* | ⬜ optional | Tethered native (m1n1 HV) → Native install | Apple PMGR `cpu-start` wired into Q8's SMP groundwork (10 cores), `apple,t6000-spmi`, keyboard backlight PWM (`apple,t6000-fpwm`, XS), Apple PCIe root complex + GL9755 SD reader (reusing Q7's `sdhci`), SIO/audio, BCM4387 Wi-Fi | Existing (Q7, Q8): `sdhci`, SMP runtime. New: Apple-specific drivers per block | Pick selectively; stop before Wi-Fi/AGX GPU unless explicitly desired |
 
@@ -630,7 +676,7 @@ Work here requires real Apple Silicon (`t6000` / `J316sAP`) because QEMU cannot 
 
 1. **Finish N2's single-Mac checks** (steady-state idle, watchdog >30 s, trackpad console pointer/scrollback, `/chosen` entropy seed) — zero extra hardware needed, validates everything already in `bin/godeep-applem1.img`.
 2. **Do Q6 (`ipc`, pipes, capability scoping, `klog` persistence) in QEMU** whenever you are on one machine — fast loop, pays off immediately on both QEMU and the Mac (Q5 is done).
-3. **Bring up the two-machine loop with N3 (`drivers/apple/uart`)** as soon as the Windows/WSL2 host (`Using2Computers.md`, `tools/setup-windows.ps1`) is cabled to the Mac — text console and SSH-over-UART eliminate screen photos for every Apple driver after it.
+3. **Single-Mac loop instead of N3:** no Windows host. Once USB Ethernet works on the Mac (§3.6), SSH over the LAN replaces screen photos; N3's UART is dropped. Follow §3.6's "write next" order.
 4. **Climb the Apple silicon stack in dependency order: N5 (ASC/DART/RTKit/SMC) → N6 (DWC3 USB-C gadget networking) or N7 (ANS2+SART SSD)**, with **N4 (AIC2 interrupts)** whenever polling overhead or WFI sleep matters. Save every hypervisor MMIO log from N3–N7 as a rung-2 `mmio.Fake` fixture so `make test` locks in hardware behavior permanently.
 5. **Tackle Q7 (`sdhci`, `virtio-gpu`) and Q8 (ARM64 SMP on QEMU `-smp 4`)** in QEMU whenever you want big portable leaps before hooking them into N8 on the Mac.
 

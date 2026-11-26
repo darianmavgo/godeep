@@ -95,3 +95,33 @@ func TestShutdownStopsEverything(t *testing.T) {
 		t.Fatalf("unclean shutdown:\n%s", s)
 	}
 }
+
+// halt in the shell shuts down cleanly: processes stop, then PowerOff.
+func TestHaltIsClean(t *testing.T) {
+	in := make(chan byte, 64)
+	for _, b := range []byte("workers 2 &\nhalt\n") {
+		in <- b
+	}
+	out := &syncBuf{}
+	powered := make(chan struct{})
+	done := make(chan error)
+	go func() {
+		done <- Boot(context.Background(), Board{Console: Console{In: in, Out: out}, PowerOff: func() { close(powered) }})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("halt did not shut down:\n%s", out)
+	}
+	select {
+	case <-powered:
+	default:
+		t.Fatal("PowerOff not called")
+	}
+	if s := out.String(); !strings.Contains(s, "halted") || strings.Contains(s, "did not exit") {
+		t.Fatalf("unclean halt:\n%s", s)
+	}
+}

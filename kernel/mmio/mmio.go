@@ -25,6 +25,14 @@ type ByteRegs interface {
 	Read8(off uint64) uint8
 }
 
+// Regs64 is a register window that also allows single 64-bit accesses
+// (Window and Fake do).
+type Regs64 interface {
+	Regs
+	Read64(off uint64) uint64
+	Write64(off uint64, v uint64)
+}
+
 // Modify is a read-modify-write for ordinary read/write registers only.
 //
 // Never use it on write-1-to-set / write-1-to-clear registers (interrupt
@@ -90,6 +98,20 @@ func (f *Fake) Write32(off uint64, v uint32) {
 // Read8 reads one byte of the 32-bit register that holds off.
 func (f *Fake) Read8(off uint64) uint8 {
 	return uint8(f.Read32(off&^3) >> (8 * (off & 3)))
+}
+
+// Read64 reads two 32-bit registers, low word first (each logged; OnRead
+// sees both).
+func (f *Fake) Read64(off uint64) uint64 {
+	lo := f.Read32(off)
+	return uint64(lo) | uint64(f.Read32(off+4))<<32
+}
+
+// Write64 writes the low word, then the high word: a model triggers on
+// the high word's write.
+func (f *Fake) Write64(off uint64, v uint64) {
+	f.Write32(off, uint32(v))
+	f.Write32(off+4, uint32(v>>32))
 }
 
 // Set stores a register value without logging (device-side state).

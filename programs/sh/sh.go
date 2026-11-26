@@ -38,6 +38,9 @@ type Env struct {
 	FS    *vfs.NS        // volumes: ram, disks and partitions
 	Log   *klog.Log      // the kernel log (dmesg); nil: none
 	WASM  *wasm.Cache    // optional compiled-module cache for WASI programs
+	// Halt asks the kernel for a clean shutdown: every process (drivers
+	// included) stops, then the board powers off. nil: halt exits at once.
+	Halt func()
 }
 
 type builtin struct {
@@ -47,6 +50,17 @@ type builtin struct {
 
 var builtins map[string]builtin
 
+// halt shuts down cleanly when the kernel offers it: drivers finish (the
+// Mac's SSD shuts its firmware down) before the board cuts power.
+func halt(ctx context.Context, env Env, _ *proc.Proc, _ []string) error {
+	if env.Halt == nil {
+		os.Exit(0)
+	}
+	env.Halt()
+	<-ctx.Done() // the shutdown kills this shell too
+	return ctx.Err()
+}
+
 func init() {
 	builtins = map[string]builtin{
 		"help":     {"list commands", help},
@@ -54,7 +68,7 @@ func init() {
 		"kill":     {"kill PID...: cancel processes", kill},
 		"uptime":   {"time since boot", uptime},
 		"mem":      {"memory and scheduler stats", mem},
-		"halt":     {"power off", func(context.Context, Env, *proc.Proc, []string) error { os.Exit(0); return nil }},
+		"halt":     {"power off (stops every process and driver first)", halt},
 		"reboot":   {"reset the machine (needs a reboot device, e.g. a watchdog)", reboot},
 		"exit":     {"exit this shell (init starts a new one)", nil},
 		"lsdev":    {"lsdev [NAME...]: devices (or those whose name starts with NAME), drivers, state", lsdev},
@@ -62,6 +76,7 @@ func init() {
 		"irqlat":   {"irqlat [N]: measure interrupt-to-goroutine latency", irqlat},
 		"dmastat":  {"DMA memory usage", dmastat},
 		"date":     {"wall-clock time", date},
+		"kbdlight": {"kbdlight [0-100]: show or set the keyboard backlight", kbdlight},
 		"lsblk":    {"disks, partitions and their filesystems", lsblk},
 		"evtest":   {"evtest [SECONDS]: input devices and their events (^C stops)", evtest},
 		"ls":       {"ls VOLUME:PATH: list a directory (e.g. ls nvme0p1:/, ls ram:/)", ls},
@@ -175,7 +190,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")

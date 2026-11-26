@@ -172,5 +172,6 @@ In QEMU: `^C` goes to godeep (kills foreground program); quit QEMU with `Ctrl-A`
 - `docs/Using2Computers.md`: Tethered two-machine workflow (Windows/WSL2 dev host + Mac target via m1n1 proxy/hypervisor).
 - `docs/SSHServer.md`: `sshd`, networking, SFTP, WASM loading, and serial-SSH bridge design.
 - `docs/ReUsingGVisor.md`: Analysis of gVisor reuse (netstack vs. Sentry) and capability-oriented syscall equivalents.
+- `docs/XNUPort.md`: Assessment of porting Apple's open-source XNU kernel to Go vs. godeep's Go-native architecture.
 - `docs/GoGpuSupport.md`: Display and GPU/compute roadmap (`ramfb`, `virtio-gpu`, SIMD, host offload).
 - `third_party/tamago/GODEEP_PATCHES.md`: Rationale for the 3 vendored TamaGo patches.

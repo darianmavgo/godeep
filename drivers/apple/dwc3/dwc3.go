@@ -93,6 +93,7 @@ const (
 	hpmStatus      = 0x1a
 	hpmPlugPresent = 1 << 0
 	hpmDataRoleDFP = 1 << 6 // we are the host
+	hpmUpsideDown  = 1 << 4
 	HPMPoll        = 250 * time.Millisecond
 )
 
@@ -117,6 +118,10 @@ type Config struct {
 	HPM         byte   // the port controller's I2C address
 	Keys        chan<- byte
 	Names       *xhci.Names // shared by every port
+	// USB 3: the Type-C PHY's "core" and "axi2af" windows and m1n1's
+	// tunables. Without tunables the port runs USB 2 only.
+	ATC, AXI2AF uint64
+	Tunables    *Tunables
 }
 
 // Driver returns the DWC3 driver; regs maps register windows.
@@ -237,10 +242,21 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 		}
 	}
 	p := &port{core: regs(c.Core), phy: regs(c.USB2PHY), pipe: regs(c.Pipehandler)}
+	var phy3 *atc
+	if c.Tunables != nil && c.ATC != 0 && c.AXI2AF != 0 {
+		phy3 = &atc{core: regs(c.ATC), axi2af: regs(c.AXI2AF), pipe: p.pipe, t: c.Tunables}
+	}
 	p.resetAssert()
 	d.Ready(svc)
+	// The gadget NIC is published the first time another computer is the
+	// host, so netd doesn't pick an idle one over an Ethernet adapter.
+	gadget := newGadget(d.Name)
+	published := false
 
-	// plugged reports whether a cable is in with us as the host.
+	// plugged reports whether a cable is in with us as the host, or (device)
+	// with another computer as the host; flipped says the plug is upside
+	// down (the SuperSpeed lanes swap).
+	flipped, device := false, false
 	plugged := func() (bool, error) {
 		if bus == nil {
 			return true, nil
@@ -256,10 +272,12 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 		case st&hpmPlugPresent != 0 && st&hpmDataRoleDFP != 0:
 			desc = "cable in, host"
 		case st&hpmPlugPresent != 0:
-			desc = "cable in, device role (not supported yet)"
+			desc = "cable in, device (another computer is the host)"
 		}
+		flipped = st&hpmUpsideDown != 0
+		device = st&hpmPlugPresent != 0 && st&hpmDataRoleDFP == 0
 		svc.set(func(s *Service) { s.hpm = fmt.Sprintf("%s (status %#x)", desc, st) })
-		return st&hpmPlugPresent != 0 && st&hpmDataRoleDFP != 0, nil
+		return st&hpmPlugPresent != 0, nil
 	}
 	fault := func() {
 		for _, r := range darts {
@@ -290,12 +308,59 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 				}
 			}
 		})
-		err := p.up(cctx)
+		if device {
+			if !published { // one per port: usbgadget-usb@702280000
+				d.Replace(dev.Node{Name: "usbgadget-" + d.Name, Compatible: GadgetCompatible, Config: gadget})
+				published = true
+			}
+			err := p.up(cctx, false)
+			if err == nil {
+				svc.set(func(s *Service) { s.state, s.hc = "device: USB Ethernet (CDC ECM)", nil })
+				err = runGadget(cctx, p.core, alloc, gadget)
+			}
+			cancel()
+			p.resetAssert()
+			fault()
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err != nil {
+				svc.set(func(s *Service) { s.state = "device mode failed: " + err.Error() })
+				for sleep(ctx, HPMPoll) == nil {
+					if ok, _ := plugged(); !ok {
+						break
+					}
+				}
+			}
+			continue
+		}
+		mode := "host, USB 2"
+		usb3 := false
+		if phy3 != nil {
+			if err := phy3.powerOn(flipped); err != nil {
+				mode = "host, USB 2 (" + err.Error() + ")"
+				phy3.powerOff()
+			} else {
+				usb3 = true
+			}
+		}
+		err := p.up(cctx, true)
+		if err == nil && usb3 {
+			if err3 := phy3.pipeUSB3Host(); err3 != nil {
+				mode = "host, USB 2 (" + err3.Error() + ")"
+				phy3.pipeDummy()
+			} else {
+				mode = "host, USB 3 (5 Gb/s)"
+				if flipped {
+					mode += ", plug flipped"
+				}
+			}
+		}
 		if err == nil {
 			err = xhci.Run(cctx, d, xhci.Config{Regs: p.core, DMA: alloc, Keys: c.Keys, Names: c.Names,
 				Ready: func(hc *xhci.Service) {
 					svc.set(func(s *Service) {
-						s.state, s.hc = "host, USB 2", hc
+						s.state, s.hc = mode, hc
 						if s.layout != nil {
 							hc.SetLayout(s.layout)
 						}
@@ -303,7 +368,13 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 				}})
 		}
 		cancel()
+		if usb3 {
+			phy3.pipeDummy()
+		}
 		p.resetAssert()
+		if usb3 {
+			phy3.powerOff()
+		}
 		fault()
 		if ctx.Err() != nil {
 			return nil
@@ -321,6 +392,18 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs, c Conf
 			}
 		}
 	}
+}
+
+// newGadget makes the port's device-mode NIC, with a locally administered
+// MAC derived from the port's name.
+func newGadget(name string) *Gadget {
+	g := &Gadget{rx: make(chan []byte, 128), tx: make(chan []byte, 64), down: make(chan struct{})}
+	h := uint32(2166136261)
+	for i := 0; i < len(name); i++ {
+		h = (h ^ uint32(name[i])) * 16777619
+	}
+	g.mac = [6]byte{0x02, 0x60, 0x0d, byte(h >> 16), byte(h >> 8), byte(h)&^1 | 0}
+	return g
 }
 
 // resetAssert holds the core in reset and powers the USB 2 PHY down
@@ -347,7 +430,7 @@ func (p *port) resetAssert() {
 // up powers the USB 2 PHY in host mode, releases the core and sets it up
 // as a host (Linux: atcphy_usb2_power_on, phy_set_mode, reset deassert,
 // dwc3_core_init, dwc3_apple_setup_cio, PRTCAP host, SUSPHY).
-func (p *port) up(ctx context.Context) error {
+func (p *port) up(ctx context.Context, host bool) error {
 	mmio.Modify(p.phy, USB2PHY_SIG, 0, SIG_VBUS_FORCE)
 	udelay()
 	mmio.Modify(p.phy, USB2PHY_CTL, CTL_SIDDQ, 0)
@@ -360,7 +443,11 @@ func (p *port) up(ctx context.Context) error {
 	udelay()
 	mmio.Modify(p.phy, USB2PHY_MISCTUNE, MISCTUNE_GATES, 0)
 	p.phy.Write32(USB2PHY_USBCTL, USBCTL_RUN)
-	mmio.Modify(p.phy, USB2PHY_SIG, 0, SIG_HOST)
+	if host {
+		mmio.Modify(p.phy, USB2PHY_SIG, 0, SIG_HOST)
+	} else {
+		mmio.Modify(p.phy, USB2PHY_SIG, SIG_HOST, 0)
+	}
 
 	mmio.Modify(p.pipe, PIPE_AON_GEN, PIPE_DWC3_CLAMP_EN, 0)
 	mmio.Modify(p.pipe, PIPE_AON_GEN, 0, PIPE_DWC3_RESET_N)
@@ -385,7 +472,11 @@ func (p *port) up(ctx context.Context) error {
 	if err := sleep(ctx, 20*time.Millisecond); err != nil {
 		return err
 	}
-	mmio.Modify(r, GCTL, GCTL_SCALEDOWN_MASK|GCTL_DISSCRAMBLE|GCTL_PRTCAPDIR_MASK, GCTL_PRTCAP_HOST)
+	prtcap := uint32(GCTL_PRTCAP_HOST)
+	if !host {
+		prtcap = GCTL_DEVICE
+	}
+	mmio.Modify(r, GCTL, GCTL_SCALEDOWN_MASK|GCTL_DISSCRAMBLE|GCTL_PRTCAPDIR_MASK, prtcap)
 
 	r.Write32(CIO_LFPS_OFFSET, 0xf800f80)
 	r.Write32(CIO_BW_NGT_OFFSET, 0xfc00fc0)

@@ -4,6 +4,7 @@ package applem1
 
 import (
 	"crypto/aes"
+	"crypto/sha256"
 	"encoding/binary"
 	"sync"
 	_ "unsafe"
@@ -14,9 +15,10 @@ import (
 // following tamago/internal/rng (which can't be imported from outside
 // TamaGo).
 //
-// WARNING: the seed is the boot-time counter value, which is NOT secure
-// entropy. Fine for a dev kernel; replace with virtio-rng before trusting
-// crypto/rand.
+// The first seed is the boot-time counter value, which is NOT secure
+// entropy; NewBoard then mixes in the seeds m1n1 puts in /chosen (rng-seed
+// and kaslr-seed, from iBoot's random-seed), before any driver or sshd
+// asks crypto/rand for keys.
 var drbg struct {
 	sync.Mutex
 	seed [32]byte
@@ -60,4 +62,14 @@ func getRandomData(b []byte) {
 		c.Encrypt(block[:], block[:])
 		copy(b, block[:])
 	}
+}
+
+// mixSeed folds entropy into the DRBG: seed = SHA-256(seed || b).
+func mixSeed(b []byte) {
+	drbg.Lock()
+	h := sha256.New()
+	h.Write(drbg.seed[:])
+	h.Write(b)
+	copy(drbg.seed[:], h.Sum(nil))
+	drbg.Unlock()
 }

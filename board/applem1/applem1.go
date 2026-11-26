@@ -31,8 +31,12 @@ func Init() {
 	// No PSCI: halt (and a fatal runtime error) stops here, with the
 	// watchdog disarmed so the screen stays (hold the power button).
 	// `reboot` resets through the watchdog (drivers.go).
+	// With the SMC up, halt powers the Mac off instead.
 	goos.Exit = func(int32) {
 		stopWatchdog()
+		if s := smcDev.Load(); s != nil {
+			s.PowerOffNow()
+		}
 		for {
 		}
 	}

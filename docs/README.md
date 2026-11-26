@@ -13,6 +13,7 @@ Start with [`README.md`](../README.md) for the hands-on tutorial, or [`GEMINI.md
 | [`SSHServer.md`](SSHServer.md) | Active / mostly built | `programs/sshd` (`x/crypto/ssh` + SFTP v3), networking, WASM loading, 9P, and the planned Mac serial-SSH bridge |
 | [`architecture.md`](architecture.md) | Status + historical | Current phase progress summary at the top, followed by the original Phase-0 bootstrap proposal |
 | [`ReUsingGVisor.md`](ReUsingGVisor.md) | Historical design | Analysis of gVisor reuse (`pkg/tcpip` vs. Sentry) and capability equivalents for Linux syscalls (with current-status note) |
+| [`XNUPort.md`](XNUPort.md) | Assessment | Analysis of what would change if godeep had started as an Apple XNU-to-Go port (what XNU lacks for M1 drivers vs. what's worth borrowing) |
 | [`GoGpuSupport.md`](GoGpuSupport.md) | Historical + roadmap | Display and compute options (`ramfb` built, `virtio-gpu` 2D, CPU SIMD + goroutines, host GPU offload) |
 | [`../third_party/tamago/GODEEP_PATCHES.md`](../third_party/tamago/GODEEP_PATCHES.md) | Current | Rationale for the 3 vendored TamaGo v1.27.4 patches (`linkhwinit0` and `HeapAddrBits=41`) |
 

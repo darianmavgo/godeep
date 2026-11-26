@@ -64,6 +64,25 @@ func On(ctx context.Context, r mmio.Regs) (switched bool, err error) {
 	}
 }
 
+// Reset pulses the domain's reset (Linux's apple_pmgr_reset_assert and
+// _deassert): device disable, reset, then both released. The domain stays
+// in its power state.
+func Reset(ctx context.Context, r mmio.Regs) error {
+	keep := func() uint32 { return r.Read32(0) &^ (WAS_CLKGATED | WAS_PWRGATED) }
+	r.Write32(0, keep()|DEV_DISABLE)
+	r.Write32(0, keep()|RESET)
+	t := time.NewTimer(time.Millisecond)
+	select {
+	case <-ctx.Done():
+		t.Stop()
+		return ctx.Err()
+	case <-t.C:
+	}
+	r.Write32(0, keep()&^RESET)
+	r.Write32(0, keep()&^DEV_DISABLE)
+	return nil
+}
+
 // FromFDT returns the domains a device needs, parents first, following
 // "power-domains" up the tree. A domain's "reg" is an offset into its PMGR
 // block (the parent node's first "reg" window). Each domain appears once.

@@ -36,6 +36,10 @@ func ConfigFromFDT(n *fdt.Node) (Config, error) {
 	if c.Pipehandler, err = named(phy, "pipehandler"); err != nil {
 		return c, err
 	}
+	// USB 3: the PHY's core and axi2af windows and m1n1's tunables.
+	c.ATC, _ = named(phy, "core")
+	c.AXI2AF, _ = named(phy, "axi2af")
+	c.Tunables = tunables(phy)
 
 	iommus, err := n.Refs("iommus", "#iommu-cells")
 	if err != nil {
@@ -121,4 +125,39 @@ func portController(n *fdt.Node) (hpm, conn *fdt.Node) {
 		conn = nil
 	}
 	return hpm, conn
+}
+
+// tunables reads the "apple,tunable-*" triples (offset, mask, value) m1n1
+// adds to a Type-C PHY node; nil unless every one USB 3 needs is there.
+func tunables(n *fdt.Node) *Tunables {
+	read := func(name string) ([]Tunable, bool) {
+		v := n.U32s("apple,tunable-" + name)
+		if len(v) == 0 || len(v)%3 != 0 {
+			return nil, false
+		}
+		var out []Tunable
+		for i := 0; i < len(v); i += 3 {
+			if v[i]%4 != 0 {
+				return nil, false
+			}
+			out = append(out, Tunable{Off: v[i], Mask: v[i+1], Val: v[i+2]})
+		}
+		return out, true
+	}
+	var t Tunables
+	ok := true
+	for _, x := range []struct {
+		name string
+		dst  *[]Tunable
+	}{{"axi2af", &t.AXI2AF}, {"common-a", &t.CommonA}, {"common-b", &t.CommonB},
+		{"lane0-usb", &t.LaneUSB[0]}, {"lane1-usb", &t.LaneUSB[1]},
+		{"lane0-dp", &t.LaneDP[0]}, {"lane1-dp", &t.LaneDP[1]}} {
+		v, got := read(x.name)
+		ok = ok && got
+		*x.dst = v
+	}
+	if !ok {
+		return nil
+	}
+	return &t
 }

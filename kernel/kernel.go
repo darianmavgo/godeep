@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"runtime"
+	"sync"
 	"time"
 
 	"godeep/fs/memfs"
@@ -105,6 +106,9 @@ func Boot(ctx context.Context, b Board) error {
 	if con.Input != nil {
 		startInput(ctx, tab, mgr, con.Input)
 	}
+	halt := make(chan struct{})
+	var haltOnce sync.Once
+	env.Halt = func() { haltOnce.Do(func() { close(halt) }) }
 	init := env.Table.Spawn(ctx, 0, proc.Spec{Name: "init", Stdout: env.TTY, Main: initd.Main(env, Version)})
 
 	var shutdown bool
@@ -115,6 +119,9 @@ func Boot(ctx context.Context, b Board) error {
 		shutdown = true
 		fmt.Fprintln(env.TTY)
 		env.Log.Printf("godeep: power-off requested, stopping all processes")
+	case <-halt:
+		shutdown = true
+		env.Log.Printf("godeep: halt, stopping all processes")
 	}
 	cancel()
 

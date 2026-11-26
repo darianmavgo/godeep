@@ -57,8 +57,9 @@ func fakeIOP(t *testing.T, p *pipe, crash <-chan struct{}) {
 	for range []uint8{EPCrashlog, EPSyslog, EPIOReport} {
 		expect(EPManagement, mgmtStartEP)
 	}
-	// syslog asks for a 2-page buffer; meanwhile the AP asks to power on.
-	// The two arrive in either order.
+	// booted: the IOP reports itself on; syslog asks for a 2-page buffer;
+	// meanwhile the AP sets its power state on. Either order.
+	send(EPManagement, pwrState(mgmtIOPPwrStateAck, PwrOn))
 	send(EPSyslog, withType(bufferRequest)|put(2, 51, 44))
 	for i := 0; i < 2; i++ {
 		var m Message
@@ -73,8 +74,8 @@ func fakeIOP(t *testing.T, p *pipe, crash <-chan struct{}) {
 			if pages, iova := bufferFields(m.Data); pages != 2 || iova == 0 || iova%16384 != 0 {
 				t.Errorf("bad buffer reply: pages %d iova %#x", pages, iova)
 			}
-		case m.EP == EPManagement && msgType(m.Data) == mgmtSetIOPPwrState:
-			send(EPManagement, pwrState(mgmtIOPPwrStateAck, int(field(m.Data, 15, 0))))
+		case m.EP == EPManagement && msgType(m.Data) == mgmtSetAPPwrState:
+			send(EPManagement, pwrState(mgmtSetAPPwrState, int(field(m.Data, 15, 0))))
 		default:
 			t.Errorf("iop: unexpected ep %#x type %d", m.EP, msgType(m.Data))
 		}

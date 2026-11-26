@@ -737,8 +737,12 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 	if err != nil {
 		return d, err
 	}
-	if dd.MaxPacket0 != d.mps0 && dd.MaxPacket0 > 0 { // evaluate context with the real size
-		d.mps0 = dd.MaxPacket0
+	mps0 := dd.MaxPacket0
+	if speed == usb.Super && mps0 > 0 && mps0 < 16 { // SuperSpeed: an exponent (9 = 512)
+		mps0 = 1 << mps0
+	}
+	if mps0 != d.mps0 && mps0 > 0 { // evaluate context with the real size
+		d.mps0 = mps0
 		clear(in)
 		put32(in, 4, 1<<1)
 		h.ep0Ctx(d)

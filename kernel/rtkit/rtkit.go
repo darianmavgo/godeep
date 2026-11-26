@@ -41,7 +41,6 @@ type RTKit struct {
 	iommu dma.IOMMU
 
 	booted chan struct{} // closed when the EPMAP is complete and system EPs started
-	pwr    chan int      // IOP power state acks
 
 	mu        sync.Mutex
 	version   int
@@ -50,13 +49,17 @@ type RTKit struct {
 	buffers   map[uint8]*dma.Buffer // shared buffers by endpoint
 	syslog    struct{ entries, size int }
 	err       error
+	iopState  int           // last IOP power state the firmware acknowledged (-1: none yet)
+	apState   int           // last AP power state acknowledged (-1: none yet)
+	pwrChange chan struct{} // closed and replaced on every ack
 }
 
 // New prepares an RTKit client. Run must be started before Boot.
 func New(name string, mbox Mailbox, alloc *dma.Allocator, iommu dma.IOMMU) *RTKit {
 	return &RTKit{Name: name, mbox: mbox, alloc: alloc, iommu: iommu,
-		booted: make(chan struct{}), pwr: make(chan int, 1),
-		endpoints: map[uint8]bool{}, apps: map[uint8]chan uint64{}, buffers: map[uint8]*dma.Buffer{}}
+		booted:    make(chan struct{}),
+		endpoints: map[uint8]bool{}, apps: map[uint8]chan uint64{}, buffers: map[uint8]*dma.Buffer{},
+		iopState: -1, apState: -1, pwrChange: make(chan struct{})}
 }
 
 // Run is the mailbox owner loop. It returns when ctx is done or the
@@ -150,20 +153,30 @@ func (r *RTKit) management(ctx context.Context, v uint64) error {
 		return nil
 
 	case mgmtIOPPwrStateAck:
-		select {
-		case r.pwr <- int(field(v, 15, 0)):
-		default:
-		}
+		r.setState(&r.iopState, int(field(v, 15, 0)))
 		return nil
 
-	case mgmtSetAPPwrState:
-		return nil // firmware acknowledging our AP state: nothing to do
+	case mgmtSetAPPwrState: // the firmware's ack of our AP state
+		r.setState(&r.apState, int(field(v, 15, 0)))
+		return nil
 	}
 	return nil // unknown management message: ignore
 }
 
 func (r *RTKit) system(ctx context.Context, ep uint8, v uint64) error {
 	switch {
+	case ep == EPOSLog && field(v, 63, 56) == bufferRequest:
+		// OSLog has its own layout: type 63:56, size 55:36, IOVA 35:0.
+		size, iova := field(v, 55, 36), field(v, 35, 0)
+		if iova != 0 {
+			return r.send(ctx, ep, v)
+		}
+		io, err := r.buffer(ep, int(size))
+		if err != nil {
+			return err
+		}
+		return r.send(ctx, ep, put(bufferRequest, 63, 56)|put(size, 55, 36)|put(io, 35, 0))
+
 	case msgType(v) == bufferRequest:
 		pages, iova := bufferFields(v)
 		if ep == EPCrashlog && r.haveBuffer(ep) {
@@ -172,21 +185,10 @@ func (r *RTKit) system(ctx context.Context, ep uint8, v uint64) error {
 		if iova != 0 { // firmware supplied its own buffer: just acknowledge
 			return r.send(ctx, ep, bufferReply(pages, iova))
 		}
-		if r.alloc == nil || r.iommu == nil {
-			return fmt.Errorf("rtkit %s: endpoint %#x wants a buffer but no DMA allocator", r.Name, ep)
-		}
-		b, err := r.alloc.Alloc(pages*4096, 16384)
+		io, err := r.buffer(ep, pages*4096)
 		if err != nil {
 			return err
 		}
-		io, err := r.iommu.Map(b, dma.Bidirectional)
-		if err != nil {
-			b.Free()
-			return err
-		}
-		r.mu.Lock()
-		r.buffers[ep] = b
-		r.mu.Unlock()
 		return r.send(ctx, ep, bufferReply(pages, io))
 
 	case ep == EPSyslog && msgType(v) == syslogInit:
@@ -199,6 +201,51 @@ func (r *RTKit) system(ctx context.Context, ep uint8, v uint64) error {
 		return r.send(ctx, ep, v) // ack by echoing the index back
 	}
 	return nil
+}
+
+// buffer allocates and maps a shared buffer for a system endpoint.
+func (r *RTKit) buffer(ep uint8, size int) (uint64, error) {
+	if r.alloc == nil || r.iommu == nil {
+		return 0, fmt.Errorf("rtkit %s: endpoint %#x wants a buffer but no DMA allocator", r.Name, ep)
+	}
+	b, err := r.alloc.Alloc(max(size, 1), 16384)
+	if err != nil {
+		return 0, err
+	}
+	io, err := r.iommu.Map(b, dma.Bidirectional)
+	if err != nil {
+		b.Free()
+		return 0, err
+	}
+	r.mu.Lock()
+	r.buffers[ep] = b
+	r.mu.Unlock()
+	return io, nil
+}
+
+func (r *RTKit) setState(p *int, s int) {
+	r.mu.Lock()
+	*p = s
+	close(r.pwrChange)
+	r.pwrChange = make(chan struct{})
+	r.mu.Unlock()
+}
+
+// waitState waits until *p == want.
+func (r *RTKit) waitState(ctx context.Context, p *int, want int, what string) error {
+	for {
+		r.mu.Lock()
+		got, ch := *p, r.pwrChange
+		r.mu.Unlock()
+		if got == want {
+			return nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return fmt.Errorf("rtkit %s: waiting for %s power state %#x (at %#x): %w", r.Name, what, want, got, ctx.Err())
+		}
+	}
 }
 
 func (r *RTKit) has(ep uint8) bool {
@@ -225,31 +272,53 @@ func (r *RTKit) freeBuffers() {
 	}
 }
 
-// Boot waits for the handshake and endpoint discovery, then powers the
-// coprocessor on.
+// Boot waits for the handshake and endpoint discovery, for the firmware
+// to report its IOP power state on, and then sets the AP power state on
+// (Linux's apple_rtkit_boot). Use it after starting the coprocessor's CPU.
 func (r *RTKit) Boot(ctx context.Context) error {
 	select {
 	case <-r.booted:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-	return r.SetPower(ctx, PwrOn)
+	if err := r.waitState(ctx, &r.iopState, PwrOn, "IOP"); err != nil {
+		return err
+	}
+	return r.SetAPPower(ctx, PwrOn)
 }
 
-// SetPower requests an IOP power state and waits for the firmware's ack.
-func (r *RTKit) SetPower(ctx context.Context, state int) error {
+// Wake asks a coprocessor that is already running (left by iBoot or m1n1)
+// to start over, then boots it (Linux's apple_rtkit_wake).
+func (r *RTKit) Wake(ctx context.Context) error {
+	if err := r.send(ctx, EPManagement, pwrState(mgmtSetIOPPwrState, PwrInit)); err != nil {
+		return err
+	}
+	return r.Boot(ctx)
+}
+
+// Shutdown quiesces the firmware and puts the IOP to sleep (it can be
+// woken again; OFF would not come back).
+func (r *RTKit) Shutdown(ctx context.Context) error {
+	if err := r.SetAPPower(ctx, PwrQuiesced); err != nil {
+		return err
+	}
+	return r.SetIOPPower(ctx, PwrSleep)
+}
+
+// SetIOPPower requests an IOP power state and waits for the firmware's ack.
+func (r *RTKit) SetIOPPower(ctx context.Context, state int) error {
 	if err := r.send(ctx, EPManagement, pwrState(mgmtSetIOPPwrState, state)); err != nil {
 		return err
 	}
-	select {
-	case got := <-r.pwr:
-		if got != state {
-			return fmt.Errorf("rtkit %s: asked for power state %#x, got %#x", r.Name, state, got)
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	return r.waitState(ctx, &r.iopState, state, "IOP")
+}
+
+// SetAPPower tells the firmware the AP's power state and waits for its ack.
+func (r *RTKit) SetAPPower(ctx context.Context, state int) error {
+	if err := r.send(ctx, EPManagement, pwrState(mgmtSetAPPwrState, state)); err != nil {
+		return err
 	}
+	return r.waitState(ctx, &r.apState, state, "AP")
 }
 
 // Endpoint starts an application endpoint and returns its channels.
@@ -273,6 +342,7 @@ func (r *RTKit) Endpoint(ctx context.Context, ep uint8) (recv <-chan uint64, sen
 // Info describes the coprocessor for diagnostics.
 type Info struct {
 	Version   int
+	IOP, AP   int // power states (-1: not reported)
 	Endpoints []uint8
 	Buffers   map[uint8]int // endpoint -> shared buffer size
 	Err       error
@@ -281,7 +351,7 @@ type Info struct {
 func (r *RTKit) Info() Info {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	in := Info{Version: r.version, Buffers: map[uint8]int{}, Err: r.err}
+	in := Info{Version: r.version, IOP: r.iopState, AP: r.apState, Buffers: map[uint8]int{}, Err: r.err}
 	for ep := range r.endpoints {
 		in.Endpoints = append(in.Endpoints, ep)
 	}
