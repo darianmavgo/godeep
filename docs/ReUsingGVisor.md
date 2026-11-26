@@ -7,7 +7,12 @@
 
 This was checked against godeep's real environment: TamaGo v1.27.4, tamago-go 1.27.4, QEMU 11.1 on macOS, and `tamago-example`'s working network code.
 
-> **Board note:** godeep now boots **arm64 on QEMU `virt` (HVF)** by default. On `virt`, virtio-mmio devices sit at `0x0a000000` in 32 slots, `0x200` apart, with interrupts on GIC SPIs starting at INTID 48. The microvm addresses below (`0xfeb00000`, `VIRTIO_NET0_BASE`) apply to `ARCH=amd64`. Either way, godeep's N1 step (probe slots by `DeviceID`) hides the difference, and `go-net`'s virtio driver only needs the base address and IRQ.
+> **Status (2026-11-26):** Most of the plan below has since been implemented on `board/virt` (arm64, HVF default), with a few intentional divergences from these early notes:
+> - **Networking (`net/netstack`):** embeds gVisor `pkg/tcpip` directly using `gonet` listeners/dialers behind `cap.Net` (`kernel/net.go`), **without** `usbarmory/go-net` or TamaGo's global `net.SocketFunc`. Includes DHCP (with lease renewal), DNS, `programs/sshd` (+ SFTP v3), and HTTPS (`x509roots/fallback`).
+> - **Storage & VFS:** `kernel/vfs` implements a per-Proc volume namespace (`VOLUME:PATH`), with writable `fs/memfs` (`ram:`), writable `fs/fat` (FAT16/32), read-only `fs/ext4`, and read/write `fs/ninep` (over `drivers/virtio/p9` as `host:`, plus `tools/ninepd` over TCP). Block devices use PCIe NVMe (`drivers/nvme`) and USB mass storage (`drivers/usb/xhci/storage.go`) rather than `virtio-blk`.
+> - **Still open from §6–§7:** `procfs` (`/proc`), `devfs`, `ipc.Port`, and shell pipes (`a | b`).
+>
+> **Board note:** godeep boots **arm64 on QEMU `virt` (HVF)** by default. On `virt`, virtio-mmio devices sit at `0x0a000000` in 32 slots, `0x200` apart, with interrupts on GIC SPIs starting at INTID 48. The microvm addresses below (`0xfeb00000`, `VIRTIO_NET0_BASE`) apply to `ARCH=amd64`.
 
 ---
 

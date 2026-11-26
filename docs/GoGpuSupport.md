@@ -1,6 +1,8 @@
 # GPU support for godeep: options
 
-This doc covers the realistic ways to give godeep a GPU: a screen to draw on, graphics, and GPU-style compute. It compares their cost and recommends an order to build them in. All of it was written against godeep's real setup: TamaGo v1.27.4 on QEMU `microvm`, x86-64 under TCG emulation on an Apple Silicon Mac, with Homebrew QEMU 11.1.
+> **Status (2026-11-26):** Option 1 (**`ramfb`**) is now implemented on `board/virt` (arm64, HVF default) via [`drivers/qemu/fwcfg`](../drivers/qemu/fwcfg) and [`drivers/simplefb`](../drivers/simplefb) (1280×800 framebuffer text console with 2000-line scrollback and gpm-style mouse pointer/select/paste; run `make qemu QEMU_DISPLAY=cocoa`), and the same `drivers/simplefb` console runs natively on the Apple M1 Pro's 3456×2234 display. Networking (gVisor `net/netstack` over `virtio-net` and `usb-net`) is also built, unblocking Option 6 (host offload). The sections below preserve the original design comparison (written when `amd64`/`microvm` was the default target).
+
+This doc covers the realistic ways to give godeep a GPU: a screen to draw on, graphics, and GPU-style compute. It compares their cost and recommends an order to build them in. All of it was originally written against TamaGo v1.27.4 on QEMU `microvm`, x86-64 under TCG emulation on an Apple Silicon Mac, with Homebrew QEMU 11.1.
 
 ---
 

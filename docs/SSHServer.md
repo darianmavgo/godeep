@@ -22,11 +22,11 @@ make check-virt    # headless: ... rng seeds crypto/rand, ifconfig, ssh ps / lsd
 | TCP/IP | `net/netstack` (gVisor) | `gonet` listeners and conns; no `net.SocketFunc` global |
 | network capability | `kernel/cap` (`Net`, `PendingNet`), `kernel/net.go` (`netd`), `net/hostnet` | `netd` follows the NIC across driver restarts; hosted uses host sockets |
 | sshd | `programs/sshd`, keys from `make keys` | pty sessions on `tty.NewFor` + `sh`, `exec` (`sh -c`), exit status, ^C, kill-on-disconnect, stdin EOF doesn't kill `exec`; `FuzzPreAuth` |
-| checks | `tools/qemucheck` `host:` steps | `check-virt` passes under HVF (polled) and TCG (irq) |
+| checks | `tools/qemucheck` `local:` steps | `check-virt` passes under HVF (polled) and TCG (irq); `check-usbnet` exercises SSH over USB CDC-ECM (`usb-net`) |
 
-Since then (2026-11-26): **sftp/scp** (`programs/sshd/sftp.go`, onto the RAM filesystem `ram:`), **WASM programs** pushed with scp and run without a reboot (`programs/wasm`, `make push`), the **kernel log** (`dmesg`, `ssh godeep dmesg`), and **profiles** (`ssh godeep pprof heap > heap.pb.gz`), all in `check-virt`.
+Since then (2026-11-26): **sftp/scp** (`programs/sshd/sftp.go`, onto writable volumes like `ram:` and writable FAT), **WASM programs** pushed with scp and run without a reboot (`programs/wasm`, `make push`), **DHCP (with lease renewal) + DNS + HTTPS** (embedded Mozilla TLS roots via `x509roots/fallback`), **9P** (`drivers/virtio/p9`, `fs/ninep` read/write, and `tools/ninepd` TCP 9P2000.L host server), **USB CDC-ECM** (`drivers/usb/xhci/ecm.go`, `make check-usbnet`), the **kernel log** (`dmesg`, `ssh godeep dmesg`), and **profiles** (`ssh godeep pprof heap > heap.pb.gz`), all tested in `check-virt`.
 
-Not yet: `window-change` handling beyond acknowledging it, DNS, DHCP (addresses are QEMU's user-net defaults), and everything on the Mac (steps 5 and 6 below). The sections below are the original plan; where the code differs, the code is right.
+Not yet: `window-change` handling beyond acknowledging it, and the Mac transport layers (steps 5 and 6 below). The sections below are the original plan; where the code differs, the code is right.
 
 ## Contents
 
@@ -302,7 +302,7 @@ Host godeep
 1. ✅ **scp/sftp → loading programs:** push WASM programs (the planned wazero loader) and run them without rebuilding the kernel. That's the real dev-cycle win: only kernel changes need a reboot.
 2. ✅ **Logs:** `ssh godeep dmesg` (`dmesg -f` follows).
 3. ✅ **pprof** (goroutine, heap…; no CPU profile on TamaGo): serve `net/http/pprof` on the netstack, or stream profiles over an SSH `exec` channel, then run `go tool pprof` on the PC. It works with godeep's existing `pid`/`proc` goroutine labels.
-4. **Files:** 9P over the same link (`docs/ReUsingGVisor.md` §5), so godeep can read from a directory on the PC.
+4. ✅ **Files:** 9P over virtio (`drivers/virtio/p9`) and over TCP (`fs/ninep` read/write + `tools/ninepd` host server), so godeep can read and write a directory on the dev host.
 5. **Kernel updates without a disk write:** an `sshd` subcommand that receives a new Image and hands it to m1n1 or a kexec-like path. This is further out; until then, use `linux.py` through the m1n1 proxy (`docs/Using2Computers.md` §5).
 
 ---
@@ -323,7 +323,7 @@ Host godeep
 4. ✅ **pty + tty discipline**, ^C, `exec`, kill-on-disconnect, sessions owning their tty goroutine.
 5. **On the Mac, the bridge:** `drivers/apple/uart` with RX, `godeep.uart=ssh`, and SSH over `/dev/ttyACM1` under m1n1's hypervisor (§2.3).
 6. **On the Mac, the real link:** DWC3 gadget + CDC-ECM (M4). The same `sshd` then works over the USB-C cable at USB speed, without the hypervisor.
-7. ✅ sftp → ✅ WASM program loading → ✅ pprof → 9P.
+7. ✅ sftp → ✅ WASM program loading → ✅ pprof → ✅ 9P (virtio-9p + `tools/ninepd` over TCP).
 
 ---
 

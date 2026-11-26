@@ -51,7 +51,7 @@ Measured on this Mac:
 ### 3. `kernel/dev`: the device manager
 
 - A board lists its hardware as `dev.Node`s: name, `compatible`, register windows, IRQs, and `Needs` (dependencies).
-  - On M1 these will come from Apple's device tree (ADT); for now the virt board lists them statically.
+  - Both `board/virt` (when booted as a Linux-style Image, the default) and `board/applem1` (via m1n1's converted FDT) build `dev.Node`s from the device tree in `x0` using `kernel/fdt` (with a static fallback only for ELF boots on `board/virt`).
 - Drivers register by `compatible` from `init()` and implement `Run(ctx, *Device)`:
   - initialize, call `d.Ready(service)`, then keep servicing until `ctx` is done;
   - return nil when finished (a probe-only driver keeps its service published).
@@ -72,13 +72,14 @@ Drivers on QEMU virt today:
 | `virtio_mmio@…` | `virtio,mmio` | probe only: names a virtio device no driver claims |
 | `rng0` | `virtio,device4` | virtio-rng: seeds the board's random generator (`crypto/rand`) at start, `Read` for more |
 | `share0` | `virtio,device9` | virtio-9p: mounts QEMU's host share as the volume named by its tag (`host:`) |
-| `usbdisk0` | `godeep,usb-storage` | a USB stick the xHCI driver found (behind hubs too): a read-only `block.Device` |
+| `usbdisk0` | `godeep,usb-storage` | a USB stick the xHCI driver found (behind hubs too): a `block.Device` + `block.Writer` (`READ(10)`/`WRITE(10)` + `REQUEST SENSE` recovery) |
+| `usbnet0` | `godeep,usb-ecm` | USB CDC-ECM Ethernet adapter (`-device usb-net`, tested via `make check-usbnet`): publishes a `netdev.NIC` |
 | `fbcon` | `godeep,fbcon` | the framebuffer console's state: size, history, scroll position, pointer, selection (QEMU: ramfb; the Mac: m1n1's framebuffer) |
 | `net0` | `virtio,device1` | virtio-net: publishes a `netdev.NIC`; `netd` runs the TCP/IP stack on it (`ifconfig`, `sshd`). Interrupts, or polled under HVF |
 | `ptimer` | `arm,armv8-ptimer-probe` | interrupt-latency probe |
-| `pcie@10000000` | `pci-host-ecam-generic` | scans the bus, assigns BARs, adds `nvme0` (QEMU adds a default PCI NIC only when no `-netdev` is given; the Makefile gives one, on virtio-mmio) |
-| `nvme0` | `pciclass,010802` | polled NVMe; publishes a `block.Device` for `lsblk`, `ls`, `cat` |
-| `xhci0` | `pciclass,0c0330` | polled USB host; HID boot keyboards type into the console, mice publish `input` events (`evtest`) |
+| `pcie@10000000` | `pci-host-ecam-generic` | scans the bus, assigns BARs, adds `nvme0` and `xhci0` (QEMU adds a default PCI NIC only when no `-netdev` is given; the Makefile gives one, on virtio-mmio) |
+| `nvme0` | `pciclass,010802` | polled NVMe (read & write); publishes a `block.Device`/`block.Writer` for `lsblk`, `ls`, `cat`, `write`, `cp` |
+| `xhci0` | `pciclass,0c0330` | polled USB host; HID boot keyboards type into the console, mice publish `input` events (`evtest`), hubs/storage/CDC-ECM add child devices |
 
 On the Mac image (`board/applem1`): `watchdog@2922b0000` (`apple,t6000-wdt`), `hid-transport@0` (`apple,spi-hid-transport`: the keyboard and trackpad), `idle` (the board's WFE idle statistics), and on QEMU only, `serial@…` (`arm,pl011` input).
 
@@ -123,16 +124,16 @@ The cost is wake-ups, not busy CPU: one register read per poll, on wake-ups that
 
 ## Where driver code lives
 
-- **`drivers/<vendor>/<device>`** holds portable packages with no build tags, so they're host-tested. They take a `func(base) mmio.Regs` and return a `dev.Driver`: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/{mmio,net,rng}`, `drivers/pci`, `drivers/nvme`, `drivers/usb`, `drivers/usb/xhci`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`.
+- **`drivers/<vendor>/<device>`** holds portable packages with no build tags, so they're host-tested. They take a `func(base) mmio.Regs` and return a `dev.Driver`: `drivers/arm/{pl011,pl031,pl061}`, `drivers/virtio/{mmio,net,rng,p9}`, `drivers/qemu/fwcfg`, `drivers/simplefb`, `drivers/pci`, `drivers/nvme`, `drivers/usb`, `drivers/usb/xhci`, `drivers/apple/{wdt,pmgr,gpio,spi,spihid}`.
   - Device-tree resolution that's specific to a driver lives with it and is host-tested (`spihid.ConfigFromFDT`, `pci.ConfigFromFDT`, `pmgr.FromFDT`); boards call it and put the result in `Node.Config`.
   - Tests model the hardware: an `mmio.Fake` with `OnRead`/`OnWrite` hooks (power domains that turn on, FIFOs, an NVMe controller executing commands from DMA memory, an SPI keyboard and trackpad sending packets and receiving the multitouch write, an xHCI controller with a USB keyboard and mouse).
 - **`kernel/mmio`:** drivers use `Regs`.
   - On hardware it's a `Window`: single 32-bit atomic accesses.
   - In tests it's a `Fake` that models the device and records every access, so tests assert exact register sequences.
   - `mmio.Modify` (read-modify-write) is only for ordinary registers, never W1S/W1C banks.
-- **Boards** register drivers and supply the device list. `board/virt` builds that list from the boot device tree (`kernel/fdt`).
+- **Boards** register drivers and supply the device list. Both `board/virt` and `board/applem1` build that list from the boot device tree (`kernel/fdt`).
 
 ## Next drivers this enables
 
-- **QEMU virt:** ✅ virtio-rng (real entropy) and virtio-net (with gVisor's netstack and `sshd`, `docs/SSHServer.md`). Next QEMU-testable and reusable on the Mac: USB hubs and mass storage on the xHCI driver, SDHCI.
-- **M1:** ASC mailbox (`rtkit.Mailbox`) and a hardware check of `kernel/rtkit`, then SMC (power-off, power button, lid, battery), the first RTKit client; then ANS2 (with SART) under `drivers/nvme`'s command layer; DART (`dma.IOMMU`); AIC2 (`irq.Controller`) to replace polling.
+- **QEMU virt:** ✅ virtio-rng (real entropy), virtio-net (with gVisor's netstack and `sshd`, `docs/SSHServer.md`), virtio-9p (`host:`), `ramfb`/`simplefb`, PCIe/NVMe (read & write), and xHCI USB hubs, mass storage (read & write) and CDC-ECM Ethernet (`usb-net`). Next QEMU-testable and reusable on the Mac: SDHCI, virtio-gpu 2D.
+- **M1:** Samsung debug UART (`drivers/apple/uart`), ASC mailbox (`rtkit.Mailbox`) and a hardware check of `kernel/rtkit`, then SMC (power-off, power button, lid, battery), the first RTKit client; then ANS2 (with SART) under `drivers/nvme`'s command layer; DART (`dma.IOMMU`); DWC3 USB-C gadget/host; AIC2 (`irq.Controller`) to replace polling.

@@ -25,17 +25,7 @@ This doc covers everything about running godeep on the actual machine it's devel
   - [3.5 Drivers the Mac's device tree asks for (from `lsdev`, 2026-11-25/26)](#35-drivers-the-macs-device-tree-asks-for-from-lsdev-2026-11-2526)
 - [4. TamaGo blockers specific to this Mac](#4-tamago-blockers-specific-to-this-mac)
 - [5. How godeep would boot on this Mac](#5-how-godeep-would-boot-on-this-mac)
-- [6. Carving out a godeep partition next to Macintosh HD and Omarchy](#6-carving-out-a-godeep-partition-next-to-macintosh-hd-and-omarchy)
-  - [6.1 What you'll end up with](#61-what-youll-end-up-with)
-  - [6.2 Safety first](#62-safety-first)
-  - [6.3 Pre-flight checks](#63-pre-flight-checks)
-  - [6.4 Step 1: shrink Macintosh HD](#64-step-1-shrink-macintosh-hd)
-  - [6.5 Step 2: create the bootable godeep stub (Asahi installer)](#65-step-2-create-the-bootable-godeep-stub-asahi-installer)
-  - [6.6 Step 3 (optional): the GODEEPDATA partition](#66-step-3-optional-the-godeepdata-partition)
-  - [6.7 Step 4: verify](#67-step-4-verify)
-  - [6.8 Step 5: put godeep on its ESP and boot it](#68-step-5-put-godeep-on-its-esp-and-boot-it)
-  - [6.9 Undo: remove godeep and give the space back](#69-undo-remove-godeep-and-give-the-space-back)
-  - [6.10 Troubleshooting](#610-troubleshooting)
+- [6. Carving out a godeep partition next to Macintosh HD and Omarchy](#6-carving-out-a-godeep-partition-next-to-macintosh-hd-and-omarchy) *(moved to [`PartitioningMac.md`](PartitioningMac.md))*
 - [7. Developing native drivers incrementally](#7-developing-native-drivers-incrementally)
   - [7.1 The principle: one kernel, swappable boards, drivers behind interfaces](#71-the-principle-one-kernel-swappable-boards-drivers-behind-interfaces)
   - [7.2 The development ladder for each driver](#72-the-development-ladder-for-each-driver)
@@ -179,8 +169,8 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 
 | Hardware | Go code | Status | Notes / reference | Effort |
 |---|---|---|---|---|
-| CPU boot, exceptions, caches | `tamago/arm64` + godeep's own entry (`board/virt/entry_arm64.s`) | ◐ | **EL2 entry done** (§3.1, tested at EL2 in QEMU). Left: the MMU reaching RAM at `0x100_0000_0000` | S |
-| MMU / page tables | `tamago/arm64` mmu | ◐ | Hard-codes a 39-bit VA with flat mapping. Needs a 48-bit VA (T0SZ=16), 4-level tables and 16 KB-aware DMA mappings | S–M |
+| CPU boot, exceptions, caches | `tamago/arm64` + `board/{virt,applem1}/entry_arm64.s` | ✅ | Self-relocation, VHE-aware EL2→EL1 drop (`E2H=1`, `VTTBR_EL2=0`), early identity map, and boot-stage/fault screens all running natively on the Mac (§3.1, §3.3) | — |
+| MMU / page tables | `kernel/pgtable` + `board/*/mmu.go` (`Hwinit0`) + vendored TamaGo patches | ✅ | Allocation-free 4-level 48-bit VA tables reaching DRAM at `0x100_0000_0000` (1 TB), `HeapAddrBits=41`, 16 KB-aligned DMA region; running on both `board/virt` and `board/applem1` | — |
 | Generic timer | `tamago/arm64` `InitGenericTimers`, `GetTime` | ✅ | Architected and identical to QEMU. The timer *interrupt* arrives as a FIQ through AIC, not the GIC | — |
 | AES, SHA-1/2/3, GHASH | Go std `crypto/*` (arm64 assembly) | ✅ | Uses the CPU's AES, SHA3 and PMULL instructions directly | — |
 | NEON SIMD | Go `simd`, `simd/archsimd` (GOEXPERIMENT=simd) | ✅ | Already enabled in the Makefile | — |
@@ -206,8 +196,8 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 | **RTKit coprocessors** | **godeep `kernel/rtkit`**: handshake, endpoint discovery, power states, shared-buffer requests (via `kernel/dma`), crash detection, per-endpoint channels | ◐ | Left: the ASC mailbox hardware driver (implements `rtkit.Mailbox`), and checking the message encodings on real hardware. Reference: Linux `apple-mailbox.c`, `drivers/soc/apple/rtkit*.c`, m1n1 `rtkit.c` | S |
 | SMC (battery, sensors, lid, power button) | rides on `kernel/rtkit` | ✗ | The SMC protocol on top of an RTKit endpoint. Asahi `macsmc` | S–M |
 | **Keyboard / trackpad** (HID over SPI) | `drivers/apple/spi` + `drivers/apple/spihid` + `kernel/input` | ✅ | **Working on the Mac (2026-11-26)**, polled like U-Boot's `apple_spi_kbd.c` (no AIC needed): reads the ready line (nub GPIO 6), 121/121 packets CRC-ok. Keyboard: US layout, Ctrl, Caps Lock, repeat. Trackpad (after Asahi's `hid-magicmouse.c`): multitouch on, one finger moves the console pointer, two scroll, click. Left: interrupts (AIC2), other layouts | — |
-| **SSD** (ANS2) | `drivers/nvme` (command layer) + `kernel/rtkit` + `kernel/dma` | ◐ | NVMe queues, identify, reads and PRP lists are built and run on QEMU virt (`make check-virt`). Left: ANS2's differences (linear submission, NVMMU/TCBs), SART, RTKit boot. Linux `drivers/nvme/host/apple.c` | M |
-| Filesystems on the SSD | `kernel/block` (GPT), `fs/ext4`, `fs/fat`, `kernel/vfs` | ◐ | Built, read-only, tested on real mkfs images and on QEMU, on NVMe and USB sticks. `kernel/vfs` names volumes (`nvme0p2:`, `usbdisk0p1:`, `ram:`, `host:`). Waits for the SSD driver to read the Omarchy partition; never write to APFS. The SSD also needs **SART** (`sart@393c50000` in the tree) | M |
+| **SSD** (ANS2) | `drivers/nvme` (command layer, read & write) + `kernel/rtkit` + `kernel/dma` | ◐ | NVMe queues, identify, reads/writes and PRP lists are built and run on QEMU virt (`make check-virt`). Left: ANS2's differences (linear submission, NVMMU/TCBs), SART, RTKit boot. Linux `drivers/nvme/host/apple.c` | M |
+| Filesystems on the SSD | `kernel/block` (GPT, read/write), `fs/ext4` (ro), `fs/fat` (FAT16/32 rw), `kernel/vfs` | ◐ | Built and tested on real mkfs images and QEMU (NVMe and USB sticks). `kernel/vfs` names volumes (`nvme0p2:`, `usbdisk0p1:`, `ram:`, `host:`). Waits for the SSD driver to read Omarchy and use `GODEEPDATA`; never write to APFS. The SSD also needs **SART** (`sart@393c50000` in the tree) | M |
 | PCIe root complex | `tamago/soc/intel/pci` is x86 port I/O, doesn't apply | ✗ | Linux `pcie-apple.c`. m1n1 can bring the links up before handing over | M |
 | SD reader (GL9755, SDHCI) | `tamago/soc/nxp/usdhc` (different controller, same SD protocol) | ◐ | Linux `sdhci-pci-gli.c`; reuse the SD command logic from usdhc | M |
 | **USB-C in device mode** (gadget) | CDC-ECM framing: `usbarmory/go-net/imx-usb` (written for NXP's controller) as reference | ◐ | Needs a Go DWC3 *device-mode* driver (Linux `dwc3`) that publishes a `netdev.NIC`. Everything above it is **built** (§3.4): `netd` runs the TCP/IP stack on the first NIC it finds, then DHCP, sshd, SFTP, WASM loading, 9P all work over the cable | M–L |
@@ -231,11 +221,11 @@ Effort is what's **left**: XS = hours, S = days, M = 1–3 weeks, L = 1–3 mont
 | Keyboard backlight (PWM) | none | ✗ | `apple,t6000-fpwm` in the tree. Linux `pwm-apple.c`; trivial | XS |
 | SIO coprocessor | rides on `kernel/rtkit` | ✗ | `sio@39bc00000` (`apple,t6000-sio`): RTKit-based DMA for audio and DisplayPort. Asahi `sio` | M |
 
-**Scorecard (updated after the foundation work):**
-- **5 blocks work with existing Go code:** timer, crypto, SIMD, atomics, and the boot framebuffer through Go's `image` packages. The gVisor network stack also works once something supplies frames.
-- **9 are partial (◐).** Four of them are now mostly done because of godeep's own foundation (§3): interrupt controller, DART IOMMU, RTKit coprocessors and device discovery. The other five come from outside Go code: TamaGo boot/MMU, the RNG, ext4 readers, uSDHC for SD and go-net/imx-usb for USB Ethernet.
+**Scorecard (2026-11-26, after native boot and the QEMU build-out):**
+- **9 blocks work today (✅):** CPU boot/exceptions/caches, 4-level 48-bit MMU (`kernel/pgtable`), generic timer, AES/SHA/GHASH crypto, NEON SIMD, LSE atomics, boot framebuffer console (`drivers/simplefb`), internal keyboard & multitouch trackpad (`drivers/apple/spihid`), and the TCP/IP network stack (`net/netstack`, waiting on a Mac NIC).
+- **13 are partial (◐):** godeep's portable foundation and QEMU drivers cover the common layers (interrupt bridge `kernel/irq`, DMA/IOMMU `kernel/dma`, RTKit `kernel/rtkit`, `kernel/fdt` device discovery, `drivers/apple/{wdt,gpio,pmgr}`, `drivers/nvme` + `fs/fat` + `fs/ext4`, `drivers/usb/xhci` with hubs/storage/CDC-ECM), leaving Apple-specific hardware adapters (AIC2, DART, ASC mailbox, SMC, ANS2+SART, DWC3/ATC/CD321x, `/chosen` RNG seed).
 - **The RTKit-based drivers (SMC, SSD, audio, display) shrink** to "the protocol on top of an endpoint": the mailbox handshake, power and shared buffers are already written.
-- **Everything else is still a port.** Asahi Linux remains the only complete reference for this hardware, and it's all open source.
+- **Everything else (✗) is still a port** from Asahi Linux / m1n1, starting with the Samsung debug UART (`drivers/apple/uart`).
 
 ---
 
@@ -251,7 +241,7 @@ Design and rules are in [`DriverModel.md`](DriverModel.md).
 |---|---|---|---|---|
 | DMA memory + IOMMU | `kernel/dma` | buffers outside the Go heap with stable physical addresses, 16 KB alignment for DART, single ownership (double free panics), stats; `dma.IOMMU` so drivers hand devices an IOVA | 512 MB region at `0x1_2000_0000` (`dmastat`); `dma.Identity` IOMMU | **DART** implementing `Map`/`Unmap` |
 | Interrupt bridge | `kernel/irq` | interrupts arrive as channel events; the line stays masked until the driver calls `Done` (oneshot, safe for level-triggered lines); per-line counts and service time | GICv3: power button + timer probe (`irqstat`, `irqlat`) | **AIC2** implementing `irq.Controller` + its ack loop |
-| Device manager | `kernel/dev` | each driver is a process `drv/<name>` supervised by `devmgr`: dependency ordering (`Needs`), readiness (`Ready`/`Get`), restart with backoff when any driver goroutine panics | PL061 power button, PL031 RTC, virtio-mmio scanner, timer probe; PCIe host + NVMe added by the PCIe driver at run time (`lsdev`) | **ADT parser** producing `dev.Node`s from m1n1's device tree |
+| Device manager | `kernel/dev` | each driver is a process `drv/<name>` supervised by `devmgr`: dependency ordering (`Needs`), readiness (`Ready`/`Get`), restart with backoff when any driver goroutine panics | PL061 power button, PL031 RTC, virtio-mmio scanner, timer probe; PCIe host + NVMe + xHCI added at run time (`lsdev`) | **Done via `kernel/fdt`**: m1n1 converts Apple's ADT into an FDT in `x0`, so `board/applem1` builds `dev.Node`s directly (only AIC2 interrupt-cell mapping remains) |
 | RTKit coprocessors | `kernel/rtkit` | version handshake (11–12), endpoint map, starting system endpoints, IOP power states, the firmware's shared-buffer requests (allocated from `kernel/dma`, mapped through the IOMMU), crash detection, one channel per application endpoint | protocol engine tested against a fake coprocessor (out-of-order messages, crash, old firmware); QEMU has no RTKit device | **ASC mailbox** driver implementing `rtkit.Mailbox`; **verify the message encodings** on the real Mac (they follow Asahi's `rtkit.c`) |
 
 **Measured on this Mac (QEMU + HVF):**
@@ -313,17 +303,17 @@ How that maps to today's implementation (`board/virt/entry_arm64.s`, tested with
 |---|---|---|
 | Check `CurrentEL` | yes: shifts the EL field out and compares with 2 (same test as raw `0x8`) | |
 | `HCR_EL2.RW = 1` | yes: writes `HCR_EL2 = 1<<31` | writing only bit 31 also clears `VM`, `IMO`/`FMO` (interrupts go to EL1) and all trap bits |
-| Stage 2 off | via `HCR_EL2.VM = 0` (the write above) | **`VTTBR_EL2 = 0` is not written yet.** Add it (one `msr`) so the decision is followed literally: belt and braces against firmware leaving a stale table pointer |
+| Stage 2 off | via `HCR_EL2.VM = 0` and explicit `VTTBR_EL2 = 0` | belt and braces against firmware leaving a stale table pointer (added to both `board/virt` and `board/applem1`) |
 | `SPSR_EL2 = 0x3c5` | yes | |
 | `ELR_EL2` = entry | yes: `·el1entry`, which captures the device tree and then starts TamaGo's runtime | |
 | `eret` | yes | |
-| extra setup it also does | `CNTHCTL_EL2 \|= EL1PCTEN\|EL1PCEN` (EL1 can use the physical timer and counter), `CNTVOFF_EL2 = 0`, `HSTR_EL2 = 0`, `CPTR_EL2 = 0x33ff` (no FP/SIMD traps), `ICC_SRE_EL2 = SRE\|Enable` (EL1 may use the GIC system registers) | needed on QEMU; on the M1 the GIC line doesn't apply (AIC2 is MMIO), and the timer and FP lines still matter |
+| extra setup it also does | VHE-aware (`HCR_EL2.E2H`) `CNTHCTL_EL2` and `CPTR_EL2` (EL1 timer and FP/SIMD without traps), `CNTVOFF_EL2 = 0`, `HSTR_EL2 = 0`, `SCTLR_EL1` initialized, plus `ICC_SRE_EL2 = SRE\|Enable` on `board/virt` | needed on QEMU and M1 (Apple cores force `E2H=1`; AIC2 is MMIO so `board/applem1` skips `ICC_SRE_EL2`) |
 
 **Why not stay at EL2?** Running the kernel at EL2 (as Asahi's Linux does with VHE, `HCR_EL2.E2H`) would mean porting TamaGo's exception, MMU and timer code to EL2 registers, all for features godeep doesn't need: it hosts no VMs. Dropping to EL1 keeps godeep on TamaGo's tested path. If godeep ever wants to be a hypervisor, the EL2 vectors can be added then.
 
-**Action items:**
-- add `VTTBR_EL2 = 0` to the EL2 path in `board/virt/entry_arm64.s`, and retest with `make qemu EL2=1`;
-- `board/applem1` reuses the same entry code (only the FDT copy address and the GIC line change).
+**Action items (all done ✅):**
+- `VTTBR_EL2 = 0` added to `entry_arm64.s` in both boards;
+- `board/applem1` reuses the same EL2→EL1 sequence with VHE (`E2H=1`) handling and without the GIC line.
 
 **Lessons from building it that carry over to the M1:**
 - **Never read-modify-write a write-1-to-set/clear register.** TamaGo's GIC driver did exactly that on `GICD_ICENABLER`: disabling one interrupt disabled its whole bank, and the first keystroke silently disabled the power button. AIC2's mask registers have the same semantics, so its adapter must write single bits.
@@ -364,9 +354,9 @@ Also from this round: on QEMU, typing now reaches the Mac image's shell (`driver
 | Layer | Package | Status |
 |---|---|---|
 | PCIe | `drivers/pci` | ECAM host bridge: scans bus 0, sizes and assigns BARs from `ranges`, enables decoding and bus mastering, adds each function as a device named by class (`nvme0`), compatible `pciclass,CCSSPP`. Apple's root complex needs its own bring-up, then this applies |
-| NVMe | `drivers/nvme` | polled; admin + one I/O queue pair in the DMA region, identify, reads with PRP lists, split at MDTS; one goroutine owns the controller. This is the command layer ANS2 shares (§2) |
-| Block | `kernel/block` | `block.Device`, GPT (CRC-checked) and MBR, a cached `io.ReaderAt` |
-| Filesystems | `fs/fat`, `fs/ext4` (over `fs/rofs`) | read-only `io/fs.FS`: FAT12/16/32 with long names; ext2/3/4 with extents, block maps, 64-bit, htree, symlinks. Tested on images made by `mke2fs`/`mkfs.fat` and with `testing/fstest` |
+| NVMe | `drivers/nvme` | polled; admin + one I/O queue pair in the DMA region, identify, reads and writes with PRP lists, split at MDTS; one goroutine owns the controller. This is the command layer ANS2 shares (§2) |
+| Block | `kernel/block` | `block.Device`, `block.Writer`, GPT (CRC-checked) and MBR, a cached `io.ReaderAt`/`io.WriterAt` |
+| Filesystems | `fs/fat`, `fs/ext4` (over `fs/rofs`) | `io/fs.FS`: FAT12/16/32 read + FAT16/32 write (LFN & FSInfo); ext2/3/4 read-only (extents, block maps, 64-bit, htree, symlinks). Tested on images made by `mke2fs`/`mkfs.fat` and with `testing/fstest` |
 | Shell | `lsblk`, `ls DISK:PATH`, `cat DISK:PATH` | no mount table: `cat nvme0p2:/hello.txt` |
 | USB | `drivers/usb/xhci`, `drivers/usb` | polled xHCI: controller, rings, port reset, addressing, descriptors, HID boot keyboard (types into the console) and mouse (`evtest`); hubs and USB sticks since §3.4. For the Mac's USB-C ports once their Apple-specific setup exists |
 
@@ -446,204 +436,14 @@ Never write to the macOS container, the APFS stub internals, NOR flash or the Re
 
 ## 6. Carving out a godeep partition next to Macintosh HD and Omarchy
 
-This sets up option C: a bootable **godeep** entry in the startup picker plus an optional data partition, physically between Macintosh HD and Omarchy, leaving both untouched.
+The step-by-step macOS partitioning, ESP installation, QEMU rehearsal (`make check-applem1`), boot-stage/fault-screen reference, and undo runbook now lives in its own guide: **[`PartitioningMac.md`](PartitioningMac.md)**.
 
-> **godeep cannot boot on this Mac yet.** This prepares the place it will boot from. Running on the real hardware still needs the §4 blockers fixed and the §3 M1 adapters. Until then the new entry starts U-Boot and stops at its prompt, which is the expected result.
-
-**Easy way:** `tools/godeep-partition.sh` does all of this, much like the Omarchy installer. It checks the machine and shrinks Macintosh HD if there isn't already enough free space. Then it runs the Asahi installer with its menus answered for you: the OS list is cut down to a single godeep entry (the "UEFI environment only" boot chain, named `godeep`), so all you do is press Enter and type your passwords. After the reboot, `tools/godeep-partition.sh finish` adds GODEEPDATA and copies `bin/godeep-arm64.img` onto godeep's boot partition as `godeep.img`; rerun it whenever you rebuild. It also has `--dry-run`, `status` and `undo`, and every disk change asks you to type `godeep` first. The steps below are what it does, for reference or for doing it by hand.
-
-You run every command here yourself; nothing in this section was run by Claude.
-
-### 6.1 What you'll end up with
-
-Today (from `diskutil list disk0`; the disk is 500.3 GB and has **no free space**):
-
-```
-disk0
- s1  Apple_APFS_ISC        524 MB   system firmware             ── never touch
- s2  Apple_APFS (disk4)  356.9 GB   Macintosh HD                ── 267.7 GB of it unused
- s3  Apple_APFS (disk2)    2.5 GB   Omarchy stub (m1n1)         ── never touch
- s4  EFI                   524 MB   EFI - OMARC                 ── never touch
- s5  Linux Filesystem      2.1 GB   Omarchy /boot               ── never touch
- s6  Linux Filesystem    132.3 GB   Omarchy root                ── never touch
- s7  Apple_APFS_Recovery   5.4 GB   system recoveryOS (last)    ── never touch
-```
-
-After (with the default 12 GB):
-
-```
- s1  Apple_APFS_ISC        524 MB   system firmware
- s2  Apple_APFS          344.9 GB   Macintosh HD        (12 GB smaller)
- new Apple_APFS            2.5 GB   godeep stub (m1n1)  ┐
- new EFI                   500 MB   EFI - GODEE…        │ godeep, between
- new MS-DOS FAT32         ~9 GB     GODEEPDATA          ┘ macOS and Omarchy
- s3  Apple_APFS            2.5 GB   Omarchy stub
- s4  EFI                   524 MB   EFI - OMARC
- s5  Linux Filesystem      2.1 GB   Omarchy /boot
- s6  Linux Filesystem    132.3 GB   Omarchy root
- s7  Apple_APFS_Recovery   5.4 GB   system recoveryOS
-```
-
-The space comes from shrinking Macintosh HD's container, which is 75% unallocated, so the freed gap lands right after `s2` and before Omarchy's `s3`.
-
-New partitions get the next free *entry numbers* (`disk0s8`, `disk0s9`, …) even though they sit physically between `s2` and `s3`. Always go by **name and size**, never by number alone.
-
-**Choosing the size.** The godeep stub (2.5 GB) and its ESP (0.5 GB) need about 3 GB. The rest becomes GODEEPDATA, for godeep's future disk driver and filesystem work (`ReUsingGVisor.md` §5) and as a drop box shared with macOS and Omarchy. 12 GB gives about 9 GB of data space. Use 4 GB if you only want the boot entry.
-
-### 6.2 Safety first
-
-- **Back up first** (Time Machine or similar). Resizing APFS is routine, but it's still repartitioning the only disk in the machine.
-- **Never touch** `disk0s1` (ISC), `disk0s3`–`disk0s6` (Omarchy), `disk0s7` (system recoveryOS, which must stay the last partition), or anything outside `disk0`.
-- **Plug in the power adapter** for the whole process.
-- **FileVault is on.** That's fine: you resize while logged in, so the volume is unlocked.
-- **How to get back to macOS at any point:** shut down, then hold the power button until "Loading startup options" appears, and pick Macintosh HD. Choose "Options" in the same picker to get recoveryOS.
-- **Check Omarchy still boots before you start**, so you'll know if anything changes.
-
-### 6.3 Pre-flight checks
-
-```sh
-diskutil list disk0                         # must match the "Today" table above
-diskutil apfs list disk4 | grep -E "Capacity Ceiling|Not Allocated"
-#   Size (Capacity Ceiling):  356945842176 B (356.9 GB)
-#   Capacity Not Allocated:   267714056192 B (267.7 GB) (75.0% free)
-tmutil listlocalsnapshots /                 # only com.apple.os.update-* is fine
-sudo diskutil apfs resizeContainer disk4 limits   # preview only, changes nothing
-```
-
-`limits` prints the minimum size the container can shrink to. Your target, `344.9g` with the defaults, must be above that minimum. It will be, by a very wide margin. If you see `com.backupd` (Time Machine) local snapshots, thin them first: `tmutil thinlocalsnapshots / 999999999999 4`.
-
-### 6.4 Step 1: shrink Macintosh HD
-
-New size = **current 356.9 GB minus your godeep size.** With the 12 GB default that's `344.9g`:
-
-```sh
-sudo diskutil apfs resizeContainer disk4 344.9g
-```
-
-`disk4` is Macintosh HD's container (the form `diskutil` prefers; it equals the physical store `disk0s2`). The resize runs live and takes a minute or two. Then run `diskutil list disk0`: a `(free space)` line of about 12 GB should appear between the Macintosh HD container and Omarchy's container. Don't create anything in it by hand: the next step needs it empty.
-
-### 6.5 Step 2: create the bootable godeep stub (Asahi installer)
-
-On Apple Silicon a boot entry needs **a small APFS "stub" container** holding a boot loader, registered with Apple's boot policy from recoveryOS. Doing that by hand isn't practical. Omarchy already used the Asahi installer for this, and the same tool can add a second, independent entry.
-
-```sh
-curl https://alx.sh | sh
-```
-
-This is the official Asahi Linux installer: it downloads and runs as root after you confirm, so read its prompts. The menu wording changes between versions; look for these choices:
-
-1. **Install an OS** (not "Resize" since you already made free space; not anything that mentions Omarchy).
-2. Use the **free space** it reports (about 12 GB).
-3. Choose **"UEFI environment only (m1n1 + U-Boot + ESP)"**. This installs just the boot chain: no Linux, no desktop.
-4. When asked for a name, enter **`godeep`**. That's the label shown in the startup picker.
-5. When asked how much space to use, give it **only what it needs** (it typically suggests the minimum, about 3 GB). Leave the rest free for GODEEPDATA.
-
-The installer then tells you to **shut down and finish in recoveryOS**:
-- Wait 15 seconds after shutting down.
-- Hold the power button until "Loading startup options" appears.
-- Pick the new **godeep** entry and follow the on-screen steps. It asks for your macOS user password, to approve the boot policy for the new entry.
-
-When it finishes, the Mac reboots into the new entry, which runs m1n1 → U-Boot.
-
-> **For driver development:** the installer also offers **"Tethered boot (m1n1, for development)"** (option A in §5). That entry waits for a second computer over USB-C, which can push kernels and run them under m1n1's hypervisor with every hardware access logged. It's ideal for writing the §3 M1 adapters; add it alongside the same way.
-
-### 6.6 Step 3 (optional): the GODEEPDATA partition
-
-Back in macOS, find the new godeep ESP: the **EFI** partition of about 500 MB that is *not* `EFI - OMARC`.
-
-```sh
-diskutil list disk0
-# e.g.  9:  EFI EFI - GODEE…   500.2 MB   disk0s9     ← note this identifier
-sudo diskutil addPartition disk0s9 FAT32 GODEEPDATA 0    # use YOUR godeep ESP id
-```
-
-`0` means "fill the free space". FAT32 is the first filesystem godeep will learn to read and write, and macOS, Omarchy and godeep can all use it.
-
-### 6.7 Step 4: verify
-
-Run `diskutil list disk0` and check that:
-- Macintosh HD's container is `344.9 GB`.
-- A new ~2.5 GB APFS container, a ~500 MB EFI and GODEEPDATA appear **between** it and Omarchy's 2.5 GB container. `diskutil info <id>` shows each one's offset if you want to confirm the physical order.
-- `disk0s3`–`disk0s7` are unchanged.
-
-The startup picker (hold the power button at boot) should show **Macintosh HD, Omarchy and godeep**:
-- **godeep** reaches the **U-Boot** prompt, or U-Boot's boot menu. That's success for now.
-- **Omarchy** still boots normally.
-
-### 6.8 Step 5: put godeep on its ESP and boot it
-
-The Mac image now exists (§3.1). It boots to the shell under QEMU with an m1n1-style hand-off (`make check-applem1`, below), and booted on this Mac on 2026-11-25: m1n1 → godeep at EL2, autorun `lsdev`/`ps`/`mem`/`uptime` on the built-in display (`screens/IMG_2341.JPG`). The second boot on 2026-11-26 had a working keyboard and trackpad (`screens/IMG_2342.JPG`, §3.3).
-
-**Easy way:** `tools/godeep-partition.sh finish`, or `tools/godeep-partition.sh install` to update godeep later. It builds `bin/godeep-applem1.img` if it's missing or stale, copies it to the godeep boot partition as `godeep.img` (keeping the previous one as `godeep.img.prev`), and **makes m1n1 boot godeep directly, without U-Boot**.
-
-**Why not U-Boot.** The first native boot (2026-11-25) showed U-Boot autobooting **Omarchy** from the godeep entry: U-Boot's standard boot scans *every* NVMe partition and boots the first boot method that works anywhere on the disk. Omarchy's ESP (with its EFI loader) won over godeep's `extlinux.conf`. Whether that was because of scan order, Omarchy's EFI boot variables, or `booti` failing on godeep and the scan moving on wasn't visible on screen. So the godeep ESP's `m1n1/boot.bin` (m1n1 stage 2 followed by its payloads: `m1n1 | dtbs | gzip(U-Boot)`) is rebuilt by `tools/m1n1boot` with `gzip(godeep Image)` in U-Boot's place. m1n1 then picks this Mac's device tree and jumps straight to godeep at EL2, using the same Image boot protocol U-Boot uses (self-relocation, §3.1, covers m1n1's choice of load address). U-Boot's `boot.bin` is kept as `m1n1/boot.bin.uboot`. `--uboot` puts it back and uses `extlinux.conf` autoboot. `--no-autoboot` puts it back and stops at U-Boot's prompt for the manual commands below, which are also saved as `GODEEP-BOOT.txt`.
-
-Check a `boot.bin` by hand: `go run ./tools/m1n1boot -info boot.bin` reports whether its kernel payload is U-Boot or godeep.
-
-**The ESP needs root to mount** (`sudo diskutil mount`). Its `diskN sN` number can **change after a reboot**: partitions added in a session get temporary identifiers, so on this Mac the godeep ESP showed as `disk0s10` right after partitioning and `disk0s4` after a reboot. Run `status` to get the current one.
-
-**Rehearse in QEMU first: `make check-applem1`.** QEMU's `sbsa-ref` machine has RAM at 1 TB, the same base as this Mac's DRAM, so the *same* `bin/godeep-applem1.img` runs there unmodified. `tools/fakem1n1` hands it over the way m1n1 does: entry at EL2 with E2H=1, loaded away from its link address (so it self-relocates), and an m1n1-style device tree with the panel's 3456×2234 `x2r10g10b10` framebuffer. The check boots to the shell and saves the screen as a PNG. It also forces a fault at stages 1 and 3 and checks that the red fault screen appears. `make qemu-applem1` runs the same thing interactively. Its first run found a bug that would have stopped every native boot: TamaGo's heap address limit ended exactly at 1 TB (third_party/tamago/GODEEP_PATCHES.md, patch 3).
-
-What to expect on the Mac: the framebuffer clears to dark blue-grey, the boot banner and the `board:` line appear (it says `entered at EL2 (VHE, E2H=1)`), then the autorun output (`lsdev` with this Mac's devices from m1n1's tree, then `ps`, `mem`, `uptime`). About 5 s later, `lsdev idle watchdog hid` prints three rows that say whether idle sleeps, the watchdog is armed, and how far the keyboard got (§3.3); then type. If the Mac reboots by itself about 30 s in, the watchdog fired: godeep stopped scheduling. If U-Boot's text or another OS appears, you didn't boot the godeep entry.
-
-**One command does it all:** `make native` runs the host tests, builds the image, rehearses it on QEMU, then installs it (asks you to type `godeep`, and for sudo).
-
-**If it stops before the console**, read the top-left corner of the screen. godeep draws a numbered square for each boot stage it reaches, on m1n1's framebuffer:
-
-| Last square | Stage reached | So it stopped in |
-|---|---|---|
-| none (m1n1's output or the Apple logo stays) | godeep never ran Go code | `entry_arm64.s`: relocation, EL2→EL1, the early identity map; or no framebuffer in the tree |
-| 1 blue | Hwinit0: Go code runs, device tree read, framebuffer mapped | building or switching to the final page tables |
-| 2 green | final page tables live | Go runtime setup (`schedinit`: the heap), or TamaGo's `CPU.Init` |
-| 3 yellow | Hwinit1: CPU, caches, timers | runtime start: goroutines, `main`, the kernel's init |
-| 4 purple | Go runtime up, board setup started | console creation (`drivers/simplefb`) |
-
-A **red screen** titled `GODEEP EARLY FAULT` means the CPU took an exception. Take a photo: it shows the stage plus **ESR** (why: e.g. `96000004` is a data abort, translation fault), **ELR** (the faulting instruction: look it up with `go tool objdump` on an unstripped build) and **FAR** (the address it touched). Then a second computer with m1n1's hypervisor (§5 option A) can show the rest. Hold the power button to get back.
-
-With U-Boot restored (`--no-autoboot`), boot the godeep entry and, at the U-Boot prompt:
-
-```
-=> load nvme 0:<godeep-ESP-partition> ${kernel_addr_r} godeep.img
-=> booti ${kernel_addr_r} - ${fdtcontroladdr}
-```
-
-U-Boot numbers partitions by GPT entry; `part list nvme 0` shows them. The godeep ESP is the 500 MB EFI partition right before GODEEPDATA.
-
-### 6.9 Undo: remove godeep and give the space back
-
-1. Find the godeep stub container (the ~2.5 GB APFS container that is **not** Omarchy's `disk2`):
-
-   ```sh
-   diskutil apfs list | grep -B2 -A12 "godeep"
-   ```
-
-2. Delete godeep's three partitions. **Double-check each identifier is godeep's, not Omarchy's:**
-
-   ```sh
-   sudo diskutil apfs deleteContainer <godeep stub container, e.g. disk7>
-   sudo diskutil eraseVolume free none <godeep ESP, e.g. disk0s9>
-   sudo diskutil eraseVolume free none <GODEEPDATA, e.g. disk0s10>
-   ```
-
-3. Grow Macintosh HD back into the freed space:
-
-   ```sh
-   sudo diskutil apfs resizeContainer disk4 0     # 0 = grow to fill
-   ```
-
-The godeep entry disappears from the startup picker once its stub container is gone.
-
-### 6.10 Troubleshooting
-
-| Problem | What to do |
-|---|---|
-| `resizeContainer` refuses ("not enough free space", "snapshots") | Run `limits` again; thin Time Machine local snapshots (§6.3); reboot and retry, since a pending macOS update can pin space |
-| The installer says there's no free space | Make sure Step 1 left a `(free space)` gap (`diskutil list disk0`), and that you didn't create a partition in it |
-| No "godeep" in the startup picker | The recoveryOS step didn't complete. Boot it from the picker ("Options" → the godeep entry) and finish the installer's prompts |
-| Booting godeep shows U-Boot, then Omarchy | U-Boot is still on the godeep ESP, and its disk-wide scan found Omarchy first. Run `tools/godeep-partition.sh install` (m1n1 boots godeep directly) |
-| Booting godeep stays on the Apple logo or m1n1's output | godeep stopped before its console came up (§6.8) |
-| Omarchy stopped booting | Nothing here touches its partitions. Pick Omarchy explicitly in the startup picker. If it still fails, its own recovery steps apply; your backup covers the rest |
-| Want macOS back immediately | Hold the power button → pick Macintosh HD |
+Quick links (preserving the §6.x numbering used by `tools/godeep-partition.sh` and source comments):
+- Automated script: `tools/godeep-partition.sh` (`status`, `finish`, `install`, `undo`, `--dry-run`) and `make native`
+- Layout & safety: [`PartitioningMac.md` §6.1–§6.4](PartitioningMac.md#61-what-youll-end-up-with)
+- Asahi stub & `GODEEPDATA` FAT32 partition: [`PartitioningMac.md` §6.5–§6.7](PartitioningMac.md#65-step-2-create-the-bootable-godeep-stub-asahi-installer)
+- Installing `bin/godeep-applem1.img` onto the ESP & early boot/fault diagnostics: [`PartitioningMac.md` §6.8](PartitioningMac.md#68-step-5-put-godeep-on-its-esp-and-boot-it)
+- Undo & troubleshooting: [`PartitioningMac.md` §6.9–§6.10](PartitioningMac.md#69-undo-remove-godeep-and-give-the-space-back)
 
 ---
 
@@ -705,7 +505,7 @@ While a block has no native driver, something else covers it. Each row says what
 |---|---|---|
 | Everything (daily development) | **QEMU `board/virt`**: virtio net/blk/9p/rng/gpu, PL011, RTC | each native driver, one at a time; QEMU stays for tests and CI |
 | CPU boot, MMU, timer, caches | **TamaGo `arm64`** (with the §4 patches) | stays: this *is* the native driver |
-| TCP/IP, SSH | **built**: `net/netstack` (gVisor), `programs/sshd` (`x/crypto/ssh`, SFTP) | stays: only the NIC underneath changes. TLS needs root certificates (not yet) |
+| TCP/IP, SSH, HTTPS | **built**: `net/netstack` (gVisor), `programs/sshd` (`x/crypto/ssh`, SFTP), embedded Mozilla TLS roots (`x509roots/fallback`) | stays: only the NIC underneath changes |
 | Screen | **firmware framebuffer** that iBoot/m1n1 already set up | DCP driver (maybe never: the framebuffer is enough) |
 | Console | framebuffer text out; autorun as input; **Samsung debug UART** in/out via a second Mac or the m1n1 proxy | SPI-HID keyboard and trackpad (M2, polled: works on the Mac since 2026-11-26) |
 | PCIe links, some clocks and power domains | **m1n1** brings them up before jumping to godeep | native PMGR/PCIe drivers, when needed |
@@ -747,15 +547,15 @@ A row in §2 moves from ✗/◐ to ✅ when the driver has:
 
 #### Still worth building on QEMU (portable; carries to the Mac)
 
-| What | Why it pays off on the Mac | QEMU test bed | Size |
+| What | Why it pays off on the Mac | QEMU test bed | Size / Status |
 |---|---|---|---|
-| **FAT write support**, then NVMe writes | GODEEPDATA (§6.6) becomes a place godeep can save files that macOS and Omarchy read; ANS2 shares the NVMe command layer | writable NVMe/USB disk images in `check-virt`, `fsck.fat` on the host afterwards | M |
-| **USB CDC-ECM, host side** (`usb-net`) | the same Ethernet-in-bulk-transfers framing the DWC3 gadget will use, through the same `netdev.NIC` → `netd` path; and USB Ethernet dongles work on the Mac once DWC3 host mode does | QEMU `-device usb-net` on the xHCI, SSH over it | S–M |
-| **9P over TCP** (and 9P writes) | the Mac reads and writes the dev machine's tree over the USB-C network: the way programs and files get onto the Mac before the SSD driver exists | `fs/ninep` over a TCP transport against a host 9P server (`u9fs`/`diod`) through QEMU's NAT | S |
-| **TLS roots** (an embedded CA bundle) | `get https://`, Go module/proxy fetches, any HTTPS service | QEMU NAT to the internet | XS–S |
-| **DHCP lease renewal** | sessions over the cable that outlive a lease | short leases from a test DHCP server (host test exists) | XS |
-| **USB storage robustness**: REQUEST SENSE, reset recovery, writes | real USB sticks stall and need recovery more than QEMU's | `usb-storage` with error injection in host tests; writable images | S |
-| **Keyboard layouts**, and the shell's line editing (history, cursor keys) | used every day on the Mac's keyboard | serial and USB keyboards on QEMU, host tests | S |
+| **FAT write support**, then NVMe writes | `GODEEPDATA` (`PartitioningMac.md` §6.6) becomes a place godeep can save files that macOS and Omarchy read; ANS2 shares the NVMe command layer | writable NVMe/USB disk images (`fs/fat/write.go`, `drivers/nvme`, `kernel/block/write.go`) | ✅ done |
+| **USB CDC-ECM, host side** (`usb-net`) | the same Ethernet-in-bulk-transfers framing the DWC3 gadget will use, through the same `netdev.NIC` → `netd` path; and USB Ethernet dongles work on the Mac once DWC3 host mode does | `drivers/usb/xhci/ecm.go`, `make check-usbnet` | ✅ done |
+| **9P over TCP** (and 9P writes) | the Mac reads and writes the dev machine's tree over the USB-C network: the way programs and files get onto the Mac before the SSD driver exists | `fs/ninep/write.go`, `tools/ninepd` (host TCP 9P2000.L server) | ✅ done |
+| **TLS roots** (an embedded CA bundle) | `get https://`, Go module/proxy fetches, any HTTPS service | `golang.org/x/crypto/x509roots/fallback` in `programs/sh/netcmds.go` | ✅ done |
+| **DHCP lease renewal** | sessions over the cable that outlive a lease | `kernel/net.go` (`renew` at half-lease time) | ✅ done |
+| **USB storage robustness**: REQUEST SENSE, reset recovery, writes | real USB sticks stall and need recovery more than QEMU's | `drivers/usb/xhci/storage.go` (`WRITE(10)`, `REQUEST SENSE`, stall recovery) | ✅ done |
+| **Keyboard layouts**, and the shell's line editing (history, cursor keys) | used every day on the Mac's keyboard | `kernel/input/layout.go` (`kbd` builtin: us/uk/dvorak/colemak), `kernel/tty` (cursor editing + 100-line history) | ✅ done |
 | **WASM**: writable host share, faster startup (cached compiled modules), more WASI | the dev loop on the Mac is "push a program, run it" | `host:` and `ram:` on QEMU | S |
 | **Kernel services**: `ipc` (named ports), tightening capabilities (sessions get narrower `cap`s), `top`/accounting, klog persistence to GODEEPDATA | all board-independent | QEMU and the hosted build | M |
 | **SMP scheduling groundwork** | the Mac has 10 cores; TamaGo uses one. The Go side (per-CPU idle, timers, starting secondary cores into the runtime) can be done on QEMU via PSCI `CPU_ON`; only the Mac's core start (PMGR `cpu-start`) is Apple-specific | QEMU `-smp 4` | L |

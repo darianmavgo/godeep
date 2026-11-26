@@ -1,24 +1,29 @@
 # godeep: a Go-native kernel and OS
 
-## Context
-`~/Documents/godeep` is empty. The goal is an OS where Go's concurrency model *is* the process model: there are no separate address spaces and no OS context switches. A "process" is a supervised group of goroutines, IPC goes over channels, the Go runtime scheduler is the OS scheduler, and memory safety comes from the language, not the MMU.
+## Status (2026-11-26)
+
+This document was the initial Phase-0 design proposal; the repository has grown well past it. Where things stand today:
+- **Phase 1 ✅:** boots on QEMU `virt` (arm64, HVF, the default), `microvm` (amd64), hosted macOS/Linux, and **natively on the MacBook Pro** (`board/applem1`, via m1n1).
+- **Phase 2 ◐:** `proc` (PIDs, supervision, panic containment, pprof-label accounting), `cap` (`cap.Net`, `cap.Resolver`, `cap.PendingNet`), `klog` (`dmesg [-f]`), and `vfs` are built; `ipc` (named ports) and narrower per-process capability scoping remain.
+- **Phase 3 ◐:** per-Proc volume namespace (`kernel/vfs`: `ram:` via writable `fs/memfs`, `host:` via `drivers/virtio/p9` + `fs/ninep`, disks/partitions via writable `fs/fat` and read-only `fs/ext4`), TTY cursor editing + 100-line history, keyboard layouts (`kbd`), and shell builtins (`ps`, `kill`, `mem`, `lsdev`, `lsblk`, `df`, `ls`, `cat`, `cp`, `mv`, `rm`, `mkdir`, `write`, `ifconfig`, `host`, `get`, `dmesg`, `pprof`, `evtest`, `reboot`, `halt`) are built. `/proc`, `/dev`, and shell pipes (`ls | cat`) remain.
+- **Phase 4 ✅ (QEMU) / ◐ (Mac):** interrupt bridge, device manager, DMA allocator, device tree (`kernel/fdt`), modern virtio-mmio (`net`, `rng`, `p9`), PCIe + NVMe (read & write), xHCI USB (keyboard, mouse, hubs, mass storage read/write, CDC-ECM Ethernet), gVisor TCP/IP + DHCP (with lease renewal) + DNS + HTTPS (embedded Mozilla TLS roots), `sshd` + SFTP v3, and `ramfb`/`simplefb` mouse-interactive console all pass in `make check-virt`. On the Mac: framebuffer console, watchdog, WFE idle, and polled SPI keyboard & multitouch trackpad work natively (`TargetMyMac.md`).
+- **Phase 5 ✅:** dynamic WASI preview 1 WebAssembly programs run as ordinary Procs via `wazero` (`programs/wasm`), pushed over SFTP (`make push`) or executed straight from `host:`.
+- **Phase 6 ◐:** panic containment is done; per-process resource quotas and arm64 SMP bring-up remain.
+
+For up-to-date day-to-day references, see [`README.md`](../README.md), [`GEMINI.md`](../GEMINI.md) / [`CLAUDE.md`](../CLAUDE.md), [`DriverModel.md`](DriverModel.md), and [`TargetMyMac.md`](TargetMyMac.md).
+
+---
+
+## Historical Design Proposal (Phase 0)
+
+> The sections below preserve the original bootstrap plan written when the repository was created.
+
+### Context
+The goal is an OS where Go's concurrency model *is* the process model: there are no separate address spaces and no OS context switches. A "process" is a supervised group of goroutines, IPC goes over channels, the Go runtime scheduler is the OS scheduler, and memory safety comes from the language, not the MMU.
 
 Decisions made:
 - **Isolation:** Go only, single address space (Singularity-style language isolation).
-- **Foundation:** TamaGo (`GOOS=tamago`, bare-metal Go runtime). Target `amd64` on the QEMU `microvm` board first.
-
-The first deliverable is `CLAUDE.md` plus the repo skeleton. After that, work proceeds in phases, each ending with something that boots.
-
-## Status (2026-11-25)
-
-This plan was the starting point; the repo has since grown past it. Where things stand:
-- **Phase 1 ✅:** boots on QEMU `virt` (arm64, HVF, the default), `microvm` (amd64), and **on the real MacBook Pro** (`board/applem1`, via m1n1). Hosted build for tests.
-- **Phase 2 ◐:** `proc` (PIDs, supervision, panic containment, pprof-label accounting) is done; `cap`, `ipc` and `klog` are still planned.
-- **Phase 3 ◐:** the shell has `ps`, `kill`, `mem`, `lsdev`, `lsblk`, `ls`, `cat` and more. No VFS or pipes yet; read-only FAT and ext4 exist as `io/fs.FS` (`fs/`), reached by naming the disk (`cat nvme0p2:/hello.txt`).
-- **Phase 4 ◐:** interrupt bridge, device manager, DMA allocator, device tree, virtio-mmio probe, PCIe and NVMe (`make check-virt`). On the Mac: framebuffer console, watchdog, WFE idle, and a polled SPI keyboard and multitouch trackpad (typing works since 2026-11-26). Networking on QEMU (2026-11-26): virtio-net + gVisor TCP/IP + `sshd`, virtio-rng seeding `crypto/rand` (`docs/SSHServer.md`); not on the Mac yet.
-- **Phases 5–6:** not started (panic containment from phase 6 is done).
-
-The Mac work is tracked in `TargetMyMac.md` (§3, §8), the driver rules in `DriverModel.md`.
+- **Foundation:** TamaGo (`GOOS=tamago`, bare-metal Go runtime). Originally targeted `amd64` on QEMU `microvm` first, then switched to `arm64` on QEMU `virt` (HVF) as the default.
 
 ## Core architecture (the "concurrency layer")
 | Classic OS concept | godeep equivalent |
@@ -82,5 +87,3 @@ docs/architecture.md
 - `make hosted && ./godeep-hosted` boots to the `godeep$` shell.
 - `make qemu` boots TamaGo on microvm to the same shell over serial. There, `ps`, `echo hi | cat`, `kill <pid>` (the target proc's goroutines disappear from `/proc`) and `cat /proc/1/status` should all work.
 - Phase 4: `wget`/ping through netstack with QEMU user networking.
-
-Immediate next step after approval: create CLAUDE.md, go.mod, the Makefile and the Phase 1 skeleton, then get "hello" booting in QEMU.

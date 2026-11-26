@@ -2,7 +2,7 @@
 
 This is a tutorial for a two-machine godeep setup:
 
-- **The MacBook Pro (M1 Pro, J316s)** is the **target**. It boots godeep through m1n1, as described in docs/TargetMyMac.md §5 and §6.
+- **The MacBook Pro (M1 Pro, J316s)** is the **target**. It boots godeep through m1n1, as described in `docs/TargetMyMac.md` §5 and `docs/PartitioningMac.md`.
 - **The Windows 11 gaming PC** is the **dev host**. You edit, build, test and run QEMU there, and it pushes each new kernel to the Mac over a USB-C cable.
 
 The goal is a shorter loop between an edit and seeing the result on real hardware, with **text output** instead of photos of the screen.
@@ -56,7 +56,7 @@ With a second computer, macOS stays off the critical path:
 | Step | Where | Rough time |
 |---|---|---|
 | Edit, `make image BOARD=applem1` | PC (WSL) | 10–20 s |
-| Push the 2.4 MB Image over USB and jump to it | PC → Mac | a few seconds |
+| Push the ~12 MB Image over USB and jump to it | PC → Mac | a few seconds |
 | Read the serial output, MMIO trace and fault dump in a terminal | PC | — |
 | Reboot back to m1n1 (watchdog, or a command from the PC) | Mac | ~20–30 s |
 
@@ -101,6 +101,12 @@ What runs where:
 ---
 
 ## 3. One-time setup on the Windows PC
+
+> **Automated setup:** [`tools/setup-windows.ps1`](../tools/setup-windows.ps1) automates §3.1–§3.5 (WSL2 + Ubuntu, `usbipd-win`, Python + m1n1 `proxyclient`, `M1N1DEVICE`, `dialout`, host Go + TamaGo Go, cloning `~/godeep`, and installing a `godeep-push` helper):
+> ```powershell
+> powershell -ExecutionPolicy Bypass -File tools\setup-windows.ps1 [-NoBuild]
+> ```
+> Use the manual steps below if you prefer to set up each component by hand or want to add QEMU inside WSL as well.
 
 ### 3.1 WSL2 with Ubuntu
 
@@ -187,7 +193,7 @@ In WSL, `ls /dev/ttyACM*` should now show `ttyACM0` and `ttyACM1`. If you get pe
 
 You need a boot entry where m1n1 **doesn't** jump to a payload and instead waits for commands over USB. There are two ways to get one:
 
-**A. The Asahi installer's tethered entry.** Run `curl https://alx.sh | sh` again, as in TargetMyMac.md §6.5. Choose **"Tethered boot (m1n1, for development)"**; you may need to answer yes to expert mode for it to appear. Name it `godeep-dev`. It takes a few GB of the free space. After recoveryOS approves it, the picker shows **Macintosh HD, Omarchy, godeep, godeep-dev**.
+**A. The Asahi installer's tethered entry.** Run `curl https://alx.sh | sh` again, as in `docs/PartitioningMac.md` §6.5. Choose **"Tethered boot (m1n1, for development)"**; you may need to answer yes to expert mode for it to appear. Name it `godeep-dev`. It takes a few GB of the free space. After recoveryOS approves it, the picker shows **Macintosh HD, Omarchy, godeep, godeep-dev**.
 
 **B. Reuse the godeep entry (to add, no repartitioning).** m1n1 stage 2 drops into proxy mode when it finds **no payload** after itself. So a `boot.bin` made of only `m1n1 | dtbs`, with no kernel, makes the existing godeep entry a proxy entry. `tools/godeep-partition.sh proxy` would install that, keeping the godeep `boot.bin` as `boot.bin.godeep`, and `install` would put it back. This is a small change to `tools/m1n1boot` (§9).
 
