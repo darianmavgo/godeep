@@ -153,6 +153,7 @@ func earlyFaultGo() {
 // lateFault replaces TamaGo's exception handler (from Hwinit1): until the
 // console exists, a fault would otherwise print to nowhere.
 func lateFault(pc uintptr) {
+	stopWatchdog()
 	if console == nil && atomic.AddUint64(&faultDepth, 1) == 1 {
 		screen.Fault(bootStage, read_esr(), uint64(pc), read_far())
 	}

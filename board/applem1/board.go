@@ -8,6 +8,7 @@ import (
 
 	"godeep/drivers/simplefb"
 	"godeep/kernel"
+	"godeep/kernel/dev"
 	"godeep/kernel/dma"
 	"godeep/kernel/fdt"
 )
@@ -16,7 +17,9 @@ import (
 var bootFDT, bootEL, bootE2H uint64
 
 // Autorun is typed into the shell at boot: there's no keyboard driver yet.
-var Autorun = "lsdev\rps\rmem\ruptime\r"
+// The last lines show, after a few idle seconds, the idle loop's wake-up
+// rate and the watchdog's countdown.
+var Autorun = "lsdev\rps\rmem\ruptime\rsleep 5\rlsdev idle watchdog\r"
 
 var console *simplefb.Console
 
@@ -96,6 +99,7 @@ func NewBoard() kernel.Board {
 	if root != nil {
 		b.Devices = fromFDT(root)
 	}
+	b.Devices = append(b.Devices, dev.Node{Name: "idle", Compatible: idleCompatible})
 	return b
 }
 

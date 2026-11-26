@@ -44,8 +44,9 @@ func init() {
 		"uptime":  {"time since boot", uptime},
 		"mem":     {"memory and scheduler stats", mem},
 		"halt":    {"power off", func(context.Context, Env, *proc.Proc, []string) error { os.Exit(0); return nil }},
+		"reboot":  {"reset the machine (needs a reboot device, e.g. a watchdog)", reboot},
 		"exit":    {"exit this shell (init starts a new one)", nil},
-		"lsdev":   {"devices, their drivers and state", lsdev},
+		"lsdev":   {"lsdev [NAME...]: devices (or those whose name starts with NAME), drivers, state", lsdev},
 		"irqstat": {"interrupt lines and counts", irqstat},
 		"irqlat":  {"irqlat [N]: measure interrupt-to-goroutine latency", irqlat},
 		"dmastat": {"DMA memory usage", dmastat},
@@ -123,7 +124,7 @@ func run(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "exit", "halt"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "lsdev", "irqstat", "irqlat", "dmastat", "exit", "halt", "reboot"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")

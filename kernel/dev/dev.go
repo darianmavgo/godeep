@@ -292,3 +292,7 @@ type LatencyProbe interface {
 
 // Lister reports discovered sub-devices (e.g. virtio-mmio slots).
 type Lister interface{ Devices() []string }
+
+// Rebooter resets the machine (e.g. a watchdog with a zero timeout). Reboot
+// may return before the reset lands.
+type Rebooter interface{ Reboot() }

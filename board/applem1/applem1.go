@@ -25,13 +25,14 @@ func Init() {
 	arm64.SystemExceptionHandler = lateFault
 	stage(StageHwinit1)
 
-	// Idle by spinning. WFI needs a wake-up source: the timer FIQ may need
-	// Apple-specific enabling, and there's no AIC2 driver yet. Spinning
-	// costs one core and can't hang. (board/virt shows the WFI version.)
-	goos.Idle = func(int64) {}
+	// Idle in WFE, woken by the timer event stream (idle.go).
+	initIdle()
 
-	// No PSCI and no watchdog driver yet: stop here (hold the power button).
+	// No PSCI: halt (and a fatal runtime error) stops here, with the
+	// watchdog disarmed so the screen stays (hold the power button).
+	// `reboot` resets through the watchdog (drivers.go).
 	goos.Exit = func(int32) {
+		stopWatchdog()
 		for {
 		}
 	}

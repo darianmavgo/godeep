@@ -59,6 +59,12 @@ const (
 	lowRsvd  = 4 << 20                  // reserved for "m1n1": QEMU's tree, shim, our tree
 	fbBase   = dramBase + 0x3_e000_0000 // a carve-out near the top, like iBoot's
 
+	// The watchdog node points at a RAM page inside the "m1n1" carve-out:
+	// QEMU has no Apple watchdog, but RAM takes the driver's register
+	// writes and reads them back, so the board wiring (driver match, MMIO
+	// mapping, lsdev) is exercised. It never counts and never resets.
+	fakeWdt = dramBase + lowRsvd - 0x4000
+
 	uartBase = 0x6000_0000 // sbsa-ref's non-secure PL011
 
 	hcrE2H = 1 << 34
@@ -276,7 +282,8 @@ func deviceTree(c *config) ([]byte, error) {
 	b.End()
 
 	// Apple-style devices so lsdev has a Mac-like list. Nothing in godeep
-	// touches them yet, and QEMU has nothing at these addresses.
+	// touches them yet, and QEMU has nothing at these addresses, except the
+	// watchdog (fakeWdt, RAM).
 	b.Begin("soc")
 	b.PropStrings("compatible", "simple-bus")
 	b.PropU32("#address-cells", 2)
@@ -292,6 +299,7 @@ func deviceTree(c *config) ([]byte, error) {
 		{"i2c", "apple,t6000-i2c", 0x3_9b04_0000, 0x4000},
 		{"smc", "apple,t6000-smc", 0x2_9040_0000, 0x4000},
 		{"nvme", "apple,t6000-nvme-ans2", 0x3_9340_0000, 0x40000},
+		{"watchdog", "apple,t6000-wdt", fakeWdt, 0x4000},
 	} {
 		b.Begin(fmt.Sprintf("%s@%x", d.name, d.base))
 		b.PropStrings("compatible", d.compat)
@@ -428,7 +436,7 @@ func cmdCheck(args []string) error {
 	image := fs.String("image", "bin/godeep-applem1.img", "kernel Image")
 	qemu := fs.String("qemu", "qemu-system-aarch64", "QEMU binary")
 	timeout := fs.Duration("timeout", 90*time.Second, "how long to wait for the shell")
-	want := fs.String("want", "board:,memory layout OK,uptime", "comma-separated strings the serial output must contain")
+	want := fs.String("want", "board:,memory layout OK,uptime,wake-ups/s,bites in", "comma-separated strings the serial output must contain")
 	fs.Parse(args)
 	if _, err := prepare(&c); err != nil {
 		return err

@@ -13,10 +13,13 @@ import (
 	"godeep/kernel/proc"
 )
 
-func lsdev(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
+func lsdev(_ context.Context, env Env, _ *proc.Proc, args []string) error {
 	w := table(env.TTY)
 	fmt.Fprintln(w, "DEVICE\tCOMPATIBLE\tSTATE\tPID\tRESTARTS\tIRQ\tREG\tINFO")
 	for _, s := range env.Dev.List() {
+		if len(args) > 0 && !slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(s.Name, a) }) {
+			continue
+		}
 		pid := "-"
 		if s.PID != 0 {
 			pid = strconv.Itoa(s.PID)
@@ -117,4 +120,16 @@ func dmastat(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 func date(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	fmt.Fprintln(env.TTY, time.Now().UTC().Format("Mon Jan 2 15:04:05 UTC 2006"))
 	return nil
+}
+
+func reboot(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
+	for _, s := range env.Dev.List() {
+		if r, ok := s.Service.(dev.Rebooter); ok {
+			fmt.Fprintf(env.TTY, "rebooting via %s\n", s.Name)
+			r.Reboot()
+			time.Sleep(time.Second)
+			return errors.New("still running a second after the reset request")
+		}
+	}
+	return errors.New("no reboot device on this board")
 }
