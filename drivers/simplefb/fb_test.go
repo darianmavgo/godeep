@@ -3,7 +3,6 @@ package simplefb
 import (
 	"fmt"
 	"image"
-	"image/color"
 	"image/png"
 	"os"
 	"strings"
@@ -17,19 +16,6 @@ func newFB(w, h int, f Format) *Framebuffer {
 	}
 	stride := w*bpp + 64 // padded rows, as real hardware often has
 	return &Framebuffer{Pix: make([]byte, stride*h), Width: w, Height: h, Stride: stride, Format: f}
-}
-
-func (f *Framebuffer) rgbaAt(x, y int) color.RGBA {
-	o := y*f.Stride + x*f.bpp()
-	switch f.Format {
-	case R5G6B5:
-		v := uint16(f.Pix[o]) | uint16(f.Pix[o+1])<<8
-		return color.RGBA{uint8(v>>11) << 3, uint8(v>>5&0x3f) << 2, uint8(v&0x1f) << 3, 255}
-	case X2R10G10B10:
-		v := uint32(f.Pix[o]) | uint32(f.Pix[o+1])<<8 | uint32(f.Pix[o+2])<<16 | uint32(f.Pix[o+3])<<24
-		return color.RGBA{uint8(v >> 22), uint8(v >> 12), uint8(v >> 2), 255}
-	}
-	return color.RGBA{f.Pix[o+2], f.Pix[o+1], f.Pix[o], 255}
 }
 
 func lit(f *Framebuffer) (n int) {

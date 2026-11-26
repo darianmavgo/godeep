@@ -37,6 +37,9 @@ make hosted    # build ./bin/godeep-hosted and run the kernel as a normal proces
 make kernel    # build bin/godeep-$(ARCH).elf with TamaGo (TAMAGO=path/to/tamago-go/bin/go)
 make image     # arm64 Linux-style Image (bin/godeep-arm64.img) for QEMU -kernel, m1n1, U-Boot booti
 make qemu      # boot it with an interactive shell on serial (arm64: the Image + device tree; BOOT=elf for the ELF; EL2=1 to enter at EL2 like m1n1, TCG)
+make qemu-applem1   # the Mac image itself on QEMU sbsa-ref, handed over like m1n1 (tools/fakem1n1); TCG
+make shot-applem1   # (another terminal) its framebuffer → bin/fakem1n1/screen.png
+make check-applem1  # headless: Mac image reaches the shell, and the fault screen works (stages 1, 3)
 make stop      # (another terminal) power button → clean shutdown; falls back to SIGTERM/SIGKILL
 make kill      # (another terminal) SIGKILL QEMU
 ```
@@ -68,10 +71,13 @@ In QEMU, ^C goes to godeep (it kills the foreground program). Quit QEMU with `Ct
   - `mmio`: `Regs` interface for device registers: `Window` (tamago only) and a recording `Fake` for host tests
 - `drivers/<vendor>/<device>`: portable drivers taking `mmio.Regs`, host-tested; boards register them (`drivers/arm/pl061`, `pl031`, `drivers/virtio/mmio`)
 - `tools/mkimage`: ELF → arm64 Linux Image (`-text-offset` override to test self-relocation)
+- `tools/m1n1boot`: puts godeep in place of U-Boot in an Asahi `m1n1/boot.bin` (m1n1 boots godeep directly; U-Boot on this Mac autoboots Omarchy). `-info` tells which payload a boot.bin has
+- `tools/fakem1n1`: m1n1 stand-in for QEMU `sbsa-ref`, whose RAM starts at 1 TB like the M1's, so `bin/godeep-applem1.img` runs unmodified. An EL3 shim (`shim.asm`, words in `shim_code.go` via `go generate`) drops to EL2 with E2H=1. It loads the Image away from its link address and passes an m1n1-style tree (`/chosen` framebuffer, `/memory`, `/reserved-memory`, Apple-style nodes, plus a PL011 so the console is mirrored to the terminal). `shot` = framebuffer PNG over QMP; `check -fault N` = fault-screen test. sbsa-ref puts its own DTB in the first MB of RAM, so the shim sits at +2 MB
+- Early boot screen (`board/applem1/early.go`): numbered squares on m1n1's framebuffer for each boot stage (1 Hwinit0, 2 final page tables, 3 Hwinit1, 4 runtime up), and a red fault screen (ESR/ELR/FAR) from early vectors (`entry_arm64.s` → `early_arm64.s`), then via `arm64.SystemExceptionHandler` until the console exists. Built on `fdt.ScanEarly` and `simplefb.Early`: allocation-free, and the painter is `//go:nosplit` (it runs on a private stack). `godeep.testfault=N` in `/chosen/bootargs` faults at stage N on purpose
 - `kernel/pgtable`: 4-level 48-bit page tables, allocation-free (runs in `Hwinit0`, before the Go runtime)
 - `drivers/simplefb`: text console on a firmware framebuffer
-- `board/applem1` (`tamago && arm64 && applem1`, `make image BOARD=applem1`): this MacBook Pro. Untested on hardware; see docs/TargetMyMac.md §3.1, §6.8
-- `third_party/tamago`: vendored TamaGo with a 2-file patch (arm64 `linkhwinit0`), via `replace` in go.mod; see its GODEEP_PATCHES.md
+- `board/applem1` (`tamago && arm64 && applem1`, `make image BOARD=applem1`): this MacBook Pro. Boots to the shell under QEMU sbsa-ref via `make check-applem1`; untested on hardware. See docs/TargetMyMac.md §3.1, §6.8
+- `third_party/tamago`: vendored TamaGo, via `replace` in go.mod: arm64 `linkhwinit0` (2 files), and `goos.HeapAddrBits` 41 instead of 40 (M1 DRAM starts at 1 TB = 1<<40; with 40 the runtime aborts in `schedinit`). See its GODEEP_PATCHES.md
 - `tools/godeep-partition.sh`: guided partitioning of this Mac (docs/TargetMyMac.md §6)
   - See `docs/DriverModel.md` for the driver rules and these four pieces
   - planned: cap, ipc, vfs, klog

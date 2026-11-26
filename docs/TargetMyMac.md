@@ -276,7 +276,7 @@ Added for the M1 (2026-11-25), all tested in QEMU except where noted:
 | **early identity map** | `cpuinit` | Go code can't run with the MMU off (every access is Device memory, and Go's vector loads/stores take alignment faults), so `cpuinit` maps RAM with 1 GB blocks in assembly before the runtime starts, as Linux does |
 | **VHE-aware EL2 drop** | `cpuinit` | Apple cores force `HCR_EL2.E2H = 1`, which changes the `CPTR_EL2` and `CNTHCTL_EL2` layouts. `cpuinit` reads E2H back and programs the right one, so FP/SIMD and the EL1 timer aren't left trapped. Also writes `VTTBR_EL2 = 0` (§3.2) and a fully known `SCTLR_EL1`. *E2H = 1 can only be tested on the Mac* |
 | **framebuffer console** | `drivers/simplefb` (host-tested, renders to PNG) | text on m1n1's `simple-framebuffer`: `x8r8g8b8`, `x2r10g10b10` (the XDR panel), `r5g6b5`; scaled font, scrolling |
-| **`board/applem1`** | `make image BOARD=applem1` → `bin/godeep-applem1.img` | the Mac board: memory map below, framebuffer console (and runtime panics on screen), device list from m1n1's FDT, check that godeep's RAM is inside m1n1's usable memory and clear of `/reserved-memory`, **autorun** of `lsdev`, `ps`, `mem`, `uptime` (no keyboard yet), spin idle (no wake source yet). *Untested on hardware* |
+| **`board/applem1`** | `make image BOARD=applem1` → `bin/godeep-applem1.img` | the Mac board: memory map below, framebuffer console (and runtime panics on screen), device list from m1n1's FDT, check that godeep's RAM is inside m1n1's usable memory and clear of `/reserved-memory`, **autorun** of `lsdev`, `ps`, `mem`, `uptime` (no keyboard yet), spin idle (no wake source yet), boot-stage squares and a fault screen before the console (§6.8). *Boots to the shell on QEMU sbsa-ref (`make check-applem1`); untested on hardware* |
 
 `board/applem1` memory map (16 GB model): DRAM `0x100_0000_0000`–`0x104_0000_0000`; godeep RAM `0x101_0000_0000` + 4 GB (kernel linked at `+1 MB`, page tables below it); DMA region `0x102_0000_0000` + 512 MB (first 2 MB hold the boot device tree); everything else in DRAM mapped non-cacheable (firmware, the framebuffer).
 
@@ -487,29 +487,40 @@ The startup picker (hold the power button at boot) should show **Macintosh HD, O
 
 ### 6.8 Step 5: put godeep on its ESP and boot it
 
-The Mac image now exists (§3.1, *untested on hardware*).
+The Mac image now exists (§3.1). It boots to the shell under QEMU with an m1n1-style hand-off (`make check-applem1`, below), but is *untested on hardware*.
 
-**Easy way:** `tools/godeep-partition.sh finish`, or `tools/godeep-partition.sh install` to update godeep later. It builds `bin/godeep-applem1.img` if it's missing or stale, copies it to the godeep boot partition as `godeep.img` (keeping the previous one as `godeep.img.prev`), and writes `extlinux/extlinux.conf` so U-Boot boots it automatically after its countdown (`--no-autoboot` to skip). It also saves the manual U-Boot commands, with this Mac's partition number, as `GODEEP-BOOT.txt` on that partition.
+**Easy way:** `tools/godeep-partition.sh finish`, or `tools/godeep-partition.sh install` to update godeep later. It builds `bin/godeep-applem1.img` if it's missing or stale, copies it to the godeep boot partition as `godeep.img` (keeping the previous one as `godeep.img.prev`), and **makes m1n1 boot godeep directly, without U-Boot**.
 
-By hand: build it and copy it to the godeep ESP:
+**Why not U-Boot.** The first native boot (2026-11-25) showed U-Boot autobooting **Omarchy** from the godeep entry: U-Boot's standard boot scans *every* NVMe partition and boots the first boot method that works anywhere on the disk. Omarchy's ESP (with its EFI loader) won over godeep's `extlinux.conf`. Whether that was because of scan order, Omarchy's EFI boot variables, or `booti` failing on godeep and the scan moving on wasn't visible on screen. So the godeep ESP's `m1n1/boot.bin` (m1n1 stage 2 followed by its payloads: `m1n1 | dtbs | gzip(U-Boot)`) is rebuilt by `tools/m1n1boot` with `gzip(godeep Image)` in U-Boot's place. m1n1 then picks this Mac's device tree and jumps straight to godeep at EL2, using the same Image boot protocol U-Boot uses (self-relocation, §3.1, covers m1n1's choice of load address). U-Boot's `boot.bin` is kept as `m1n1/boot.bin.uboot`. `--uboot` puts it back and uses `extlinux.conf` autoboot. `--no-autoboot` puts it back and stops at U-Boot's prompt for the manual commands below, which are also saved as `GODEEP-BOOT.txt`.
 
-```sh
-make image BOARD=applem1                          # bin/godeep-applem1.img
-sudo diskutil mount disk0s9                     # the godeep ESP (EFI - GODEE…; check with status)
-cp bin/godeep-applem1.img /Volumes/EFI\ -\ GODEE*/godeep.img
-diskutil unmount disk0s9
-```
+Check a `boot.bin` by hand: `go run ./tools/m1n1boot -info boot.bin` reports whether its kernel payload is U-Boot or godeep.
 
-What to expect: the framebuffer clears to dark blue-grey, the boot banner and the `board:` line appear, then the autorun output (`lsdev` with this Mac's devices from m1n1's tree, then `ps`, `mem`, `uptime`). If the screen just stays on U-Boot's output, godeep stopped before its console came up: MMU setup, relocation or the E2H path. That's where a second computer with m1n1's hypervisor (§5 option A) shows exactly where. Hold the power button to get back.
+**The ESP needs root to mount** (`sudo diskutil mount`). Its `diskN sN` number can **change after a reboot**: partitions added in a session get temporary identifiers, so on this Mac the godeep ESP showed as `disk0s10` right after partitioning and `disk0s4` after a reboot. Run `status` to get the current one.
 
-Boot the godeep entry and, at the U-Boot prompt:
+**Rehearse in QEMU first: `make check-applem1`.** QEMU's `sbsa-ref` machine has RAM at 1 TB, the same base as this Mac's DRAM, so the *same* `bin/godeep-applem1.img` runs there unmodified. `tools/fakem1n1` hands it over the way m1n1 does: entry at EL2 with E2H=1, loaded away from its link address (so it self-relocates), and an m1n1-style device tree with the panel's 3456×2234 `x2r10g10b10` framebuffer. The check boots to the shell and saves the screen as a PNG. It also forces a fault at stages 1 and 3 and checks that the red fault screen appears. `make qemu-applem1` runs the same thing interactively. Its first run found a bug that would have stopped every native boot: TamaGo's heap address limit ended exactly at 1 TB (third_party/tamago/GODEEP_PATCHES.md, patch 3).
+
+What to expect on the Mac: the framebuffer clears to dark blue-grey, the boot banner and the `board:` line appear (it says `entered at EL2 (VHE, E2H=1)`), then the autorun output (`lsdev` with this Mac's devices from m1n1's tree, then `ps`, `mem`, `uptime`). If U-Boot's text or another OS appears, you didn't boot the godeep entry.
+
+**If it stops before the console**, read the top-left corner of the screen. godeep draws a numbered square for each boot stage it reaches, on m1n1's framebuffer:
+
+| Last square | Stage reached | So it stopped in |
+|---|---|---|
+| none (m1n1's output or the Apple logo stays) | godeep never ran Go code | `entry_arm64.s`: relocation, EL2→EL1, the early identity map; or no framebuffer in the tree |
+| 1 blue | Hwinit0: Go code runs, device tree read, framebuffer mapped | building or switching to the final page tables |
+| 2 green | final page tables live | Go runtime setup (`schedinit`: the heap), or TamaGo's `CPU.Init` |
+| 3 yellow | Hwinit1: CPU, caches, timers | runtime start: goroutines, `main`, the kernel's init |
+| 4 purple | Go runtime up, board setup started | console creation (`drivers/simplefb`) |
+
+A **red screen** titled `GODEEP EARLY FAULT` means the CPU took an exception. Take a photo: it shows the stage plus **ESR** (why: e.g. `96000004` is a data abort, translation fault), **ELR** (the faulting instruction: look it up with `go tool objdump` on an unstripped build) and **FAR** (the address it touched). Then a second computer with m1n1's hypervisor (§5 option A) can show the rest. Hold the power button to get back.
+
+With U-Boot restored (`--no-autoboot`), boot the godeep entry and, at the U-Boot prompt:
 
 ```
 => load nvme 0:<godeep-ESP-partition> ${kernel_addr_r} godeep.img
 => booti ${kernel_addr_r} - ${fdtcontroladdr}
 ```
 
-U-Boot's partition numbering differs from macOS's `diskN`; `part list nvme 0` shows it. Once this works, a `boot.scr` script or EFI boot entry can make it automatic.
+U-Boot numbers partitions by GPT entry; `part list nvme 0` shows them. The godeep ESP is the 500 MB EFI partition right before GODEEPDATA.
 
 ### 6.9 Undo: remove godeep and give the space back
 
@@ -542,7 +553,8 @@ The godeep entry disappears from the startup picker once its stub container is g
 | `resizeContainer` refuses ("not enough free space", "snapshots") | Run `limits` again; thin Time Machine local snapshots (§6.3); reboot and retry, since a pending macOS update can pin space |
 | The installer says there's no free space | Make sure Step 1 left a `(free space)` gap (`diskutil list disk0`), and that you didn't create a partition in it |
 | No "godeep" in the startup picker | The recoveryOS step didn't complete. Boot it from the picker ("Options" → the godeep entry) and finish the installer's prompts |
-| Booting godeep shows a black screen or a U-Boot prompt | Expected until godeep can boot on the metal |
+| Booting godeep shows U-Boot, then Omarchy | U-Boot is still on the godeep ESP, and its disk-wide scan found Omarchy first. Run `tools/godeep-partition.sh install` (m1n1 boots godeep directly) |
+| Booting godeep stays on the Apple logo or m1n1's output | godeep stopped before its console came up (§6.8) |
 | Omarchy stopped booting | Nothing here touches its partitions. Pick Omarchy explicitly in the startup picker. If it still fails, its own recovery steps apply; your backup covers the rest |
 | Want macOS back immediately | Hold the power button → pick Macintosh HD |
 

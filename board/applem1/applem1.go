@@ -20,6 +20,11 @@ func Init() {
 	CPU.EnableCache()
 	CPU.InitGenericTimers(0, 0) // 24 MHz, programmed by the firmware
 
+	// CPU.Init installed TamaGo's vectors over the early ones: keep the
+	// fault screen until the console exists (early.go).
+	arm64.SystemExceptionHandler = lateFault
+	stage(StageHwinit1)
+
 	// Idle by spinning. WFI needs a wake-up source: the timer FIQ may need
 	// Apple-specific enabling, and there's no AIC2 driver yet. Spinning
 	// costs one core and can't hang. (board/virt shows the WFI version.)

@@ -13,6 +13,8 @@
 // FDT copy area: the first 2MB of the DMA region (see mem.go).
 #define FDT_COPY 0x10200000000		// DMA_BASE (mem.go)
 #define FDT_MAX  0x200000
+#define DMA_SIZE 0x20000000		// mem.go
+#define EARLY_VECTORS 0x800		// early.go earlyVectors
 
 // Link address of the Image (TEXT_START in the Makefile - 0x1000: the ELF
 // header page that the Image header replaces). Must match the Makefile
@@ -81,6 +83,7 @@ copied_image:
 	MOVD	R19, R0
 	B	(R2)			// restart at cpuinit's link address
 relocated:
+	MOVD	$0, R21			// E2H seen at EL2 (bootE2H)
 	MRS	CurrentEL, R20
 	LSR	$2, R20, R20
 	AND	$3, R20, R20		// entry exception level
@@ -89,7 +92,12 @@ relocated:
 
 	// EL2 -> EL1 (docs/TargetMyMac.md §3.2). No stage-2 translation, no
 	// traps, EL1 owns the timers and the GIC CPU interface.
-	MOVD	$(1<<31), R0		// HCR_EL2.RW: EL1 is AArch64 (E2H, TGE, VM, traps 0)
+	// E2H is kept as the loader left it: Apple cores fix it at 1 anyway, and
+	// keeping it lets QEMU (tools/fakem1n1, E2H=1) take the same path.
+	WORD	$0xd53c1101		// mrs x1, hcr_el2
+	AND	$(1<<34), R1, R1	// E2H
+	MOVD	$(1<<31), R0		// HCR_EL2.RW: EL1 is AArch64 (TGE, VM, traps 0)
+	ORR	R1, R0, R0
 	WORD	$0xd51c1100		// msr hcr_el2, x0
 	ISB	$15
 	MOVD	$0, R0
@@ -101,6 +109,7 @@ relocated:
 	MOVD	$0x33ff, R0		// CPTR_EL2 (E2H=0): RES1 bits, TFP=0: no FP/SIMD traps
 	B	cptr
 vhe:
+	MOVD	$1, R21
 	MOVD	$(3<<20), R0		// CPTR_EL2 (E2H=1, CPACR layout): FPEN=0b11
 cptr:
 	WORD	$0xd51c1140		// msr cptr_el2, x0
@@ -125,6 +134,8 @@ at_el1:
 TEXT ·el1entry(SB),NOSPLIT|NOFRAME,$0
 	MOVD	$·bootEL(SB), R1
 	MOVD	R20, (R1)
+	MOVD	$·bootE2H(SB), R1
+	MOVD	R21, (R1)
 
 	// Copy a valid device tree (magic 0xd00dfeed, big endian) to FDT_COPY.
 	CBZ	R19, no_fdt
@@ -160,14 +171,42 @@ no_fdt:
 	MSR	R0, SCTLR_EL1
 	ISB	$15
 
+	// Early exception vectors (early.go), until TamaGo's CPU.Init installs
+	// its own: 16 entries of "ldr x18, #8; br x18; .quad earlyFault" at
+	// RamStart+EARLY_VECTORS (2 KB aligned).
+	MOVD	runtime∕goos·RamStart(SB), R10
+	ADD	$EARLY_VECTORS, R10, R10
+	MOVD	$·earlyFault(SB), R11
+	MOVD	R10, R12
+	MOVD	$16, R13
+	MOVW	$0x58000052, R14	// ldr x18, #8
+	MOVW	$0xd61f0240, R15	// br x18
+vec:
+	MOVW	R14, (R12)
+	MOVW	R15, 4(R12)
+	MOVD	R11, 8(R12)
+	ADD	$0x80, R12, R12
+	SUB	$1, R13, R13
+	CBNZ	R13, vec
+	DSB	$15
+	WORD	$0xd508751f		// ic iallu
+	DSB	$15
+	ISB	$15
+	MSR	R10, VBAR_EL1
+	ISB	$15
+
 	// Early identity map, so Go code (the page-table builder in Hwinit0)
 	// runs on Normal memory: with the MMU off everything is Device memory
-	// and Go's vector loads/stores take alignment faults. RAM is mapped with
+	// and Go's vector loads/stores take alignment faults. RAM and the DMA
+	// region above it (where the device tree was copied) are mapped with
 	// 1 GB Normal blocks; the early console's GB as Device. Same TCR as the
 	// final tables (48-bit VA, 4 KB granule), so RAM above 1 TB works.
+	// Hwinit0 adds the framebuffer (early.go mapEarly).
 	MOVD	runtime∕goos·RamStart(SB), R6
 	MOVD	runtime∕goos·RamSize(SB), R7
 	ADD	R6, R7, R7		// ramEnd
+	MOVD	$DMA_SIZE, R12
+	ADD	R12, R7, R7		// + the DMA region
 	ADD	$0x1000, R6, R8		// boot L0 table
 	ADD	$0x2000, R6, R9		// boot L1 table
 	MOVD	R8, R10

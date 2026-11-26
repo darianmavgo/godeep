@@ -34,6 +34,7 @@ const tableArena = 0x4000
 //go:linkname hwinit0 runtime/goos.Hwinit0
 func hwinit0() {
 	fp_enable()
+	earlyScreen() // stage 1, and the fault screen from here on
 
 	ramStart, ramEnd := runtime.MemRegion()
 	textStart, textEnd := runtime.TextRegion()
@@ -48,10 +49,12 @@ func hwinit0() {
 	root, err := pt.Build()
 	check(err)
 	mmu_switch(root)
+	uartReady = uartBase != 0 // below Limit, so mapped as Device
+	stage(StageTables)
 }
 
 // check: no console exists this early on the Mac. Stop here; the screen
-// keeps showing m1n1's output, which is the clue.
+// shows stage 1 only (or m1n1's output if there's no framebuffer).
 func check(err error) {
 	if err != nil {
 		for {

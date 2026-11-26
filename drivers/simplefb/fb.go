@@ -6,6 +6,8 @@ package simplefb
 
 import (
 	"fmt"
+	"image"
+	"image/color"
 	"sync"
 
 	"golang.org/x/image/font/basicfont"
@@ -58,6 +60,31 @@ func (f *Framebuffer) RGB(r, g, b uint8) uint32 {
 		return uint32(r>>3)<<11 | uint32(g>>2)<<5 | uint32(b>>3)
 	}
 	return uint32(r)<<16 | uint32(g)<<8 | uint32(b)
+}
+
+func (f *Framebuffer) rgbaAt(x, y int) color.RGBA {
+	o := y*f.Stride + x*f.bpp()
+	switch f.Format {
+	case R5G6B5:
+		v := uint16(f.Pix[o]) | uint16(f.Pix[o+1])<<8
+		return color.RGBA{uint8(v>>11) << 3, uint8(v>>5&0x3f) << 2, uint8(v&0x1f) << 3, 255}
+	case X2R10G10B10:
+		v := uint32(f.Pix[o]) | uint32(f.Pix[o+1])<<8 | uint32(f.Pix[o+2])<<16 | uint32(f.Pix[o+3])<<24
+		return color.RGBA{uint8(v >> 22), uint8(v >> 12), uint8(v >> 2), 255}
+	}
+	return color.RGBA{f.Pix[o+2], f.Pix[o+1], f.Pix[o], 255}
+}
+
+// Image decodes the framebuffer into an RGBA image (e.g. to save a
+// screenshot of a memory dump as PNG). The framebuffer must be Valid.
+func (f *Framebuffer) Image() *image.RGBA {
+	img := image.NewRGBA(image.Rect(0, 0, f.Width, f.Height))
+	for y := 0; y < f.Height; y++ {
+		for x := 0; x < f.Width; x++ {
+			img.SetRGBA(x, y, f.rgbaAt(x, y))
+		}
+	}
+	return img
 }
 
 func (f *Framebuffer) set(x, y int, c uint32) {

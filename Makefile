@@ -7,6 +7,11 @@
 #   make qemu BOOT=elf     arm64 ELF instead of the Linux-style Image (no device tree)
 #   make image             arm64 Image (bin/godeep-arm64.img) for QEMU, m1n1, U-Boot booti
 #   make image BOARD=applem1   Image for this MacBook Pro (bin/godeep-applem1.img), see docs/TargetMyMac.md
+#   make qemu-applem1      that same Mac image on QEMU sbsa-ref (RAM at 1 TB) via tools/fakem1n1,
+#                          handed over like m1n1 does (EL2, E2H=1, relocation, m1n1-style tree)
+#   make shot-applem1      (another terminal) save its framebuffer as bin/fakem1n1/screen.png
+#   make check-applem1     boot it headless and check the shell comes up, then check the
+#                          fault screen at stages 1 and 3 (about a minute; TCG)
 #   make stop              from another terminal: power godeep off cleanly (falls back to kill)
 #   make kill              from another terminal: kill QEMU immediately
 
@@ -81,7 +86,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: test hosted kernel image qemu stop kill clean
+.PHONY: test hosted kernel image qemu qemu-applem1 shot-applem1 check-applem1 stop kill clean
 
 test:
 	go vet ./...
@@ -98,11 +103,29 @@ image: kernel
 	go run ./tools/mkimage -ram $(RAM_BASE) -o $(IMAGE) $(KERNEL)
 
 qemu: $(if $(filter $(BOOTFILE),$(IMAGE)),image,kernel)
-	@if [ "$(BOARD)" = applem1 ]; then echo "BOARD=applem1 runs on the Mac itself, not QEMU (docs/TargetMyMac.md)"; exit 1; fi
+	@if [ "$(BOARD)" = applem1 ]; then echo "BOARD=applem1 runs on QEMU sbsa-ref, not virt: make qemu-applem1"; exit 1; fi
 	@echo "booting godeep $(ARCH)... (quit QEMU: Ctrl-A then X, or type halt)"
 	@mkdir -p bin
 	$(QEMU) $(QEMU_FLAGS) $(CONTROL) -kernel $(BOOTFILE)
 	@rm -f bin/qemu-$(ARCH).pid bin/qmp-$(ARCH).sock
+
+# The Mac image under QEMU (tools/fakem1n1). Always BOARD=applem1, whatever
+# was given; sbsa-ref needs EL3, so TCG only.
+APPLEM1 = $(MAKE) -s image BOARD=applem1
+
+qemu-applem1:
+	@$(APPLEM1)
+	@go run ./tools/fakem1n1 run
+
+shot-applem1:
+	@go run ./tools/fakem1n1 shot
+
+check-applem1:
+	@$(APPLEM1)
+	@go build -o bin/fakem1n1-check ./tools/fakem1n1
+	bin/fakem1n1-check check
+	bin/fakem1n1-check check -fault 1 -o bin/fakem1n1/fault1
+	bin/fakem1n1-check check -fault 3 -o bin/fakem1n1/fault3
 
 stop:
 	@tools/qemu-stop.sh

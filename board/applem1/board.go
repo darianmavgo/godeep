@@ -13,7 +13,7 @@ import (
 )
 
 // set by cpuinit (entry_arm64.s)
-var bootFDT, bootEL uint64
+var bootFDT, bootEL, bootE2H uint64
 
 // Autorun is typed into the shell at boot: there's no keyboard driver yet.
 var Autorun = "lsdev\rps\rmem\ruptime\r"
@@ -25,10 +25,14 @@ func printk(c byte) {
 	if console != nil {
 		console.Write([]byte{c})
 	}
+	if uartBase != 0 {
+		uartPut(c)
+	}
 }
 
 // NewBoard brings up the framebuffer console and describes the machine.
 func NewBoard() kernel.Board {
+	stage(StageRuntime)
 	var root *fdt.Node
 	info := []string{}
 	if bootFDT != 0 {
@@ -50,9 +54,16 @@ func NewBoard() kernel.Board {
 		}
 	}
 
+	if uartReady {
+		out = tee{out, uartWriter{}}
+	}
+
 	el := "EL1"
 	if bootEL == 2 {
 		el = "EL2, dropped to EL1"
+		if bootE2H == 1 {
+			el = "EL2 (VHE, E2H=1), dropped to EL1"
+		}
 	}
 	model := "unknown model"
 	nodes := 0
@@ -93,6 +104,23 @@ type writer interface{ Write([]byte) (int, error) }
 type discard struct{}
 
 func (discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// tee writes to the framebuffer console and the serial mirror.
+type tee struct{ a, b writer }
+
+func (t tee) Write(p []byte) (int, error) {
+	t.b.Write(p)
+	return t.a.Write(p)
+}
+
+type uartWriter struct{}
+
+func (uartWriter) Write(p []byte) (int, error) {
+	for _, c := range p {
+		uartPut(c)
+	}
+	return len(p), nil
+}
 
 func joinInfo(s []string) string {
 	out := ""

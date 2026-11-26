@@ -6,12 +6,15 @@
 #                                        Asahi installer's menus are answered
 #                                        for you)
 #   tools/godeep-partition.sh finish     after the reboot: add GODEEPDATA, build
-#                                        (if needed) and copy bin/godeep-applem1.img
-#                                        onto godeep's boot partition with U-Boot
-#                                        autoboot (rerun to update godeep)
+#                                        (if needed) and make m1n1 boot
+#                                        bin/godeep-applem1.img directly, in
+#                                        place of U-Boot (rerun to update godeep)
 #   tools/godeep-partition.sh install    only (re)install the godeep image
-#   --no-autoboot                        copy the image, but let U-Boot stop at
-#                                        its prompt (boot godeep by hand)
+#   --uboot                              keep U-Boot: it autoboots godeep via
+#                                        extlinux.conf (but on a Mac with Omarchy
+#                                        it may boot Omarchy instead)
+#   --no-autoboot                        keep U-Boot and let it stop at its
+#                                        prompt (boot godeep by hand)
 #   tools/godeep-partition.sh status     show where things stand (read-only)
 #   tools/godeep-partition.sh undo       remove godeep and give the space back
 #   --dry-run                            show every command, change nothing
@@ -25,14 +28,16 @@ set -euo pipefail
 GODEEP_GB="${GODEEP_GB:-12}"
 DRY=0
 AUTOBOOT=1
+DIRECT=1 # m1n1 boots godeep itself (m1n1/boot.bin's U-Boot payload replaced)
 CMD="setup"
 for a in "$@"; do
 	case "$a" in
 	--dry-run) DRY=1 ;;
-	--no-autoboot) AUTOBOOT=0 ;;
+	--uboot) DIRECT=0 ;;
+	--no-autoboot) DIRECT=0; AUTOBOOT=0 ;;
 	setup | status | undo | install) CMD="$a" ;;
 	finish | data) CMD=finish ;;
-	-h | --help) sed -n '2,21p' "$0"; exit 0 ;;
+	-h | --help) sed -n '2,25p' "$0"; exit 0 ;;
 	*) echo "unknown argument: $a (try --help)"; exit 2 ;;
 	esac
 done
@@ -310,7 +315,7 @@ finish() {
 image_stale() { # missing, or older than any Go/assembly source that goes into it
 	[ ! -f "$IMAGE" ] && return 0
 	[ -n "$(find "$REPO/kernel" "$REPO/board/applem1" "$REPO/drivers" "$REPO/programs" \
-		"$REPO/cmd/godeep" "$REPO/third_party/tamago/arm64" -newer "$IMAGE" \
+		"$REPO/cmd/godeep" "$REPO/third_party/tamago" -newer "$IMAGE" \
 		\( -name '*.go' -o -name '*.s' \) 2>/dev/null | head -1)" ]
 }
 
@@ -333,35 +338,81 @@ install_image() {
 	fi
 
 	step "Copy godeep onto its boot partition ($esp)"
+	# m1n1/boot.bin is rebuilt on the host before anything is mounted, so a
+	# failure here changes nothing. go runs as you, never under sudo.
+	local tool="" newboot=""
+	if [ "$DIRECT" = 1 ] && [ "$DRY" = 0 ]; then
+		tool=$(mktemp -d /tmp/godeep-m1n1boot.XXXXXX)
+		(cd "$REPO" && go build -o "$tool/m1n1boot" ./tools/m1n1boot) || die "can't build tools/m1n1boot"
+	fi
 	was_mounted=$(diskutil info -plist "$esp" | plist MountPoint || true)
-	[ -n "$was_mounted" ] || run diskutil mount "$esp"
+	# EFI partitions need root to mount on current macOS.
+	[ -n "$was_mounted" ] || run sudo diskutil mount "$esp"
 	mnt=$(diskutil info -plist "$esp" | plist MountPoint || true)
 	if [ "$DRY" = 1 ]; then
 		say "  (dry run: would copy $IMAGE to ${mnt:-<boot partition>}/godeep.img"
-		[ "$AUTOBOOT" = 1 ] && say "   and write extlinux/extlinux.conf so U-Boot boots it automatically)"
+		if [ "$DIRECT" = 1 ]; then
+			say "   and replace the U-Boot payload in m1n1/boot.bin with godeep, keeping U-Boot's as m1n1/boot.bin.uboot)"
+		elif [ "$AUTOBOOT" = 1 ]; then
+			say "   and write extlinux/extlinux.conf so U-Boot boots it automatically)"
+		fi
 		return 0
 	fi
 	[ -n "$mnt" ] || die "couldn't mount $esp"
-	if [ "$AUTOBOOT" = 1 ]; then
+	local S="" # write as root if the mount isn't ours
+	[ -w "$mnt" ] || S=sudo
+	put() { $S tee "$1" >/dev/null; } # put FILE < content
+
+	local boot="$mnt/m1n1/boot.bin" saved="$mnt/m1n1/boot.bin.uboot"
+	if [ "$DIRECT" = 1 ]; then
+		[ -f "$boot" ] || die "$esp has no m1n1/boot.bin: is it really the godeep boot partition?"
+		# Build from U-Boot's boot.bin (saved the first time), so reruns don't stack payloads.
+		local base="$saved" what
+		if [ ! -f "$saved" ]; then
+			base="$boot"
+			what=$("$tool/m1n1boot" -info "$boot") || die "m1n1/boot.bin isn't in the format m1n1boot knows: not touching it"
+			say "  $what"
+			case "$what" in *", U-Boot") ;; *) die "m1n1/boot.bin's payload isn't U-Boot and there's no boot.bin.uboot: not touching it" ;; esac
+		fi
+		newboot="$tool/boot.bin"
+		what=$("$tool/m1n1boot" -base "$base" -kernel "$IMAGE" -o "$newboot") || die "couldn't build the new m1n1/boot.bin"
+		say "  $what"
+		confirm "Make m1n1 boot godeep directly (U-Boot's m1n1/boot.bin is kept as boot.bin.uboot)?"
+	elif [ "$AUTOBOOT" = 1 ]; then
 		confirm "Copy godeep.img to the godeep boot partition and make U-Boot boot it automatically?"
 	else
 		confirm "Copy godeep.img to the godeep boot partition?"
 	fi
-	[ -f "$mnt/godeep.img" ] && run cp "$mnt/godeep.img" "$mnt/godeep.img.prev"
-	run cp "$IMAGE" "$mnt/godeep.img"
+	[ -f "$mnt/godeep.img" ] && run $S cp "$mnt/godeep.img" "$mnt/godeep.img.prev"
+	run $S cp "$IMAGE" "$mnt/godeep.img"
 	ok "godeep.img is on the godeep boot partition (the previous one, if any, is godeep.img.prev)"
 
-	# The fallback, always written: boot by hand from U-Boot's prompt.
-	cat >"$mnt/GODEEP-BOOT.txt" <<TXT
-Boot godeep by hand: press a key during U-Boot's countdown, then type:
+	if [ "$DIRECT" = 1 ]; then
+		[ -f "$saved" ] || run $S cp "$boot" "$saved"
+		run $S cp "$newboot" "$boot"
+		ok "m1n1/boot.bin: m1n1 → godeep (U-Boot's is m1n1/boot.bin.uboot; --uboot puts it back)"
+	elif [ -f "$saved" ]; then
+		run $S cp "$saved" "$boot"
+		run $S rm "$saved"
+		ok "m1n1/boot.bin: U-Boot restored"
+	fi
+	[ -n "$tool" ] && rm -rf "$tool"
+
+	# The fallback, always written: boot by hand from U-Boot's prompt (--uboot / --no-autoboot).
+	put "$mnt/GODEEP-BOOT.txt" <<TXT
+To use U-Boot instead of m1n1 → godeep: tools/godeep-partition.sh install --no-autoboot
+Then boot godeep by hand: press a key during U-Boot's countdown, then type:
 
 load nvme 0:$part \${kernel_addr_r} godeep.img
 booti \${kernel_addr_r} - \${fdtcontroladdr}
 
-If nvme 0:$part is wrong, "part list nvme 0" lists the partitions.
+If nvme 0:$part is wrong, "part list nvme 0" lists the partitions (the godeep
+one is the 500 MB EFI partition between the macOS container and GODEEPDATA).
 TXT
 
-	if [ "$AUTOBOOT" = 1 ]; then
+	if [ "$DIRECT" = 1 ]; then
+		: # U-Boot doesn't run; its extlinux.conf is left as it is
+	elif [ "$AUTOBOOT" = 1 ]; then
 		# U-Boot's standard boot scans the boot partition for
 		# extlinux/extlinux.conf and boots arm64 Images with booti. With no
 		# FDT line it passes the device tree it got from m1n1 (framebuffer
@@ -369,8 +420,8 @@ TXT
 		if [ -f "$mnt/extlinux/extlinux.conf" ] && ! grep -q '^# godeep' "$mnt/extlinux/extlinux.conf"; then
 			warn "an extlinux.conf that isn't godeep's exists; left alone (boot by hand, GODEEP-BOOT.txt)"
 		else
-			mkdir -p "$mnt/extlinux"
-			cat >"$mnt/extlinux/extlinux.conf" <<CONF
+			$S mkdir -p "$mnt/extlinux"
+			put "$mnt/extlinux/extlinux.conf" <<CONF
 # godeep (written by tools/godeep-partition.sh)
 # U-Boot boots this automatically from the godeep boot entry.
 # Delete this file to make U-Boot stop at its prompt instead.
@@ -383,11 +434,11 @@ CONF
 			ok "autoboot: extlinux/extlinux.conf"
 		fi
 	elif [ -f "$mnt/extlinux/extlinux.conf" ] && grep -q '^# godeep' "$mnt/extlinux/extlinux.conf"; then
-		run rm "$mnt/extlinux/extlinux.conf"
+		run $S rm "$mnt/extlinux/extlinux.conf"
 		ok "autoboot off: removed godeep's extlinux.conf"
 	fi
 	sync
-	[ -n "$was_mounted" ] || run diskutil unmount "$esp"
+	[ -n "$was_mounted" ] || run sudo diskutil unmount "$esp"
 }
 
 boot_help() {
@@ -395,7 +446,9 @@ boot_help() {
 	say ""
 	ok "Done. To boot godeep:"
 	say "  1. Shut down. Press and hold the power button until \"Loading startup options\" appears."
-	if [ "$AUTOBOOT" = 1 ]; then
+	if [ "$DIRECT" = 1 ]; then
+		say "  2. Choose ${bold}godeep${off}. m1n1 boots godeep directly: no U-Boot, no countdown."
+	elif [ "$AUTOBOOT" = 1 ]; then
 		say "  2. Choose ${bold}godeep${off}. m1n1 starts U-Boot, which boots godeep after its countdown."
 	else
 		say "  2. Choose ${bold}godeep${off}. m1n1 starts U-Boot; boot godeep by hand (below)."
@@ -403,13 +456,21 @@ boot_help() {
 	say "  3. Expected: the screen clears, the godeep banner and a \"board:\" line appear, then"
 	say "     lsdev, ps, mem and uptime run by themselves (there's no keyboard driver yet)."
 	say ""
-	say "  By hand: press a key during U-Boot's countdown, then type (also on the boot"
-	say "  partition as GODEEP-BOOT.txt):"
-	say "      ${bold}load nvme 0:$part \${kernel_addr_r} godeep.img${off}"
-	say "      ${bold}booti \${kernel_addr_r} - \${fdtcontroladdr}${off}"
-	say ""
-	say "  If the screen stays on U-Boot's output, godeep stopped before its console came up"
-	say "  (docs/TargetMyMac.md §6.8). This is godeep's first run on real hardware: untested there."
+	if [ "$DIRECT" = 1 ]; then
+		say "  If U-Boot's text or Omarchy appears, you didn't boot the godeep entry: m1n1 on it no"
+		say "  longer starts U-Boot. If the screen stays on the Apple logo or m1n1's output, godeep"
+		say "  stopped before its console came up (docs/TargetMyMac.md §6.8)."
+	else
+		say "  By hand: press a key during U-Boot's countdown, then type (also on the boot"
+		say "  partition as GODEEP-BOOT.txt):"
+		say "      ${bold}load nvme 0:$part \${kernel_addr_r} godeep.img${off}"
+		say "      ${bold}booti \${kernel_addr_r} - \${fdtcontroladdr}${off}"
+		say "  ($part is right only after a reboot: macOS numbers new partitions differently until then.)"
+		say ""
+		say "  If the screen stays on U-Boot's output, godeep stopped before its console came up"
+		say "  (docs/TargetMyMac.md §6.8)."
+	fi
+	say "  This is godeep's first run on real hardware: untested there."
 	say "  Hold the power button any time to get back to macOS."
 	say "  After changing godeep, rerun ${bold}tools/godeep-partition.sh install${off} to update it."
 }
