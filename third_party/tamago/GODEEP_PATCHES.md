@@ -15,4 +15,11 @@ Vendored from `github.com/usbarmory/tamago@v1.27.4` (see `replace` in godeep's g
    with `make check-applem1`. Cost: the arena index doubles to 4 MB. Boards
    with RAM low (virt, microvm) are unaffected.
 
-All three are candidates to send upstream (3 perhaps as a per-board setting).
+4. `arm64/irq.go`, `arm64/irq.s`: an optional `IRQHandler` hook that runs
+   inside the IRQ exception, on the core that took it, before the signal
+   relay; with it set the exception returns with IRQs unmasked. godeep's
+   `board/virt` acknowledges GIC interrupts there, so its `irq` goroutine
+   can run on any core once there are several (SMP). The IRQ stack grows
+   from 512 to 2048 bytes for the hook's frames.
+
+All of them are candidates to send upstream (3 perhaps as a per-board setting).

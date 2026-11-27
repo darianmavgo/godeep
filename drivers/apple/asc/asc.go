@@ -8,6 +8,7 @@ package asc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -83,6 +84,13 @@ func (m *Mailbox) Send(ctx context.Context, msg rtkit.Message) error {
 }
 
 func (m *Mailbox) Recv() <-chan rtkit.Message { return m.recv }
+
+// Diag describes the mailbox for a failed boot: messages each way and the
+// two queues' control registers (bit 16 full, bit 17 empty).
+func (m *Mailbox) Diag() string {
+	return fmt.Sprintf("mailbox sent %d, received %d, a2i %#x, i2a %#x",
+		m.Sent.Load(), m.Received.Load(), m.r.Read32(A2I_CONTROL), m.r.Read32(I2A_CONTROL))
+}
 
 // Run drains the coprocessor-to-AP queue until ctx is done: when line
 // (the mailbox's recv-not-empty interrupt) fires, or by polling if line is

@@ -76,7 +76,7 @@ const (
 	tcbToDevice   = 1 << 1
 	tcbFromDevice = 1 << 0
 
-	BootTimeout = 2 * time.Second
+	BootTimeout = 5 * time.Second
 	CmdTimeout  = 2 * time.Second
 )
 
@@ -84,7 +84,7 @@ const (
 type Config struct {
 	NVMe, ANS, Mailbox, SART uint64
 	Power                    []pmgr.Domain // parents first
-	Reset                    *pmgr.Domain  // ps_ans2: reset when firmware was left running
+	Reset                    *pmgr.Domain  // ps_ans2: reset before every boot
 	MailboxIRQs              []int         // the mailbox's interrupts (AIC ids), if the board has AIC
 	// Writes turns on writing, always fenced to the GODEEPDATA partition.
 	// Off until reads have been confirmed on the Mac.
@@ -218,18 +218,18 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs64, c Co
 	}
 	defer s.Clear()
 
+	// As Linux's apple_nvme_reset_work: stop the CPU, reset the block,
+	// start it again and boot RTKit from scratch, whatever state iBoot or
+	// m1n1 left the firmware in.
 	cpu := regs(c.ANS)
 	note := ""
-	if asc.CPURunning(cpu) { // left running: put it to sleep, then reset
+	if asc.CPURunning(cpu) {
 		note = "; found running, restarted"
-		if err := quiesce(ctx, d, regs(c.Mailbox)); err != nil {
-			note = fmt.Sprintf("; found running, quiesce failed (%v), reset anyway", err)
-		}
-		asc.StopCPU(cpu)
-		if c.Reset != nil {
-			if err := pmgr.Reset(ctx, regs(c.Reset.Addr)); err != nil {
-				return fmt.Errorf("ans: reset: %w", err)
-			}
+	}
+	asc.StopCPU(cpu)
+	if c.Reset != nil {
+		if err := pmgr.Reset(ctx, regs(c.Reset.Addr)); err != nil {
+			return fmt.Errorf("ans: reset: %w", err)
 		}
 	}
 
@@ -247,7 +247,7 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs64, c Co
 	err := rk.Boot(bctx)
 	cancel()
 	if err != nil {
-		return fmt.Errorf("ans: firmware boot: %w", err)
+		return fmt.Errorf("ans: firmware boot: %w (%s)", err, mb.Diag())
 	}
 
 	r := regs(c.NVMe)
@@ -305,20 +305,6 @@ func run(ctx context.Context, d *dev.Device, regs func(uint64) mmio.Regs64, c Co
 			q.done <- err
 		}
 	}
-}
-
-// quiesce wakes firmware someone left running and puts it to sleep.
-func quiesce(ctx context.Context, d *dev.Device, mbox mmio.Regs64) error {
-	qctx, cancel := context.WithTimeout(ctx, BootTimeout)
-	defer cancel()
-	mb := asc.New(mbox)
-	d.Proc.Go(func(context.Context) { mb.Run(qctx, nil) })
-	rk := rtkit.New("ans", mb, nil, nil)
-	d.Proc.Go(func(context.Context) { rk.Run(qctx) })
-	if err := rk.Wake(qctx); err != nil {
-		return err
-	}
-	return rk.Shutdown(qctx)
 }
 
 func poll(ctx context.Context, ok func() bool, timeout time.Duration) error {

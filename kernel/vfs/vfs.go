@@ -78,7 +78,60 @@ type NS struct {
 	mu     sync.Mutex
 	mounts map[string]Volume
 	open   map[string]openVol // block volumes already opened
+
+	// A view (View) narrows base: it sees only allow (nil: every volume),
+	// read-only if ro, and can't mount or unmount.
+	base  *NS
+	allow map[string]bool
+	ro    bool
 }
+
+// ErrPermission is returned by a view for what it withholds.
+var ErrPermission = errors.New("not permitted in this namespace")
+
+// View returns a narrowed namespace over n: only the volumes named in allow
+// (nil or empty: all of them), every one read-only if readOnly. A view
+// can't mount or unmount, and viewing a view only narrows it further: it is
+// what a less trusted Proc is handed instead of the whole namespace.
+func (n *NS) View(allow []string, readOnly bool) *NS {
+	v := &NS{base: n, ro: readOnly}
+	if len(allow) > 0 {
+		v.allow = map[string]bool{}
+		for _, a := range allow {
+			v.allow[a] = true
+		}
+	}
+	return v
+}
+
+// visible reports whether a view (and every view under it) shows name.
+func (n *NS) visible(name string) bool {
+	for v := n; v.base != nil; v = v.base {
+		if v.allow != nil && !v.allow[name] {
+			return false
+		}
+	}
+	return true
+}
+
+func (n *NS) readOnly() bool {
+	for v := n; v.base != nil; v = v.base {
+		if v.ro {
+			return true
+		}
+	}
+	return false
+}
+
+func (n *NS) root() *NS {
+	for n.base != nil {
+		n = n.base
+	}
+	return n
+}
+
+// CanMount reports whether Mount and Unmount work here (not on a view).
+func (n *NS) CanMount() bool { return n.base == nil }
 
 // openVol is a block volume's filesystem, kept so every user shares one
 // (two writers through separate FAT objects would corrupt it), with the
@@ -99,11 +152,14 @@ func New(ctx context.Context, mgr *dev.Manager) *NS {
 // Context returns the namespace's lifetime context. Mounted volumes (such
 // as TCP 9P shares) use it for background/later I/O so they outlive the
 // command that mounted them.
-func (n *NS) Context() context.Context { return n.ctx }
+func (n *NS) Context() context.Context { return n.root().ctx }
 
 // Mount adds (or replaces) a volume under name. If an existing mounted
 // volume is replaced and implements io.Closer, it is closed.
 func (n *NS) Mount(name string, v Volume) {
+	if !n.CanMount() {
+		return // a view can't change the namespace (check CanMount)
+	}
 	n.mu.Lock()
 	prev := n.mounts[name]
 	n.mounts[name] = v
@@ -117,6 +173,9 @@ func (n *NS) Mount(name string, v Volume) {
 
 // Unmount removes a mounted volume and closes it if it implements io.Closer.
 func (n *NS) Unmount(name string) error {
+	if !n.CanMount() {
+		return fmt.Errorf("umount %s: %w", name, ErrPermission)
+	}
 	n.mu.Lock()
 	v, ok := n.mounts[name]
 	if ok {
@@ -134,6 +193,16 @@ func (n *NS) Unmount(name string) error {
 
 // Open returns the named volume.
 func (n *NS) Open(ctx context.Context, name string) (Volume, error) {
+	if n.base != nil {
+		if !n.visible(name) {
+			return nil, fmt.Errorf("%s: no such volume", name)
+		}
+		v, err := n.root().Open(ctx, name)
+		if err != nil || !n.readOnly() {
+			return v, err
+		}
+		return ReadOnly(v), nil
+	}
 	n.mu.Lock()
 	v, ok := n.mounts[name]
 	n.mu.Unlock()
@@ -194,6 +263,15 @@ func diskOf(mgr *dev.Manager, name string) block.Device {
 // Names lists the volumes that hold a filesystem: mounts, then disks and
 // partitions with one godeep can read.
 func (n *NS) Names(ctx context.Context) []string {
+	if n.base != nil {
+		var out []string
+		for _, name := range n.root().Names(ctx) {
+			if n.visible(name) {
+				out = append(out, name)
+			}
+		}
+		return out
+	}
 	seen := map[string]bool{}
 	n.mu.Lock()
 	var out []string
@@ -350,3 +428,21 @@ func OpenFS(ctx context.Context, d block.Device) (Volume, error) {
 	}
 	return nil, errors.New("no filesystem godeep can read (ext2/3/4, FAT)")
 }
+
+// ReadOnly returns v without its write methods (it no longer implements
+// Writable, so every write path refuses it).
+func ReadOnly(v Volume) Volume {
+	if _, ok := v.(Writable); !ok {
+		return v
+	}
+	return roVolume{v}
+}
+
+type roVolume struct{ v Volume }
+
+func (r roVolume) Open(name string) (fs.File, error)          { return r.v.Open(name) }
+func (r roVolume) ReadDir(name string) ([]fs.DirEntry, error) { return fs.ReadDir(r.v, name) }
+func (r roVolume) Stat(name string) (fs.FileInfo, error)      { return fs.Stat(r.v, name) }
+func (r roVolume) ReadFile(name string) ([]byte, error)       { return fs.ReadFile(r.v, name) }
+func (r roVolume) Type() string                               { return r.v.Type() + ",ro" }
+func (r roVolume) Label() string                              { return r.v.Label() }

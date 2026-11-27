@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"godeep/fs/memfs"
+	"godeep/fs/procfs"
 	"godeep/kernel/cap"
 	"godeep/kernel/dev"
 	"godeep/kernel/dma"
+	"godeep/kernel/ipc"
 	"godeep/kernel/irq"
 	"godeep/kernel/klog"
 	"godeep/kernel/proc"
@@ -101,6 +103,9 @@ func Boot(ctx context.Context, b Board) error {
 	env := sh.Env{Table: tab, TTY: tty.New(con.In, con.Out, con.Echo), Boot: time.Now(),
 		Dev: mgr, IRQ: b.IRQ, DMA: b.DMA, Net: b.Net, FS: vfs.New(ctx, mgr), WASM: wasm.NewCache(wasm.DefaultCacheSize)}
 	env.FS.Mount("ram", memfs.New("ram"))
+	env.FS.Mount("proc", procfs.Proc(tab, env.Boot, Version))
+	env.FS.Mount("sys", procfs.Sys(mgr))
+	env.Ports = ipc.NewNamespace()
 	defer env.WASM.Close()
 	defer env.TTY.Close()
 	env.Log = klog.New(env.TTY, 0)

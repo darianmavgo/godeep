@@ -14,7 +14,7 @@ import (
 )
 
 func lsdev(_ context.Context, env Env, _ *proc.Proc, args []string) error {
-	w := table(env.TTY)
+	w := table(env.out())
 	fmt.Fprintln(w, "DEVICE\tCOMPATIBLE\tSTATE\tPID\tRESTARTS\tIRQ\tREG\tINFO")
 	for _, s := range env.Dev.List() {
 		if len(args) > 0 && !slices.ContainsFunc(args, func(a string) bool { return strings.HasPrefix(s.Name, a) }) {
@@ -60,7 +60,7 @@ func irqstat(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 		return errors.New("this board has no interrupt bridge")
 	}
 	lines, spurious := env.IRQ.Stats()
-	w := table(env.TTY)
+	w := table(env.out())
 	fmt.Fprintln(w, "IRQ\tOWNER\tCOUNT\tAVG SERVICE\tMAX SERVICE")
 	for _, l := range lines {
 		fmt.Fprintf(w, "%d\t%s\t%d\t%v\t%v\n", l.ID, l.Name, l.Count, l.AvgDone, l.MaxDone)
@@ -99,8 +99,8 @@ func irqlat(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	for _, x := range d {
 		sum += x
 	}
-	fmt.Fprintf(env.TTY, "timer deadline -> driver goroutine, %d samples:\n", len(d))
-	fmt.Fprintf(env.TTY, "  min %v  median %v  avg %v  p99 %v  max %v\n",
+	fmt.Fprintf(env.out(), "timer deadline -> driver goroutine, %d samples:\n", len(d))
+	fmt.Fprintf(env.out(), "  min %v  median %v  avg %v  p99 %v  max %v\n",
 		d[0], pct(0.5), sum/time.Duration(len(d)), pct(0.99), d[len(d)-1])
 	return nil
 }
@@ -110,7 +110,7 @@ func dmastat(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 		return errors.New("this board has no DMA region")
 	}
 	s := env.DMA.Stats()
-	w := table(env.TTY)
+	w := table(env.out())
 	fmt.Fprintf(w, "region\t%#x-%#x (%s)\n", s.Base, s.Base+uint64(s.Size), fmtBytes(uint64(s.Size)))
 	fmt.Fprintf(w, "in use\t%s in %d buffers (peak %s)\n", fmtBytes(uint64(s.Used)), s.Buffers, fmtBytes(uint64(s.Peak)))
 	fmt.Fprintf(w, "free spans\t%d, largest %s\n", s.FreeSpans, fmtBytes(uint64(s.LargestFreeSpan)))
@@ -122,7 +122,7 @@ func date(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	if env.Clock != nil {
 		now, src = env.Clock.Now(), env.Clock.Source()
 	}
-	fmt.Fprintf(env.TTY, "%s (%s)\n", now.UTC().Format("Mon Jan 2 15:04:05 UTC 2006"), src)
+	fmt.Fprintf(env.out(), "%s (%s)\n", now.UTC().Format("Mon Jan 2 15:04:05 UTC 2006"), src)
 	return nil
 }
 
@@ -147,7 +147,7 @@ func ntpCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(env.TTY, "clock corrected by %v: %s (%s)\n", off.Round(time.Millisecond),
+	fmt.Fprintf(env.out(), "clock corrected by %v: %s (%s)\n", off.Round(time.Millisecond),
 		env.Clock.Now().UTC().Format("Mon Jan 2 15:04:05 UTC 2006"), env.Clock.Source())
 	return nil
 }
@@ -170,16 +170,19 @@ func kbdlight(_ context.Context, env Env, _ *proc.Proc, args []string) error {
 			}
 			l.Set(n)
 		}
-		fmt.Fprintf(env.TTY, "keyboard backlight %d%%\n", l.Get())
+		fmt.Fprintf(env.out(), "keyboard backlight %d%%\n", l.Get())
 		return nil
 	}
 	return errors.New("no keyboard backlight on this board")
 }
 
 func reboot(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
+	if env.NoPower {
+		return errors.New("not permitted")
+	}
 	for _, s := range env.Dev.List() {
 		if r, ok := s.Service.(dev.Rebooter); ok {
-			fmt.Fprintf(env.TTY, "rebooting via %s\n", s.Name)
+			fmt.Fprintf(env.out(), "rebooting via %s\n", s.Name)
 			r.Reboot()
 			time.Sleep(time.Second)
 			return errors.New("still running a second after the reset request")

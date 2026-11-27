@@ -150,7 +150,7 @@ func df(ctx context.Context, env Env, _ *proc.Proc, _ []string) error {
 	if env.FS == nil {
 		return errors.New("no filesystems")
 	}
-	w := table(env.TTY)
+	w := table(env.out())
 	fmt.Fprintln(w, "VOLUME\tTYPE\tLABEL\tMODE")
 	for _, name := range env.FS.Names(ctx) {
 		v, err := env.FS.Open(ctx, name)
@@ -179,7 +179,7 @@ func size(n int64) string {
 }
 
 func lsblk(ctx context.Context, env Env, _ *proc.Proc, _ []string) error {
-	w := table(env.TTY)
+	w := table(env.out())
 	fmt.Fprintln(w, "NAME\tSIZE\tTYPE\tFS\tLABEL")
 	all := disks(env)
 	names := make([]string, 0, len(all))
@@ -228,14 +228,14 @@ func ls(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 		return err
 	}
 	if !st.IsDir() {
-		fmt.Fprintf(env.TTY, "%s %8s %s\n", st.Mode(), size(st.Size()), st.Name())
+		fmt.Fprintf(env.out(), "%s %8s %s\n", st.Mode(), size(st.Size()), st.Name())
 		return nil
 	}
 	ents, err := fs.ReadDir(f, path)
 	if err != nil {
 		return err
 	}
-	w := table(env.TTY)
+	w := table(env.out())
 	for _, e := range ents {
 		info, err := e.Info()
 		if err != nil {
@@ -255,7 +255,10 @@ func ls(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 
 func cat(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: cat VOLUME:PATH... (e.g. cat nvme0p2:/hello.txt)")
+		in, done := env.input(ctx) // cat with no file: stdin (a pipe, or the terminal until ^D)
+		defer done()
+		_, err := io.Copy(env.out(), ctxReader{ctx, in})
+		return err
 	}
 	for _, a := range args {
 		f, path, err := openPath(ctx, env, a)
@@ -266,7 +269,7 @@ func cat(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 		if err != nil {
 			return err
 		}
-		_, err = io.Copy(env.TTY, ctxReader{ctx, file})
+		_, err = io.Copy(env.out(), ctxReader{ctx, file})
 		file.Close()
 		if err != nil {
 			return err

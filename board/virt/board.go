@@ -5,8 +5,14 @@ package virt
 import (
 	"fmt"
 	"io"
+	mbits "math/bits"
+	"os"
+	"os/signal"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 
+	"github.com/usbarmory/tamago/arm64"
 	"github.com/usbarmory/tamago/arm64/gic"
 
 	"godeep/drivers/qemu/fwcfg"
@@ -26,16 +32,37 @@ import (
 // reads back every enabled interrupt in the bank, disabling one line disables
 // all its neighbours (masking the UART silently disabled the power button).
 // Writing only the line's bit is the correct use of the register.
-// (Enable via TamaGo is fine: writing back 1s to ISENABLER is harmless, and
-// it also sets the line's group and routing.)
+// Enable doesn't use TamaGo either: its read-modify-write of ISENABLER can
+// write back the enable bit of a line the IRQ exception (irqTop) masked in
+// between, on this core or another.
 type gicController struct{}
 
 const (
+	gicdIGROUPR   = 0x080
+	gicdISENABLER = 0x100
 	gicdICENABLER = 0x180
+	gicdIROUTER   = 0x6000
 	gicrSGIBase   = 0x10000
 )
 
-func (gicController) Enable(id int) { GIC.EnableInterrupt(id) }
+func (gicController) Enable(id int) {
+	bank, bit := uint64(id/32), uint32(1)<<(id%32)
+	if id < gic.FirstSPI {
+		w32(GICR_BASE+gicrSGIBase+gicdISENABLER+4*bank, bit)
+		return
+	}
+	// route to the boot core, Group 0 (as TamaGo's GIC.Init configures the
+	// CPU interface); then set only this line's enable bit
+	w64(GICD_BASE+gicdIROUTER+8*uint64(id), bootMPIDR)
+	gicMu.Lock()
+	w32(GICD_BASE+gicdIGROUPR+4*bank, r32(GICD_BASE+gicdIGROUPR+4*bank)&^bit)
+	gicMu.Unlock()
+	w32(GICD_BASE+gicdISENABLER+4*bank, bit)
+}
+
+// gicMu serializes read-modify-writes of the group registers (nothing in an
+// exception touches them).
+var gicMu sync.Mutex
 
 func (gicController) Disable(id int) {
 	bank, bit := uint64(id/32), uint32(1)<<(id%32)
@@ -49,22 +76,25 @@ func (gicController) Disable(id int) {
 // Bridge is the interrupt bridge for this board.
 var Bridge = irq.NewBridge(gicController{})
 
-// serviceInterrupts is the "irq" kernel thread: TamaGo's exception handler
-// wakes it with interrupts masked; it acknowledges every pending interrupt
-// and hands each to the bridge, which masks the line and signals its driver.
+// serviceInterrupts is the "irq" kernel thread. The IRQ exception itself
+// (irqTop, on the core the GIC routed the interrupt to) acknowledges it,
+// masks the line and records it; this goroutine, on whichever core it runs,
+// hands each recorded line to the bridge, which signals its driver. The
+// driver's line.Done() unmasks the line again.
 func serviceInterrupts() {
-	CPU.ServiceInterrupts(func() {
-		for {
-			id := GIC.GetInterrupt()
-			if id >= gic.FirstSIN {
-				return // spurious: nothing more pending
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, arm64.IRQ_SIGNAL)
+	for {
+		for i := range pendingIRQ {
+			bits := atomic.SwapUint32(&pendingIRQ[i], 0)
+			for bits != 0 {
+				b := mbits.TrailingZeros32(bits)
+				bits &^= 1 << b
+				Bridge.Dispatch(32*i + b)
 			}
-			if id == VTIMER_IRQ {
-				continue // the idle governor's wakeup timer; idle disarms it
-			}
-			Bridge.Dispatch(id)
 		}
-	})
+		<-c
+	}
 }
 
 // shutdown is closed by the power-button driver.
@@ -73,13 +103,19 @@ var shutdown = make(chan struct{})
 // NewBoard returns the QEMU virt board.
 func NewBoard() kernel.Board {
 	proc.Kthread("irq", serviceInterrupts)
+	// Interrupts are acknowledged in the exception (irqTop), so the boot
+	// core can keep IRQs unmasked for good. Secondary cores never unmask.
+	arm64.IRQHandler = irqTop
+	CPU.EnableInterrupts()
+	startSMP()
 	nodes, source := devices()
 	// The first FDT_RESERVE bytes hold the boot device tree (entry_arm64.s).
 	alloc := dma.New(dma.Region{
 		Base: DMA_BASE + FDT_RESERVE,
 		Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
 	})
-	info := BootInfo(source)
+	info := BootInfo(source) + "; " + SMPInfo()
+	nodes = append(nodes, dev.Node{Name: "cpus", Compatible: "godeep,cpus"})
 	con := NewConsole(Bridge)
 	if fb, note := framebuffer(nodes, alloc); fb != nil {
 		// Text goes to both the framebuffer and the UART; the USB mouse

@@ -91,9 +91,15 @@ func Driver(regs func(base uint64) mmio.Regs64, ready func(*SMC)) dev.Driver {
 				d.Proc.Kill() // crashed: restart the driver
 			}
 		})
-		s, err := Start(ctx, rk, regs(c.SRAM), c.SRAM, c.SRAMSize, asc.CPURunning(regs(c.CPU)))
+		// As m1n1's rtkit_boot: set the CPU's run bit whatever it reads
+		// (a no-op if iBoot left it running), then INIT wakes the firmware
+		// whether it was running, asleep or just started.
+		cpu := regs(c.CPU)
+		was := cpu.Read32(asc.CPU_CONTROL)
+		asc.StartCPU(cpu)
+		s, err := Start(ctx, rk, regs(c.SRAM), c.SRAM, c.SRAMSize)
 		if err != nil {
-			return err
+			return fmt.Errorf("%w (CPU control was %#x; %s)", err, was, mb.Diag())
 		}
 		s.now = mb.SendNow
 		d.Ready(s)
@@ -105,18 +111,13 @@ func Driver(regs func(base uint64) mmio.Regs64, ready func(*SMC)) dev.Driver {
 	}}
 }
 
-// Start boots (or wakes, if iBoot left it running) the SMC firmware,
-// starts its endpoint and sets up the shared buffer.
-func Start(ctx context.Context, rk *rtkit.RTKit, sram mmio.Regs, sramBase, sramSize uint64, running bool) (*SMC, error) {
+// Start wakes the SMC firmware (IOP INIT, which works whether iBoot left
+// it running or asleep, Linux's apple_rtkit_wake), starts its endpoint and
+// sets up the shared buffer. The ASC's CPU must be running.
+func Start(ctx context.Context, rk *rtkit.RTKit, sram mmio.Regs, sramBase, sramSize uint64) (*SMC, error) {
 	bctx, cancel := context.WithTimeout(ctx, BootTimeout)
 	defer cancel()
-	var err error
-	if running {
-		err = rk.Wake(bctx)
-	} else {
-		err = rk.Boot(bctx)
-	}
-	if err != nil {
+	if err := rk.Wake(bctx); err != nil {
 		return nil, fmt.Errorf("smc: firmware: %w", err)
 	}
 	recv, send, err := rk.Endpoint(bctx, Endpoint)

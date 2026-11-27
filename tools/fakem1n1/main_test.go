@@ -56,13 +56,13 @@ func TestPatchShim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := b[len(b)-32:]
-	for i, want := range []uint64{uartBase, hcrRW | hcrE2H, fdtAddr, 0x10080000000} {
+	p := b[len(b)-40:]
+	for i, want := range []uint64{uartBase, hcrRW | hcrE2H, fdtAddr, 0x10080000000, spinAddr} {
 		if got := binary.LittleEndian.Uint64(p[i*8:]); got != want {
 			t.Errorf("parameter %d = %#x, want %#x", i, got, want)
 		}
 	}
-	if binary.LittleEndian.Uint64(shimCode[len(shimCode)-32:]) != uartBase {
+	if binary.LittleEndian.Uint64(shimCode[len(shimCode)-40:]) != uartBase {
 		t.Error("patchShim modified shimCode in place")
 	}
 }

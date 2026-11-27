@@ -52,6 +52,8 @@ type RTKit struct {
 	iopState  int           // last IOP power state the firmware acknowledged (-1: none yet)
 	apState   int           // last AP power state acknowledged (-1: none yet)
 	pwrChange chan struct{} // closed and replaced on every ack
+	hellos    int           // HELLOs seen (diagnostics: how far a boot got)
+	epmaps    int           // EPMAP pages seen
 }
 
 // New prepares an RTKit client. Run must be started before Boot.
@@ -118,12 +120,14 @@ func (r *RTKit) management(ctx context.Context, v uint64) error {
 		}
 		r.mu.Lock()
 		r.version = ver
+		r.hellos++
 		r.mu.Unlock()
 		return r.send(ctx, EPManagement, helloReply(ver, ver))
 
 	case mgmtEPMap:
 		base, bitmap, last := epmapFields(v)
 		r.mu.Lock()
+		r.epmaps++
 		for i := 0; i < 32; i++ {
 			if bitmap&(1<<i) != 0 {
 				r.endpoints[uint8(base*32+i)] = true
@@ -248,6 +252,19 @@ func (r *RTKit) waitState(ctx context.Context, p *int, want int, what string) er
 	}
 }
 
+// progress says how far the handshake got, for a boot that timed out.
+func (r *RTKit) progress() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch {
+	case r.hellos == 0:
+		return "no HELLO from the firmware"
+	case r.epmaps == 0:
+		return fmt.Sprintf("HELLO (v%d) but no endpoint map", r.version)
+	}
+	return fmt.Sprintf("endpoint map incomplete after %d pages", r.epmaps)
+}
+
 func (r *RTKit) has(ep uint8) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -279,7 +296,7 @@ func (r *RTKit) Boot(ctx context.Context) error {
 	select {
 	case <-r.booted:
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("rtkit %s: %s: %w", r.Name, r.progress(), ctx.Err())
 	}
 	if err := r.waitState(ctx, &r.iopState, PwrOn, "IOP"); err != nil {
 		return err

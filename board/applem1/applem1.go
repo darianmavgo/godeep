@@ -9,7 +9,7 @@ import (
 	"github.com/usbarmory/tamago/arm64"
 )
 
-// CPU is the boot core (one core: TamaGo has no arm64 SMP bring-up).
+// CPU is the boot core (the others: smp.go).
 var CPU = &arm64.CPU{TimerOffset: 1}
 
 // Init runs early in runtime setup (Hwinit1).

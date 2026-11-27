@@ -265,7 +265,7 @@ type Service struct {
 	lines         []string
 	sources       []input.Source
 	keys, dropped int
-	kbds          []*usb.BootKeyboard
+	kbds          []*input.Keyboard
 	layout        *input.Layout
 }
 
@@ -372,7 +372,7 @@ type device struct {
 	hub     *hub
 	names   []string // published device-manager entries
 	sources []input.Source
-	kbds    []*usb.BootKeyboard
+	kbds    []*input.Keyboard
 }
 
 // tt names a transaction translator: the slot of the high-speed hub that
@@ -411,7 +411,7 @@ type hc struct {
 	devs        map[int]*device // by port
 	eps         []*endpoint
 	queued      []event // events read while waiting for something else
-	kbds        []*usb.BootKeyboard
+	kbds        []*input.Keyboard
 	allocs      []*dma.Buffer
 	hubs        []*hub
 	disks       []*Disk
@@ -835,7 +835,20 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 			}
 			kinds = append(kinds, "ethernet")
 			continue
-		case it.Class == usb.ClassMassStorage && it.Subclass == 6 && it.Protocol == 0x50:
+		case it.Class == usb.ClassMassStorage && it.Subclass == 6:
+			// UAS when the device has it and the link needs no streams
+			// (USB 2); else Bulk-Only, which UAS devices also offer.
+			if u, ok := uasAlt(cfg, it.Number); ok && d.speed != usb.Super {
+				if err := h.newUAS(ctx, d, u); err != nil {
+					return d, fmt.Errorf("mass storage (UAS): %w", err)
+				}
+				kinds = append(kinds, "mass storage (UAS)")
+				continue
+			}
+			if it.Protocol != usb.ProtoBOT {
+				kinds = append(kinds, "mass storage (UAS needs streams on SuperSpeed: not supported)")
+				continue
+			}
 			if err := h.newDisk(ctx, d, it); err != nil {
 				return d, fmt.Errorf("mass storage: %w", err)
 			}
@@ -844,6 +857,21 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 		}
 		kind := it.BootKind()
 		if kind == "" {
+			if it.Class == usb.ClassHID {
+				for _, e := range it.Endpoints {
+					if e.IsInterruptIn() {
+						// A vendor interface we can't decode (keyboards
+						// often have one) mustn't cost the device its others.
+						k, err := h.hidReport(ctx, d, it, e)
+						if err != nil {
+							kinds = append(kinds, fmt.Sprintf("HID interface %d (%v)", it.Number, err))
+						} else if k != "" {
+							kinds = append(kinds, "HID "+k)
+						}
+						break
+					}
+				}
+			}
 			continue
 		}
 		for _, e := range it.Endpoints {
@@ -853,16 +881,13 @@ func (h *hc) enumerate(ctx context.Context, port int, route uint32, where string
 			if err := h.hidEndpoint(ctx, d, it, e, kind); err != nil {
 				return d, fmt.Errorf("%s: %w", kind, err)
 			}
-			kinds = append(kinds, kind)
+			kinds = append(kinds, "HID boot "+kind)
 			break
 		}
 	}
 	what := "no driver for its interfaces"
 	if len(kinds) > 0 {
 		what = strings.Join(kinds, ", ")
-		if !strings.Contains(what, "hub") && !strings.Contains(what, "mass") && !strings.Contains(what, "ethernet") {
-			what = "HID boot " + what
-		}
 	}
 	h.svc.addLine(fmt.Sprintf("%s: %04x:%04x, %s, slot %d: %s", where, d.desc.Vendor, d.desc.Product, speed, slot, what))
 	return d, nil
@@ -961,7 +986,7 @@ func supported(c usb.Config) bool {
 	for _, it := range c.Interfaces {
 		switch {
 		case it.Class == usb.ClassHub, it.Class == usb.ClassComm && (it.Subclass == usb.SubclassECM || it.Subclass == usb.SubclassNCM),
-			it.Class == usb.ClassMassStorage, it.BootKind() != "":
+			it.Class == usb.ClassMassStorage, it.Class == usb.ClassHID:
 			return true
 		}
 	}
@@ -1026,7 +1051,8 @@ func (h *hc) interruptIn(ctx context.Context, d *device, e usb.Endpoint, slotExt
 	return &endpoint{slot: d.slot, dci: dci, ring: r, buf: buf, size: e.MaxPacket}, nil
 }
 
-// hidEndpoint configures an interrupt IN endpoint and starts reading it.
+// hidEndpoint configures a HID boot device's interrupt IN endpoint (in
+// boot protocol) and starts reading it.
 func (h *hc) hidEndpoint(ctx context.Context, d *device, it usb.Interface, e usb.Endpoint, kind string) error {
 	if _, err := h.control(ctx, d, usb.Setup{RequestType: usb.ReqTypeClassIf, Request: usb.ReqSetProtocol, Index: uint16(it.Number)}, nil); err != nil {
 		return fmt.Errorf("set boot protocol: %w", err)
@@ -1044,26 +1070,79 @@ func (h *hc) hidEndpoint(ctx context.Context, d *device, it usb.Interface, e usb
 		k := &usb.BootKeyboard{}
 		k.Events = events
 		k.Emit = h.emit
-		h.kbds = append(h.kbds, k)
-		d.kbds = append(d.kbds, k)
-		h.svc.mu.Lock()
-		if h.svc.layout != nil {
-			k.SetLayout(h.svc.layout)
-		}
-		h.svc.kbds = append(h.svc.kbds, k)
-		h.svc.mu.Unlock()
+		h.addKeyboard(d, &k.Keyboard)
 		ep.handle = k.Report
 	default:
 		m := &usb.BootMouse{Events: events}
 		ep.handle = m.Report
 	}
+	h.startInput(d, ep, events)
+	return nil
+}
+
+// hidReport drives a HID interface in report protocol: its report
+// descriptor says what the reports hold (absolute pointers, more buttons,
+// several report IDs). It returns the device kind ("tablet", "mouse",
+// "keyboard"), or "" if nothing in it is decoded.
+func (h *hc) hidReport(ctx context.Context, d *device, it usb.Interface, e usb.Endpoint) (string, error) {
+	n := it.HIDReportLength()
+	if n == 0 || n > 4096 {
+		return "", fmt.Errorf("report descriptor length %d", n)
+	}
+	buf, err := h.dma.Alloc(n, 64)
+	if err != nil {
+		return "", err
+	}
+	defer buf.Free()
+	b, err := h.control(ctx, d, usb.Setup{RequestType: usb.ReqTypeInStdIf, Request: usb.ReqGetDescriptor,
+		Value: usb.DescHIDReport << 8, Index: uint16(it.Number), Length: uint16(n)}, buf)
+	if err != nil {
+		return "", fmt.Errorf("report descriptor: %w", err)
+	}
+	desc, err := usb.ParseReportDesc(append([]byte(nil), b...))
+	if err != nil {
+		return "", err
+	}
+	kind := desc.Kind()
+	if kind == "" {
+		return "", nil
+	}
+	if kind == "keyboard" {
+		h.control(ctx, d, usb.Setup{RequestType: usb.ReqTypeClassIf, Request: usb.ReqSetIdle, Index: uint16(it.Number)}, nil)
+	}
+	ep, err := h.interruptIn(ctx, d, e)
+	if err != nil {
+		return "", err
+	}
+	events := &input.Broadcaster{Kind: kind}
+	dev := &usb.HIDDevice{Desc: desc, Events: events}
+	if kind == "keyboard" {
+		dev.Keyboard = &input.Keyboard{Events: events, Emit: h.emit}
+		h.addKeyboard(d, dev.Keyboard)
+	}
+	ep.handle = dev.Report
+	h.startInput(d, ep, events)
+	return kind, nil
+}
+
+func (h *hc) addKeyboard(d *device, k *input.Keyboard) {
+	h.kbds = append(h.kbds, k)
+	d.kbds = append(d.kbds, k)
+	h.svc.mu.Lock()
+	if h.svc.layout != nil {
+		k.SetLayout(h.svc.layout)
+	}
+	h.svc.kbds = append(h.svc.kbds, k)
+	h.svc.mu.Unlock()
+}
+
+func (h *hc) startInput(d *device, ep *endpoint, events *input.Broadcaster) {
 	h.eps = append(h.eps, ep)
 	h.svc.mu.Lock()
 	h.svc.sources = append(h.svc.sources, events)
 	d.sources = append(d.sources, events)
 	h.svc.mu.Unlock()
 	h.queueIn(ep)
-	return nil
 }
 
 // interval converts bInterval to the endpoint context's exponent (in

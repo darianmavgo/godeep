@@ -156,3 +156,37 @@ func TestRejectsOldFirmware(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// A boot that times out says how far the handshake got.
+func TestBootTimeoutProgress(t *testing.T) {
+	for _, c := range []struct {
+		from []Message
+		want string
+	}{
+		{nil, "no HELLO from the firmware"},
+		{[]Message{{EP: EPManagement, Data: withType(mgmtHello) | put(11, 15, 0) | put(12, 31, 16)}}, "HELLO (v12) but no endpoint map"},
+		{[]Message{
+			{EP: EPManagement, Data: withType(mgmtHello) | put(11, 15, 0) | put(12, 31, 16)},
+			{EP: EPManagement, Data: withType(mgmtEPMap) | 1}, // not the last page
+		}, "endpoint map incomplete after 1 pages"},
+	} {
+		p := &pipe{toIOP: make(chan Message, 8), toAP: make(chan Message, 8)}
+		r := New("t", p, nil, nil)
+		for _, m := range c.from {
+			p.toAP <- m
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		go r.Run(ctx)
+		for len(p.toAP) > 0 {
+			time.Sleep(time.Millisecond)
+		}
+		time.Sleep(10 * time.Millisecond) // the last message handled
+		bctx, bcancel := context.WithTimeout(ctx, 20*time.Millisecond)
+		err := r.Boot(bctx)
+		bcancel()
+		cancel()
+		if err == nil || !strings.Contains(err.Error(), c.want) || !strings.Contains(err.Error(), "deadline exceeded") {
+			t.Fatalf("want %q, got %v", c.want, err)
+		}
+	}
+}

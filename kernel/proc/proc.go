@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -28,8 +29,13 @@ var ErrKilled = errors.New("killed")
 type Spec struct {
 	Name   string
 	Args   []string
+	Stdin  io.Reader // nil: no input (Read returns io.EOF)
 	Stdout io.Writer
 	Main   Main
+	// Ends are closed when the Proc's context ends (killed, or main
+	// returned): the pipe ends it holds, so the other side sees EOF or a
+	// closed pipe, and a goroutine of this Proc blocked on one wakes up.
+	Ends []io.Closer
 }
 
 // Proc is a process: a set of goroutines that live and die together.
@@ -37,8 +43,11 @@ type Proc struct {
 	PID, PPID int
 	Name      string
 	Args      []string
-	Stdout    io.Writer
+	Stdin     io.Reader // never nil
+	Stdout    io.Writer // counts bytes (IO)
 	Started   time.Time
+
+	in, out atomic.Int64 // bytes through Stdin/Stdout
 
 	table  *Table
 	ctx    context.Context
@@ -49,6 +58,35 @@ type Proc struct {
 	live int // tracked goroutines still running (main + p.Go)
 	err  error
 }
+
+// IO returns the bytes read from Stdin and written to Stdout so far.
+func (p *Proc) IO() (in, out int64) { return p.in.Load(), p.out.Load() }
+
+type countReader struct {
+	r io.Reader
+	n *atomic.Int64
+}
+
+func (c countReader) Read(b []byte) (int, error) {
+	n, err := c.r.Read(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+type countWriter struct {
+	w io.Writer
+	n *atomic.Int64
+}
+
+func (c countWriter) Write(b []byte) (int, error) {
+	n, err := c.w.Write(b)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+type noInput struct{}
+
+func (noInput) Read([]byte) (int, error) { return 0, io.EOF }
 
 // Context returns the Proc's root context (cancelled on kill or main return).
 func (p *Proc) Context() context.Context { return p.ctx }
@@ -181,14 +219,30 @@ func (t *Table) Spawn(parent context.Context, ppid int, s Spec) *Proc {
 	pid := t.next
 	t.next++
 	p := &Proc{
-		PID: pid, PPID: ppid, Name: s.Name, Args: s.Args, Stdout: s.Stdout,
+		PID: pid, PPID: ppid, Name: s.Name, Args: s.Args,
 		Started: time.Now(), table: t, cancel: cancel,
 		done: make(chan struct{}), live: 1,
+	}
+	in := s.Stdin
+	if in == nil {
+		in = noInput{}
+	}
+	p.Stdin = countReader{in, &p.in}
+	if s.Stdout != nil {
+		p.Stdout = countWriter{s.Stdout, &p.out}
 	}
 	t.procs[pid] = p
 	t.mu.Unlock()
 
 	p.ctx = pprof.WithLabels(ctx, pprof.Labels("pid", strconv.Itoa(pid), "proc", s.Name))
+	if len(s.Ends) > 0 {
+		ends := s.Ends
+		context.AfterFunc(ctx, func() {
+			for _, e := range ends {
+				e.Close()
+			}
+		})
+	}
 	p.spawn(func() error { return s.Main(p.ctx, p) }, true)
 	return p
 }

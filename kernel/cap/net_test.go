@@ -34,3 +34,31 @@ func TestPendingNet(t *testing.T) {
 		t.Fatalf("no network: %v", err)
 	}
 }
+
+func TestRestricted(t *testing.T) {
+	ctx := context.Background()
+	p := NewPendingNet()
+	p.Resolve(fakeNet{}, nil)
+	d := DialOnly(p)
+	if _, err := d.Listen(ctx, "tcp", ":80"); !errors.Is(err, ErrPermission) {
+		t.Fatalf("Listen: %v", err)
+	}
+	if _, err := d.Dial(ctx, "tcp", "1.2.3.4:5"); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	none := &Restricted{N: d, NoDial: true}
+	if _, err := none.Dial(ctx, "tcp", "1.2.3.4:5"); !errors.Is(err, ErrPermission) {
+		t.Fatalf("Dial on no-dial: %v", err)
+	}
+	// Narrowing again can't widen: the inner DialOnly still refuses Listen.
+	wide := &Restricted{N: d}
+	if _, err := wide.Listen(ctx, "tcp", ":80"); !errors.Is(err, ErrPermission) {
+		t.Fatalf("re-wrapped Listen: %v", err)
+	}
+	if u, err := Underlying(ctx, none); err != nil || u != (fakeNet{}) {
+		t.Fatalf("Underlying = %v, %v", u, err)
+	}
+	if DialOnly(nil) != nil {
+		t.Fatal("DialOnly(nil) should stay nil")
+	}
+}

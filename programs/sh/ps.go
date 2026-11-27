@@ -57,7 +57,7 @@ func psProcs(env Env, gs []proc.Goroutine) error {
 		}
 	}
 
-	w := table(env.TTY)
+	w := table(env.out())
 	fmt.Fprintln(w, "PID\tPPID\tNAME\tSTATE\tUPTIME\tGOROUTINES\tGOROUTINE STATES")
 	row := func(pid, ppid, name, state, up string, t *tally) {
 		n, st := 0, ""
@@ -111,7 +111,7 @@ func psGoroutines(env Env, gs []proc.Goroutine, filter int) error {
 		}
 		return gs[i].ID < gs[j].ID
 	})
-	w := table(env.TTY)
+	w := table(env.out())
 	fmt.Fprintln(w, "GID\tPID\tPROC\tSTATE\tWAITING\tFUNCTION")
 	for _, g := range gs {
 		if filter != -2 && g.PID != filter {

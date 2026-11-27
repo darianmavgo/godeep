@@ -380,7 +380,12 @@ type Status struct {
 	Service          any
 }
 
+// List returns every device's status, by name. A nil Manager (a shell
+// restricted with -nodev) has none.
 func (m *Manager) List() []Status {
+	if m == nil {
+		return nil
+	}
 	m.mu.Lock()
 	es := make([]*entry, 0, len(m.entries))
 	for _, e := range m.entries {

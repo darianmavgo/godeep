@@ -22,3 +22,5 @@ func psciPowerOff() {
 		psciCall(psciSystemOff)
 	}
 }
+
+func psciCall4(fn, a1, a2, a3 uint64) uint64 // defined in psci_arm64.s

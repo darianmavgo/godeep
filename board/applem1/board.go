@@ -83,6 +83,8 @@ func NewBoard() kernel.Board {
 		}
 		nodes = len(fromFDT(root))
 		devices = append(devices, checkMemory(root), bootEntropy(root))
+		startSMP(root)
+		devices = append(devices, SMPInfo())
 	} else {
 		devices = append(devices, "no device tree from the boot loader")
 	}

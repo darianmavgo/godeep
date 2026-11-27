@@ -350,6 +350,31 @@ func (c *Console) MovePointer(dx, dy int) {
 	c.showPointer()
 }
 
+// PointTo moves the pointer to a position given as a fraction of the
+// screen (x, y in 0..max: an absolute pointing device), and shows it.
+func (c *Console) PointTo(x, y, max int) {
+	if max <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.hidePointer()
+	c.ptrOn = true
+	c.px = min(max0(x)*(c.fb.Width-1)/max, c.fb.Width-1)
+	c.py = min(max0(y)*(c.fb.Height-1)/max, c.fb.Height-1)
+	if c.sel && c.dragging() {
+		c.extend(c.pointerPos())
+	}
+	c.showPointer()
+}
+
+func max0(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
 // Pointer returns the pointer's position in pixels and whether it's shown.
 func (c *Console) Pointer() (x, y int, on bool) {
 	c.mu.Lock()

@@ -24,10 +24,7 @@ func network(ctx context.Context, env Env) (cap.Net, error) {
 	if env.Net == nil {
 		return nil, errors.New("no network on this board")
 	}
-	if p, ok := env.Net.(*cap.PendingNet); ok {
-		return p.Wait(ctx)
-	}
-	return env.Net, nil
+	return cap.Ready(ctx, env.Net)
 }
 
 // host NAME: resolve a name (DNS).
@@ -48,7 +45,7 @@ func hostCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 		return err
 	}
 	for _, a := range addrs {
-		fmt.Fprintf(env.TTY, "%s has address %s\n", args[0], a)
+		fmt.Fprintf(env.out(), "%s has address %s\n", args[0], a)
 	}
 	return nil
 }
@@ -82,9 +79,9 @@ func getCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintf(env.TTY, "%s\n", resp.Status)
+		fmt.Fprintf(env.out(), "%s\n", resp.Status)
 	}
-	_, err = io.Copy(env.TTY, ctxReader{ctx, resp.Body})
+	_, err = io.Copy(env.out(), ctxReader{ctx, resp.Body})
 	return err
 }
 
@@ -123,6 +120,6 @@ func mount9pCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error
 	if vfs.IsWritable(c) {
 		mode = "rw"
 	}
-	fmt.Fprintf(env.TTY, "mounted %s as %s: (%s)\n", addr, name, mode)
+	fmt.Fprintf(env.out(), "mounted %s as %s: (%s)\n", addr, name, mode)
 	return nil
 }

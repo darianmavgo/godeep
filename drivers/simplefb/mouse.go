@@ -12,7 +12,8 @@ const WheelLines = 3
 // Mouse makes the console respond to pointing devices, like gpm on a Linux
 // text console:
 //
-//   - motion moves the pointer (shown from the first motion on);
+//   - motion moves the pointer (shown from the first motion on); an
+//     absolute device (a tablet) puts it where it points;
 //   - the wheel (two-finger scroll on a trackpad) scrolls through history,
 //     and any key returns to the live screen;
 //   - left button: press and drag to select text (drawn inverted); the text
@@ -42,6 +43,8 @@ func (m *Mouse) HandleInput(e input.Event) {
 			s = m.C.ptrScale()
 		}
 		m.C.MovePointer(int(e.DX)*s, int(e.DY)*s)
+	case input.Absolute:
+		m.C.PointTo(int(e.X), int(e.Y), input.AbsMax)
 	case input.Wheel:
 		m.C.ScrollView(int(e.DY) * WheelLines)
 	case input.KeyDown:

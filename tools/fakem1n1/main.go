@@ -58,6 +58,7 @@ const (
 	// device tree (for firmware; unused here), so start above it.
 	shimAddr = dramBase + 0x20_0000
 	fdtAddr  = dramBase + 0x30_0000
+	spinAddr = dramBase + 0x2f_0000     // spin table: 8 bytes per core, zero at reset
 	lowRsvd  = 4 << 20                  // reserved for "m1n1": QEMU's tree, shim, our tree
 	fbBase   = dramBase + 0x3_e000_0000 // a carve-out near the top, like iBoot's
 
@@ -81,6 +82,8 @@ type config struct {
 	format     string
 	e2h        bool
 	fault      int
+	smp        int
+	bootargs   string
 }
 
 func (c *config) flags(fs *flag.FlagSet) {
@@ -91,6 +94,8 @@ func (c *config) flags(fs *flag.FlagSet) {
 	fs.IntVar(&c.height, "height", 2234, "framebuffer height")
 	fs.StringVar(&c.format, "format", string(simplefb.X2R10G10B10), "framebuffer format")
 	fs.BoolVar(&c.e2h, "e2h", true, "enter the kernel with HCR_EL2.E2H=1, as Apple cores do")
+	fs.IntVar(&c.smp, "smp", 1, "cores (the Mac has 10): the others wait on m1n1's spin table (cpu-release-addr) until the kernel starts them")
+	fs.StringVar(&c.bootargs, "bootargs", "", "/chosen/bootargs (as m1n1's chosen.bootargs=), e.g. godeep.nosmp")
 	fs.IntVar(&c.fault, "fault", 0, "make godeep fault at boot stage N (1-4) to test the fault screen (bootargs godeep.testfault=N)")
 }
 
@@ -165,7 +170,7 @@ func cmdRun(args []string) error {
 		return err
 	}
 	os.Remove(*sock)
-	argv := append([]string{*qemu}, qemuBase()...)
+	argv := append([]string{*qemu}, qemuBase(&c)...)
 	argv = append(argv, "-display", "none", "-chardev", "stdio,id=con,mux=on,signal=off",
 		"-serial", "chardev:con", "-monitor", "none", "-qmp", "unix:"+*sock+",server=on,wait=off")
 	argv = append(argv, loaderArgs(&c, *image)...)
@@ -209,17 +214,17 @@ func prepare(c *config) ([]string, error) {
 	return []string{shimPath, dtbPath, regsPath}, nil
 }
 
-// patchShim fills the shim's four trailing parameter words (shim.asm).
+// patchShim fills the shim's five trailing parameter words (shim.asm).
 func patchShim(uart, hcr, dtb, kernel uint64) ([]byte, error) {
 	b := append([]byte{}, shimCode...)
-	if len(b) < 32 {
+	if len(b) < 40 {
 		return nil, errors.New("shim too short: regenerate with go generate")
 	}
-	p := b[len(b)-32:]
+	p := b[len(b)-40:]
 	if binary.LittleEndian.Uint64(p) != 0x6000_0000 {
 		return nil, errors.New("shim parameter block not where expected: regenerate with go generate")
 	}
-	for i, v := range []uint64{uart, hcr, dtb, kernel} {
+	for i, v := range []uint64{uart, hcr, dtb, kernel, spinAddr} {
 		binary.LittleEndian.PutUint64(p[i*8:], v)
 	}
 	return b, nil
@@ -239,9 +244,9 @@ func deviceTree(c *config) ([]byte, error) {
 	b.PropU32("#size-cells", 2)
 	b.Prop("ranges", nil)
 	b.PropStrings("stdout-path", fmt.Sprintf("/serial@%x", uartBase))
-	bootargs := ""
+	bootargs := c.bootargs
 	if c.fault != 0 {
-		bootargs = fmt.Sprintf("godeep.testfault=%d", c.fault)
+		bootargs = strings.TrimSpace(bootargs + fmt.Sprintf(" godeep.testfault=%d", c.fault))
 	}
 	b.PropStrings("bootargs", bootargs)
 	seed := make([]byte, 64) // m1n1 copies iBoot's random-seed here
@@ -281,11 +286,18 @@ func deviceTree(c *config) ([]byte, error) {
 	b.Begin("cpus")
 	b.PropU32("#address-cells", 2)
 	b.PropU32("#size-cells", 0)
-	b.Begin("cpu@0")
-	b.PropStrings("device_type", "cpu")
-	b.PropStrings("compatible", "apple,icestorm")
-	b.PropU32("reg", 0, 0)
-	b.End()
+	// Like Asahi's tree after m1n1 fills it: every core with a spin-table
+	// enable method; the shim parks the others on cpu-release-addr.
+	for i := 0; i < max(1, c.smp); i++ {
+		b.Begin(fmt.Sprintf("cpu@%d", i))
+		b.PropStrings("device_type", "cpu")
+		b.PropStrings("compatible", "apple,icestorm")
+		b.PropU32("reg", 0, uint32(i/8)<<8|uint32(i%8)) // sbsa-ref's MPIDR: 8 cores per cluster
+		b.PropStrings("enable-method", "spin-table")
+		rel := uint64(spinAddr) + 8*uint64(i)
+		b.PropU32("cpu-release-addr", uint32(rel>>32), uint32(rel))
+		b.End()
+	}
 	b.End()
 
 	// Apple-style devices so lsdev has a Mac-like list. QEMU has nothing at
@@ -457,7 +469,7 @@ func cmdCheck(args []string) error {
 	}
 	os.Remove(sock)
 	log := filepath.Join(c.out, "serial.log")
-	argv := append(qemuBase(), "-display", "none", "-monitor", "none", "-serial", "stdio",
+	argv := append(qemuBase(&c), "-display", "none", "-monitor", "none", "-serial", "stdio",
 		"-qmp", "unix:"+sock+",server=on,wait=off")
 	argv = append(argv, loaderArgs(&c, *image)...)
 	fmt.Printf("fakem1n1: %s %s\n", *qemu, strings.Join(argv, " "))
@@ -615,18 +627,22 @@ func missing(s string, subs []string) (out []string) {
 	return
 }
 
-// qemuBase is the machine: sbsa-ref (RAM at 1 TB), one core, TCG (sbsa-ref
-// needs EL3, which HVF doesn't provide).
-func qemuBase() []string {
-	return []string{"-machine", "sbsa-ref", "-cpu", "max", "-smp", "1", "-m", "16G", "-accel", "tcg", "-no-reboot"}
+// qemuBase is the machine: sbsa-ref (RAM at 1 TB), TCG (sbsa-ref needs
+// EL3, which HVF doesn't provide).
+func qemuBase(c *config) []string {
+	return []string{"-machine", "sbsa-ref", "-cpu", "max", "-smp", fmt.Sprint(max(1, c.smp)), "-m", "16G", "-accel", "tcg", "-no-reboot"}
 }
 
 func loaderArgs(c *config, image string) []string {
-	return []string{
+	args := []string{
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "shim.bin"), uint64(shimAddr)),
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "boot.dtb"), uint64(fdtAddr)),
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "regs.bin"), uint64(fakeRegs)),
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", image, c.kernelAddr),
-		"-device", fmt.Sprintf("loader,addr=%#x,cpu-num=0", uint64(shimAddr)),
 	}
+	args = append(args, "-device", fmt.Sprintf("loader,addr=%#x,cpu-num=0", uint64(shimAddr)))
+	for i := 1; i < c.smp; i++ { // every core starts in the shim, like m1n1
+		args = append(args, "-device", fmt.Sprintf("loader,addr=%#x,cpu-num=%d", uint64(shimAddr), i))
+	}
+	return args
 }

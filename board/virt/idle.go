@@ -4,6 +4,7 @@ package virt
 
 import (
 	"math"
+	"sync/atomic"
 
 	"github.com/usbarmory/tamago/arm64/gic"
 )
@@ -19,6 +20,7 @@ const (
 	// Upper bound on one idle sleep. Devices are interrupt-driven, so this
 	// is only a safety net.
 	maxIdle = 1_000_000_000 // 1s
+
 )
 
 var GIC = &gic.GIC{GICD: GICD_BASE, GICR: GICR_BASE}
@@ -32,6 +34,7 @@ func wfi()
 // initIdle routes the virtual timer through the GIC. Interrupts stay masked
 // in PSTATE (no handler runs); a pending interrupt only wakes WFI.
 func initIdle() {
+	bootMPIDR = affinity(read_mpidr())
 	CPU.DisableInterrupts()
 	GIC.Init()
 	GIC.EnableInterrupt(VTIMER_IRQ)
@@ -45,6 +48,21 @@ func initIdle() {
 // Under HVF, QEMU handles the WFI by sleeping the vCPU thread until
 // CNTV_CVAL. Under TCG the timer interrupt reaches the core through the GIC.
 func idle(until int64) {
+	// The boot core keeps IRQs unmasked (irq.go) but sleeps with them
+	// masked: an interrupt that comes between arming the timer and WFI
+	// then stays pending and ends the WFI, instead of being taken first
+	// and leaving WFI to sleep on. A wake-up taken before the mask is in
+	// bootWoken. Secondaries are masked all the time.
+	self := affinity(read_mpidr())
+	boot := self == bootMPIDR
+	atomic.AddUint32(&cntIdle[coreIndex(self)], 1)
+	if boot {
+		daif_mask_irq()
+		defer daif_unmask_irq() // pending device interrupts are taken here
+		if atomic.SwapUint32(&bootWoken, 0) != 0 {
+			return
+		}
+	}
 	d := int64(maxIdle)
 	// until == 0 means "no timer pending" (not "already due"): sleep until
 	// an interrupt or maxIdle. Treating it as due made an idle system with
@@ -64,4 +82,7 @@ func idle(until int64) {
 	write_cntv_ctl(1) // ENABLE, not IMASK
 	wfi()
 	write_cntv_ctl(0) // deassert the timer interrupt
+	if !boot {
+		drainLocal() // a secondary: acknowledge its SGI and timer here
+	}
 }

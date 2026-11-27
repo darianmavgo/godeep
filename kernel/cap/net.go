@@ -5,6 +5,7 @@ package cap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -74,4 +75,80 @@ func (p *PendingNet) Dial(ctx context.Context, network, addr string) (net.Conn, 
 		return nil, err
 	}
 	return n.Dial(ctx, network, addr)
+}
+
+// ErrPermission is returned by a narrowed capability for what it withholds.
+var ErrPermission = errors.New("not permitted by this capability")
+
+// Restricted is a narrowed Net: the same network without some of its
+// authority. It is what a less trusted Proc (an SSH session, a `restrict`ed
+// command) is handed instead of the Net itself.
+type Restricted struct {
+	N        Net
+	NoListen bool // Listen fails: no services offered to the network
+	NoDial   bool // Dial fails: no outgoing connections
+}
+
+// DialOnly returns n without the authority to listen.
+func DialOnly(n Net) Net {
+	if n == nil {
+		return nil
+	}
+	return &Restricted{N: n, NoListen: true}
+}
+
+func (r *Restricted) Listen(ctx context.Context, network, addr string) (net.Listener, error) {
+	if r.NoListen {
+		return nil, fmt.Errorf("listen %s: %w", addr, ErrPermission)
+	}
+	return r.N.Listen(ctx, network, addr)
+}
+
+func (r *Restricted) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if r.NoDial {
+		return nil, fmt.Errorf("dial %s: %w", addr, ErrPermission)
+	}
+	return r.N.Dial(ctx, network, addr)
+}
+
+// LookupHost resolves through the underlying network, if it resolves names
+// (and dialing is allowed: a name lookup is traffic).
+func (r *Restricted) LookupHost(ctx context.Context, name string) ([]netip.Addr, error) {
+	if r.NoDial {
+		return nil, fmt.Errorf("lookup %s: %w", name, ErrPermission)
+	}
+	n, err := Ready(ctx, r.N)
+	if err != nil {
+		return nil, err
+	}
+	res, ok := n.(Resolver)
+	if !ok {
+		return nil, errors.New("this network doesn't resolve names")
+	}
+	return res.LookupHost(ctx, name)
+}
+
+// Unwrap is the network underneath, for describing it (ifconfig), not for
+// using it.
+func (r *Restricted) Unwrap() Net { return r.N }
+
+// Ready waits for a PendingNet to resolve; any other Net is returned as is.
+func Ready(ctx context.Context, n Net) (Net, error) {
+	if p, ok := n.(*PendingNet); ok {
+		return p.Wait(ctx)
+	}
+	return n, nil
+}
+
+// Underlying peels Restricted wrappers and resolves a PendingNet: the
+// network a capability is ultimately backed by.
+func Underlying(ctx context.Context, n Net) (Net, error) {
+	for {
+		u, ok := n.(interface{ Unwrap() Net })
+		if !ok {
+			break
+		}
+		n = u.Unwrap()
+	}
+	return Ready(ctx, n)
 }

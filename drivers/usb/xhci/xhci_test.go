@@ -28,6 +28,7 @@ const (
 // usbDev is a device on a root port.
 type usbDev struct {
 	device, config []byte
+	reportDesc     []byte   // HID report descriptor (report protocol)
 	reports        [][]byte // queued interrupt reports
 	requests       []string // control requests seen
 }
@@ -246,6 +247,8 @@ func (m *model) transfer(slot, dci int) {
 					src = d.device
 				case usb.DescConfig:
 					src = d.config
+				case usb.DescHIDReport:
+					src = d.reportDesc
 				}
 			}
 			n := copy(m.at(param, want), src)
@@ -372,5 +375,74 @@ func TestInterval(t *testing.T) {
 		if got := interval(c.s, c.b); got != c.want {
 			t.Errorf("interval(%v, %d) = %d, want %d", c.s, c.b, got, c.want)
 		}
+	}
+}
+
+// tabletDevice is QEMU's usb-tablet: HID, no boot subclass, an absolute
+// pointer in report protocol.
+func tabletDevice() *usbDev {
+	desc := []byte{
+		0x05, 0x01, 0x09, 0x02, 0xa1, 0x01, 0x09, 0x01, 0xa1, 0x00,
+		0x05, 0x09, 0x19, 0x01, 0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02,
+		0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
+		0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x00, 0x26, 0xff, 0x7f, 0x75, 0x10, 0x95, 0x02, 0x81, 0x02,
+		0xc0, 0xc0,
+	}
+	dd := []byte{18, usb.DescDevice, 0x00, 0x02, 0, 0, 0, 8, 0x27, 0x06, 0x03, 0, 0, 0, 1, 2, 3, 1}
+	cfg := []byte{
+		9, usb.DescConfig, 34, 0, 1, 1, 0, 0xa0, 50,
+		9, usb.DescInterface, 0, 0, 1, usb.ClassHID, 0, 0, 0,
+		9, usb.DescHID, 0x11, 0x01, 0, 1, usb.DescHIDReport, byte(len(desc)), 0,
+		7, usb.DescEndpoint, 0x81, 3, 8, 0, 10,
+	}
+	return &usbDev{device: dd, config: cfg, reportDesc: desc}
+}
+
+func TestReportProtocolTablet(t *testing.T) {
+	tab := tabletDevice()
+	m := newModel(map[int]*usbDev{2: tab})
+	dev.Register(Driver(func(uint64) mmio.Regs { return m.f }, nil))
+	mgr := dev.NewManager(proc.NewTable(), nil, dma.New(dma.Region{Base: dmaBase, Mem: m.mem}))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f := &pci.Function{Class: 0x0c0330}
+	f.BARs[0] = pci.BAR{CPU: 0x10010000, Size: 0x4000}
+	mgr.Start(ctx, []dev.Node{{Name: "xhci0", Compatible: Compatible, Config: f}})
+	svc, err := mgr.Get(ctx, "xhci0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var srcs []input.Source
+	for len(srcs) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("no input source: %v", svc.(interface{ Devices() []string }).Devices())
+		}
+		time.Sleep(time.Millisecond)
+		srcs = input.All(svc)
+	}
+	if info := strings.Join(svc.(interface{ Devices() []string }).Devices(), "; "); !strings.Contains(info, "slot 1: HID tablet") {
+		t.Fatalf("lsdev: %s", info)
+	}
+	m.mu.Lock()
+	reqs := strings.Join(tab.requests, " ")
+	m.mu.Unlock()
+	// no SET_PROTOCOL (report protocol is the default); the report descriptor from the interface
+	if !strings.Contains(reqs, "81/06/2200") || strings.Contains(reqs, "21/0b") {
+		t.Fatalf("tablet requests: %s", reqs)
+	}
+	ev := srcs[0].Subscribe(ctx)
+	m.report(2, 1, 0xff, 0x7f, 0, 0)
+	var evs []string
+	for len(evs) < 2 {
+		select {
+		case e := <-ev:
+			evs = append(evs, e.String())
+		case <-time.After(5 * time.Second):
+			t.Fatalf("tablet events %v", evs)
+		}
+	}
+	if s := strings.Join(evs, "; "); s != "absolute x=32767 y=0; button 0 down" {
+		t.Fatalf("tablet events: %s", s)
 	}
 }

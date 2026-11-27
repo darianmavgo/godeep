@@ -67,8 +67,10 @@ CPU         ?= host
 else
 CPU         ?= max
 endif
-# -smp 1: TamaGo has no arm64 SMP bring-up yet, extra vCPUs would stay powered off.
-QEMU_FLAGS  ?= -machine virt,gic-version=3$(MACHINE_EL2) -accel $(ACCEL) -cpu $(CPU) -smp 1 -m 4G $(SERIAL)
+# SMP=N: N vCPUs; board/virt starts them with PSCI CPU_ON and sets GOMAXPROCS=N
+# (board/virt/smp.go). 1 by default.
+SMP         ?= 1
+QEMU_FLAGS  ?= -machine virt,gic-version=3$(MACHINE_EL2) -accel $(ACCEL) -cpu $(CPU) -smp $(SMP) -m 4G $(SERIAL)
 # An NVMe disk (read-only) with a FAT32 and an ext4 partition: lsblk, ls, cat.
 DISK        ?= bin/disk.img
 # The NVMe disk is a writable copy (bin/disk-rw.img: FAT writes persist
@@ -77,7 +79,7 @@ DISK_RW     ?= bin/disk-rw.img
 QEMU_DISK   := -drive if=none,id=disk0,file=$(DISK_RW),format=raw -device nvme,serial=godeep0,drive=disk0
 # USB: an xHCI controller with a keyboard and a mouse (headless, they get
 # input from QMP input-send-event; see check-virt).
-QEMU_DISK   += -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0
+QEMU_DISK   += -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device usb-mouse,bus=xhci.0 -device usb-tablet,bus=xhci.0,port=4
 # ...and a USB hub with a USB stick behind it (the same test image, read-only):
 # hub enumeration, routing through it, bulk transfers, BOT/SCSI.
 QEMU_DISK   += -device usb-hub,bus=xhci.0,port=3 \
@@ -88,7 +90,7 @@ QEMU_DISK   += -device usb-hub,bus=xhci.0,port=3 \
 # host port SSH_PORT forwarded to the guest's sshd), and virtio-rng. Modern
 # virtio-mmio (version 2) only: godeep has no legacy transport.
 SSH_PORT    ?= 2222
-QEMU_NET    = -device ramfb -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+QEMU_NET    = -device ramfb -global virtio-mmio.force-legacy=false -device virtio-rng-device -device virtio-gpu-device,id=gpu0 \
 	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22 -device virtio-net-device,netdev=net0 \
 	-fsdev local,id=share0,path=$(CURDIR),security_model=none,readonly=on -device virtio-9p-device,fsdev=share0,mount_tag=host
 QEMU_DEPS   := $(DISK) $(DISK_RW)
@@ -241,6 +243,12 @@ check-virt: wasm
 	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":false,"button":"right"}}]}}' \
 	  -step 'wait:godeep' -step 'send:' -step 'wait:godeep: command not found' \
 	  -step 'qmp:{"execute":"screendump","arguments":{"filename":"bin/check-virt-screen.png","format":"png"}}' \
+	  -step 'lsdev xhci=>HID tablet' -step 'send:evtest 3' -step 'wait:listening' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"abs","data":{"axis":"x","value":16384}},{"type":"abs","data":{"axis":"y","value":8192}}]}}' \
+	  -step 'wait:absolute x=16384 y=8192' -step 'lsdev fbcon=>pointer at 639,199' \
+	  -step 'lsdev gpu0=>scanout 0,ready' -step 'gpu test=>gpu0: showing' \
+	  -step 'qmp:{"execute":"screendump","arguments":{"filename":"bin/check-gpu.png","device":"gpu0","format":"png"}}' \
+	  -step 'local:go run ./tools/pngpix -bars 8 bin/check-gpu.png=>#ffffff #ffff00 #00ffff #00ff00 #ff00ff #ff0000 #0000ff #000000' \
 	  -step 'lsdev rng0=>seeded crypto/rand' \
 	  -step 'ifconfig=>10.0.2.15/24,52:54:00,dhcp from 10.0.2.2,dns 10.0.2.3' \
 	  -step 'get http://10.0.2.2:2280/go.mod=>module godeep' \
@@ -266,9 +274,19 @@ check-virt: wasm
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 pprof heap > bin/check-heap.pb.gz && go tool pprof -top bin/check-heap.pb.gz=>flat%' \
 	  -step 'ntp 10.0.2.2:2123=>clock corrected' \
 	  -step 'date=>2030,ntp 10.0.2.2:2123' \
+	  -step 'yes pipe | head -3 | wc=>3 3 15' \
+	  -step 'lsdev | grep -i nvme | sort -r > ram:/devs=>' -step 'cat ram:/devs=>QEMU NVMe Ctrl' \
+	  -step 'grep name < proc:/1/status=>devmgr' -step 'cat sys:/nvme0/state=>ready' \
+	  -step 'send:kvd &' -step 'wait:] kvd' -step 'kv set os goroutines=>' -step 'kv get os=>goroutines' \
+	  -step 'ports=>KVReq' -step 'top -n 1 -d 0.5=>%RUN,kvd,GOROUTINES' \
+	  -step 'restrict -vol ram -ro write ram:/x hi=>read-only' \
+	  -step 'restrict -vol ram cat nvme0p2:/hello.txt=>no such volume' \
+	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 "ls sys:/ | grep net"=>net0' \
 	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. -ninep 127.0.0.1:5641=bin/ninep-check -ntp 127.0.0.1:2123 \
 	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(QEMU_NET) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
 	@$(MAKE) -s check-usbnet
+	@$(MAKE) -s check-uas
+	@$(MAKE) -s check-smp SMP=4
 	@$(MAKE) -s check-pcie
 	@$(MAKE) -s check-iommu
 	@$(MAKE) -s check-hotplug
@@ -277,6 +295,37 @@ check-virt: wasm
 # USB Ethernet (CDC ECM) as the only network: QEMU's usb-net on the xHCI,
 # DHCP and SSH over it. The Mac's USB-C gadget link will look like this
 # from godeep's side. Run by check-virt.
+# USB Attached SCSI: QEMU's usb-uas on a USB 2 port (no bulk streams), a
+# copy of the test disk behind it: partitions, ext4 and FAT reads, a FAT
+# write read back (Write Ready IUs). USB-C SSDs speak UAS. Run by check-virt.
+check-uas:
+	@$(MAKE) -s image $(DISK)
+	@cp $(DISK) bin/disk-uas.img
+	go run ./tools/qemucheck -log bin/qemucheck-uas.log \
+	  -step 'lsdev xhci=>mass storage (UAS)' -step 'lsdev usbdisk0=>UAS,ready' \
+	  -step 'lsblk=>usbdisk0p1,FAT32,usbdisk0p2,ext4' \
+	  -step 'cat usbdisk0p2:/hello.txt=>hello from godeep' \
+	  -step 'yes uas-write-check | head -500 > usbdisk0p1:/uas.txt=>' \
+	  -step 'wc -l < usbdisk0p1:/uas.txt=>500' -step 'tail -1 < usbdisk0p1:/uas.txt=>uas-write-check' \
+	  -- $(QEMU) $(QEMU_FLAGS) -device qemu-xhci,id=xhci,p2=8 \
+	  -device usb-uas,id=uas,bus=xhci.0,port=5 -drive if=none,id=uasdisk,file=bin/disk-uas.img,format=raw \
+	  -device scsi-hd,bus=uas.0,scsi-id=0,lun=0,drive=uasdisk \
+	  -kernel $(BOOTFILE)
+
+# SMP: QEMU virt with SMP cores (4 when run by check-virt). Every core is
+# started (board/virt/smp.go), a CPU-bound program on as many goroutines
+# makes QEMU use more than (cores - 1.5) host cores, and the shell still
+# answers under that load.
+check-smp:
+	@$(MAKE) -s image
+	go run ./tools/qemucheck -log bin/qemucheck-smp.log \
+	  -step 'dmesg=>$(SMP) cores' -step 'cat proc:/version=>GOMAXPROCS=$(SMP)' \
+	  -step 'send:burn $(SMP) 10 &' -step 'wait:] burn' \
+	  -step 'local:sleep 1; tools/cpuload.sh godeep-smp 4 $(shell echo "$(SMP) - 1.5" | bc)=>parallel' \
+	  -step 'uptime=>up' -step 'wait:MB/s' \
+	  -- $(QEMU) -name godeep-smp $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -kernel $(BOOTFILE)
+
 check-usbnet:
 	@$(MAKE) -s image
 	go run ./tools/qemucheck -log bin/qemucheck-usbnet.log \
@@ -403,6 +452,7 @@ check-applem1:
 	bin/fakem1n1-check check
 	bin/fakem1n1-check check -fault 1 -o bin/fakem1n1/fault1
 	bin/fakem1n1-check check -fault 3 -o bin/fakem1n1/fault3
+	bin/fakem1n1-check check -smp 10 -o bin/fakem1n1/smp10 -want "board:,10 of 10 cores,uptime,wake-ups/s"
 
 # The Mac itself: host tests, build bin/godeep-applem1.img, rehearse it on
 # QEMU (check-applem1), then install it on the godeep boot partition so m1n1
@@ -414,7 +464,7 @@ native:
 	@$(MAKE) -s image BOARD=applem1
 	@echo "built bin/godeep-applem1.img"
 	@$(MAKE) -s check-applem1
-	tools/godeep-partition.sh install $(if $(DRY),--dry-run)
+	BOOTARGS="$(BOOTARGS)" tools/godeep-partition.sh install $(if $(DRY),--dry-run)
 
 stop:
 	@tools/qemu-stop.sh

@@ -58,6 +58,13 @@ type Disk struct {
 	lastSense string
 	retrying  bool
 	wp        bool // the medium is write-protected
+	// xfer runs one SCSI command on the transport: bot (Bulk-Only) or
+	// uas (USB Attached SCSI, uas.go).
+	xfer      func(ctx context.Context, cdb []byte, n int, in bool) ([]byte, error)
+	autoSense []byte      // sense data a UAS status already carried
+	proto     string      // "BOT" or "UAS"
+	uasEP     [5]*bulkEP  // UAS pipes by ID (command, status, data-in, data-out)
+	stat      *dma.Buffer // UAS status IUs
 	bs        int
 	blocks    uint64
 	info      string
@@ -149,6 +156,12 @@ func (h *hc) newDisk(ctx context.Context, d *device, it usb.Interface) error {
 	if k.in == nil || k.out == nil {
 		return errors.New("no bulk endpoints")
 	}
+	k.xfer, k.proto = k.bot, "BOT"
+	return h.probeDisk(ctx, d, k)
+}
+
+// probeDisk identifies the medium over k's transport and publishes it.
+func (h *hc) probeDisk(ctx context.Context, d *device, k *Disk) error {
 	var err error
 	if k.cmd, err = h.alloc(64, 64); err != nil {
 		return err
@@ -182,7 +195,7 @@ func (h *hc) newDisk(ctx context.Context, d *device, it usb.Interface) error {
 	if hdr, err := k.scsi(ctx, []byte{scsiMode6, 0, 0x3f, 0, 4, 0}, 4); err == nil && len(hdr) >= 3 {
 		k.wp = hdr[2]&0x80 != 0
 	}
-	k.info = fmt.Sprintf("%s %s, %d x %d B, %s", vendor, product, k.blocks, k.bs, d.where)
+	k.info = fmt.Sprintf("%s %s, %d x %d B, %s, %s", vendor, product, k.blocks, k.bs, k.proto, d.where)
 	if k.wp {
 		k.info += ", write-protected"
 	}
@@ -260,11 +273,15 @@ func (k *Disk) scsiOut(ctx context.Context, cdb []byte, n int) error {
 // scsiDir runs one command; on a failed status it asks for the sense data,
 // so the error says why.
 func (k *Disk) scsiDir(ctx context.Context, cdb []byte, n int, in bool) ([]byte, error) {
-	b, err := k.bot(ctx, cdb, n, in)
+	k.autoSense = nil
+	b, err := k.xfer(ctx, cdb, n, in)
 	if err != errCheckCondition || cdb[0] == scsiSense {
 		return b, err
 	}
-	sense, serr := k.bot(ctx, []byte{scsiSense, 0, 0, 0, 18, 0}, 18, true)
+	sense, serr := k.autoSense, error(nil)
+	if len(sense) < 14 { // no sense came with the status: ask for it
+		sense, serr = k.xfer(ctx, []byte{scsiSense, 0, 0, 0, 18, 0}, 18, true)
+	}
 	if serr != nil || len(sense) < 14 {
 		return nil, fmt.Errorf("SCSI command %#x failed", cdb[0])
 	}

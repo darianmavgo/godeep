@@ -114,7 +114,20 @@ type Endpoint struct {
 	Attr      byte // bits 1:0: 0 control, 1 isochronous, 2 bulk, 3 interrupt
 	MaxPacket int
 	Interval  byte
+	PipeID    byte // UAS pipe usage (PipeCommand...), 0 if none
 }
+
+// UAS (USB Attached SCSI) interface protocol and pipe IDs.
+const (
+	ProtoBOT        = 0x50
+	ProtoUAS        = 0x62
+	PipeCommand     = 1
+	PipeStatus      = 2
+	PipeDataIn      = 3
+	PipeDataOut     = 4
+	ReqSetInterface = 0x0b
+	descSSCompanion = 0x30
+)
 
 // IsInterruptIn reports an interrupt IN endpoint.
 func (e Endpoint) IsInterruptIn() bool { return e.Address&0x80 != 0 && e.Attr&3 == 3 }
@@ -144,7 +157,7 @@ type Interface struct {
 	Number, Alt               byte
 	Class, Subclass, Protocol byte
 	Endpoints                 []Endpoint
-	Extra                     [][]byte // class-specific descriptors (CDC functional ones)
+	Extra                     [][]byte // class-specific descriptors (CDC functional ones, HID)
 }
 
 // Config is a configuration descriptor with its interfaces.
@@ -159,6 +172,7 @@ func ParseConfig(b []byte) (Config, error) {
 		return Config{}, errors.New("usb: not a configuration descriptor")
 	}
 	c := Config{Value: b[5]}
+	lastEP := false // the previous descriptor was an endpoint (or its SS companion)
 	for i := int(b[0]); i+2 <= len(b); {
 		n := int(b[i])
 		if n < 2 || i+n > len(b) {
@@ -170,7 +184,13 @@ func ParseConfig(b []byte) (Config, error) {
 			if n >= 9 {
 				c.Interfaces = append(c.Interfaces, Interface{Number: d[2], Alt: d[3], Class: d[5], Subclass: d[6], Protocol: d[7]})
 			}
-		case DescCSInterface:
+		case DescCSInterface, DescHID:
+			if d[1] == DescCSInterface && n == 4 && lastEP && len(c.Interfaces) > 0 {
+				// a UAS pipe usage descriptor: names the endpoint before it
+				it := &c.Interfaces[len(c.Interfaces)-1]
+				it.Endpoints[len(it.Endpoints)-1].PipeID = d[2]
+				break
+			}
 			if len(c.Interfaces) > 0 {
 				it := &c.Interfaces[len(c.Interfaces)-1]
 				it.Extra = append(it.Extra, append([]byte(nil), d...))
@@ -182,6 +202,8 @@ func ParseConfig(b []byte) (Config, error) {
 					MaxPacket: int(binary.LittleEndian.Uint16(d[4:]) & 0x7ff), Interval: d[6]})
 			}
 		}
+		lastEP = d[1] == DescEndpoint && len(c.Interfaces) > 0 && len(c.Interfaces[len(c.Interfaces)-1].Endpoints) > 0 ||
+			lastEP && d[1] == descSSCompanion
 		i += n
 	}
 	return c, nil

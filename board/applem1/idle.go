@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math/bits"
+	"runtime"
 	"runtime/goos"
 	"sync/atomic"
 	"time"
@@ -65,9 +66,9 @@ func initIdle() {
 }
 
 // idle is the runtime's idle hook (goos.Idle). until == 0 means "no timer
-// pending": sleep maxIdle. Nothing but a timer can make a goroutine
-// runnable while the only core idles (no interrupts yet), so sleeping to
-// the deadline is safe.
+// pending": sleep maxIdle. With one core nothing but a timer can make a
+// goroutine runnable while it idles (no interrupts yet); with several,
+// goos.Wake (smp.go) also ends the sleep.
 func idle(until int64) {
 	end := nanotime() + maxIdle
 	if until > 0 && until < end {
@@ -75,7 +76,11 @@ func idle(until int64) {
 	}
 	c0 := read_cntvct()
 	var n uint64
+	woken := &smpWoken[coreIndex()]
 	for nanotime() < end {
+		if atomic.SwapUint32(woken, 0) != 0 {
+			break // goos.Wake: there's work for this core
+		}
 		wfe()
 		n++
 	}
@@ -94,9 +99,9 @@ func (idleStats) Devices() []string {
 	}
 	freq := read_cntfrq()
 	secs := float64(total) / float64(freq)
-	return []string{fmt.Sprintf("WFE + event stream every %v: %.1f%% idle, %.0f wake-ups/s",
+	return []string{SMPInfo(), fmt.Sprintf("WFE + event stream every %v: %.1f%% idle (all cores), %.0f wake-ups/s",
 		time.Duration(evntPeriod*uint64(time.Second)/freq).Round(time.Microsecond),
-		100*float64(idleTicks.Load())/float64(total), float64(idleWakes.Load())/secs)}
+		100*float64(idleTicks.Load())/float64(total)/float64(max(1, runtime.GOMAXPROCS(0))), float64(idleWakes.Load())/secs)}
 }
 
 func runIdleStats(ctx context.Context, d *dev.Device) error {

@@ -21,8 +21,8 @@
 package main
 
 import (
-	"encoding/binary"
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -237,6 +238,7 @@ func run(st steps, argv []string, timeout time.Duration, logPath, qmpPath string
 			}
 			// the command's output ends at the next prompt
 			err := wait(fmt.Sprintf("%q to finish", command), from, func(s string) bool {
+				s = withoutLog(s) // a log line can land inside the echoed command
 				i := strings.Index(s, command)
 				return i >= 0 && strings.Contains(s[i+len(command):], prompt)
 			})
@@ -460,3 +462,10 @@ func serveNTP(addr string) error {
 	}()
 	return nil
 }
+
+// klogLine is a kernel log line mirrored to the console ("[    10.652] ntpd:
+// ..."). Background services log at any moment, also in the middle of the
+// echo of a command being typed (more so with several cores).
+var klogLine = regexp.MustCompile(`\[ *[0-9]+\.[0-9]{3}\] [^\n]*\r?\n`)
+
+func withoutLog(s string) string { return klogLine.ReplaceAllString(s, "") }

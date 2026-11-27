@@ -61,7 +61,7 @@ func TestFindKernel(t *testing.T) {
 func TestBuildReplacesUBoot(t *testing.T) {
 	bin, pre := bootBin()
 	k := fakeImage("godeep kernel", 8192)
-	out, kept, err := build(bin, k)
+	out, kept, err := build(bin, k, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,21 @@ func TestBuildReplacesUBoot(t *testing.T) {
 		t.Fatalf("output kernel payload: off %d, %s", p.Off, identify(p.Image))
 	}
 	// Rebuilding from the output (godeep already installed) gives the same result.
-	again, _, err := build(out, k)
+	again, _, err := build(out, k, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// bootargs: a chosen.bootargs line right before the kernel
+	withArgs, _, err := build(bin, k, "godeep.nosmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, err := findKernel(withArgs); err != nil || !bytes.HasSuffix(withArgs[:p.Off], []byte("chosen.bootargs=godeep.nosmp\n")) {
+		t.Fatalf("bootargs line not before the kernel: %v", err)
+	}
+	if _, _, err := build(bin, k, "a\nb"); err == nil {
+		t.Fatal("multi-line bootargs accepted")
+	}
 	if err != nil || !bytes.Equal(again, out) {
 		t.Fatal("build is not idempotent")
 	}
@@ -84,7 +98,7 @@ func TestBuildReplacesUBoot(t *testing.T) {
 
 func TestRejects(t *testing.T) {
 	bin, _ := bootBin()
-	if _, _, err := build(bin, []byte("not an image, too short")); err == nil {
+	if _, _, err := build(bin, []byte("not an image, too short"), ""); err == nil {
 		t.Error("accepted a non-Image kernel")
 	}
 	if _, err := findKernel([]byte("m1n1 with nothing after it")); err == nil {
@@ -95,7 +109,7 @@ func TestRejects(t *testing.T) {
 		t.Error("accepted data after the kernel payload")
 	}
 	noFDT := append([]byte("m1n1"), gz(fakeImage("U-Boot", 4096))...)
-	if _, _, err := build(noFDT, fakeImage("godeep", 4096)); err == nil {
+	if _, _, err := build(noFDT, fakeImage("godeep", 4096), ""); err == nil {
 		t.Error("accepted a boot.bin with no device tree")
 	}
 }

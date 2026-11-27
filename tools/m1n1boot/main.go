@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 const (
@@ -37,6 +38,7 @@ func main() {
 	kernel := flag.String("kernel", "", "godeep arm64 Image (bin/godeep-applem1.img)")
 	out := flag.String("o", "", "output boot.bin")
 	info := flag.String("info", "", "describe a boot.bin's kernel payload and exit")
+	bootargs := flag.String("bootargs", "", "kernel arguments for /chosen/bootargs (e.g. godeep.nosmp): a chosen.bootargs= line m1n1 reads before the kernel")
 	flag.Parse()
 
 	if *info != "" {
@@ -56,7 +58,7 @@ func main() {
 	check(err)
 	k, err := os.ReadFile(*kernel)
 	check(err)
-	res, kept, err := build(b, k)
+	res, kept, err := build(b, k, *bootargs)
 	check(err)
 	check(os.WriteFile(*out, res, 0o644))
 	fmt.Printf("%s: m1n1 + payloads from %s (%d bytes) + gzip(%s) = %d bytes\n", *out, *base, kept, *kernel, len(res))
@@ -126,9 +128,14 @@ func identify(img []byte) string {
 	return "unknown kernel"
 }
 
-// build returns base with its kernel payload replaced by gzip(kernel).
+// build returns base with its kernel payload replaced by gzip(kernel),
+// preceded by a "chosen.bootargs=ARGS" line if bootargs is set (m1n1 sets
+// /chosen properties from chosen.NAME=VALUE lines among its payloads).
 // It also returns how many bytes of base (m1n1 and its other payloads) it kept.
-func build(base, kernel []byte) ([]byte, int, error) {
+func build(base, kernel []byte, bootargs string) ([]byte, int, error) {
+	if strings.ContainsAny(bootargs, "\n\x00") {
+		return nil, 0, errors.New("bootargs: one line, no NUL")
+	}
 	if !isImage(kernel) {
 		return nil, 0, errors.New("kernel is not an arm64 Image (build it with make image BOARD=applem1)")
 	}
@@ -141,6 +148,9 @@ func build(base, kernel []byte) ([]byte, int, error) {
 	}
 	var out bytes.Buffer
 	out.Write(base[:p.Off])
+	if bootargs != "" {
+		out.WriteString("chosen.bootargs=" + bootargs + "\n")
+	}
 	zw, _ := gzip.NewWriterLevel(&out, gzip.BestCompression)
 	if _, err := zw.Write(kernel); err != nil {
 		return nil, 0, err

@@ -76,7 +76,7 @@ func TestSMC(t *testing.T) {
 	go mb.Run(ctx, nil)
 	rk := rtkit.New("smc", mb, nil, nil)
 	go rk.Run(ctx)
-	s, err := Start(ctx, rk, sram, sramBase, 0x100000, true)
+	s, err := Start(ctx, rk, sram, sramBase, 0x100000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestRTCArithmetic(t *testing.T) {
 	go mb.Run(ctx, nil)
 	rk := rtkit.New("smc", mb, nil, nil)
 	go rk.Run(ctx)
-	s, err := Start(ctx, rk, sram, sramBase, 0x100000, false)
+	s, err := Start(ctx, rk, sram, sramBase, 0x100000)
 	if err != nil {
 		t.Fatal(err)
 	}

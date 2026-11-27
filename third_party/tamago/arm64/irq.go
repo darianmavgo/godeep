@@ -23,6 +23,33 @@ func irq_enable()
 func irq_disable()
 func wfi()
 
+// IRQHandler (godeep patch), when set, runs first in the IRQ exception, on
+// the core that took it and on the exception's small private stack: it
+// must be //go:nosplit and must not allocate, block or take locks. It
+// acknowledges the interrupts itself (so the exception returns with IRQs
+// still unmasked) and reports whether to relay IRQ_SIGNAL to the goroutine
+// in ServiceInterrupts (or any signal.Notify of it).
+//
+// This lets the acknowledgement happen on the core the interrupt was routed
+// to even when the servicing goroutine runs on another core (SMP), which a
+// goroutine can't ensure: TamaGo can't pin one to a core.
+var IRQHandler func() (relay bool)
+
+// irqDispatch is called by handleInterrupt: 0 no handler (relay, then mask),
+// 1 handled (relay), 2 handled (no relay).
+//
+//go:nosplit
+func irqDispatch() uint64 {
+	h := IRQHandler
+	if h == nil {
+		return 0
+	}
+	if h() {
+		return 1
+	}
+	return 2
+}
+
 // EnableInterrupts unmasks IRQ interrupts.
 func (cpu *CPU) EnableInterrupts() {
 	irq_enable()

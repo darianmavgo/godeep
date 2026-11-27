@@ -9,7 +9,7 @@
 #include "go_asm.h"
 #include "textflag.h"
 
-#define IRQ_STACK_SIZE 512
+#define IRQ_STACK_SIZE 2048	// godeep: 512 → 2048, room for IRQHandler
 GLOBL	·irqStack(SB),NOPTR,$IRQ_STACK_SIZE
 
 // func irq_enable()
@@ -61,9 +61,18 @@ TEXT ·handleInterrupt(SB),NOSPLIT|NOFRAME,$0
 	MOVD	NZCV, R0
 	MOVD	R0, (16*16)(RSP)
 
+	// godeep: a board's IRQHandler runs first, on this core (see irq.go)
+	CALL	·irqDispatch(SB)
+	MOVD	8(RSP), R0
+	CMP	$2, R0
+	BEQ	done			// handled, nothing to relay
+
 	MOVD	$(const_IRQ_SIGNAL), R0
 	MOVD	R0, 8(RSP)
 	CALL	os∕signal·Relay(SB)
+
+	MOVD	·IRQHandler(SB), R0
+	CBNZ	R0, done		// IRQHandler acknowledged everything: stay unmasked
 
 	// the IRQ handling goroutine is expected to unmask IRQs
 	MRS	SPSR_EL1, R0

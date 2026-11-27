@@ -25,7 +25,14 @@ const (
 	Button // Code: button number (0 left, 1 right, 2 middle), Down
 	Touch  // absolute contacts: X, Y (device units), Code: contact slot, Down
 	Wheel  // DY: wheel clicks (positive = away from the user)
+	// Absolute pointer position (a tablet, QEMU's usb-tablet, a touch
+	// screen): X, Y scaled to 0..AbsMax across the device's range, so a
+	// consumer maps them onto its screen without knowing the device.
+	Absolute
 )
+
+// AbsMax is the top of an Absolute event's X and Y range.
+const AbsMax = 32767
 
 func (k Kind) String() string {
 	switch k {
@@ -41,6 +48,8 @@ func (k Kind) String() string {
 		return "touch"
 	case Wheel:
 		return "wheel"
+	case Absolute:
+		return "absolute"
 	}
 	return fmt.Sprintf("kind(%d)", k)
 }
@@ -66,6 +75,8 @@ func (e Event) String() string {
 		return fmt.Sprintf("button %d %s", e.Code, upDown(e.Down))
 	case Touch:
 		return fmt.Sprintf("touch %d %s x=%d y=%d", e.Code, upDown(e.Down), e.X, e.Y)
+	case Absolute:
+		return fmt.Sprintf("absolute x=%d y=%d", e.X, e.Y)
 	}
 	return e.Kind.String()
 }

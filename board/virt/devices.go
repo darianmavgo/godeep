@@ -50,7 +50,7 @@ func devices() ([]dev.Node, string) {
 }
 
 // virtioKinds names virtio devices by ID (net0, rng0).
-var virtioKinds = map[uint32]string{1: "net", 2: "blk", 4: "rng", 9: "share"}
+var virtioKinds = map[uint32]string{1: "net", 2: "blk", 4: "rng", 9: "share", 16: "gpu"}
 
 func fromFDT(root *fdt.Node) []dev.Node {
 	var out []dev.Node

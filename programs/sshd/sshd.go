@@ -231,6 +231,10 @@ func session(ctx context.Context, p *proc.Proc, ch ssh.Channel, reqs <-chan *ssh
 
 	env := cfg.Shell
 	env.TTY = t
+	// A session gets a narrower network than the kernel's: it may dial
+	// (get, host, mount9p) but not listen, so a remote login can't open
+	// new services on the machine.
+	env.Net = cap.DialOnly(env.Net)
 	child := env.Table.Spawn(ctx, p.PID, proc.Spec{Name: "sh", Args: args, Stdout: t, Main: sh.Main(env)})
 	interactive := len(args) == 0
 	var eof <-chan struct{}

@@ -346,8 +346,18 @@ install_image() {
 		(cd "$REPO" && go build -o "$tool/m1n1boot" ./tools/m1n1boot) || die "can't build tools/m1n1boot"
 	fi
 	was_mounted=$(diskutil info -plist "$esp" | plist MountPoint || true)
-	# EFI partitions need root to mount on current macOS.
-	[ -n "$was_mounted" ] || run sudo diskutil mount "$esp"
+	# EFI partitions need root to mount on current macOS. With
+	# tools/godeep-esp.sh set up, a helper mounts it owned by you, with no
+	# password, and the copies below need no sudo either.
+	local esphelper=/usr/local/libexec/godeep-esp
+	if [ "$DRY" = 0 ] && [ -x "$esphelper" ] && sudo -n "$esphelper" mount >/dev/null 2>&1; then
+		: # mounted (or already was) without a password
+	elif [ -n "$was_mounted" ]; then
+		esphelper=""
+	else
+		esphelper=""
+		run sudo diskutil mount "$esp"
+	fi
 	mnt=$(diskutil info -plist "$esp" | plist MountPoint || true)
 	if [ "$DRY" = 1 ]; then
 		say "  (dry run: would copy $IMAGE to ${mnt:-<boot partition>}/godeep.img"
@@ -375,7 +385,7 @@ install_image() {
 			case "$what" in *", U-Boot") ;; *) die "m1n1/boot.bin's payload isn't U-Boot and there's no boot.bin.uboot: not touching it" ;; esac
 		fi
 		newboot="$tool/boot.bin"
-		what=$("$tool/m1n1boot" -base "$base" -kernel "$IMAGE" -o "$newboot") || die "couldn't build the new m1n1/boot.bin"
+		what=$("$tool/m1n1boot" -base "$base" -kernel "$IMAGE" -bootargs "${BOOTARGS:-}" -o "$newboot") || die "couldn't build the new m1n1/boot.bin"
 		say "  $what"
 		confirm "Make m1n1 boot godeep directly (U-Boot's m1n1/boot.bin is kept as boot.bin.uboot)?"
 	elif [ "$AUTOBOOT" = 1 ]; then
@@ -438,7 +448,13 @@ CONF
 		ok "autoboot off: removed godeep's extlinux.conf"
 	fi
 	sync
-	[ -n "$was_mounted" ] || run sudo diskutil unmount "$esp"
+	if [ -n "$was_mounted" ]; then
+		:
+	elif [ -n "$esphelper" ]; then
+		run sudo -n "$esphelper" unmount
+	else
+		run sudo diskutil unmount "$esp"
+	fi
 }
 
 boot_help() {

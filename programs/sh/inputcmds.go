@@ -45,9 +45,9 @@ func evtest(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 		return errors.New("no input devices")
 	}
 	for _, n := range names {
-		fmt.Fprintf(env.TTY, "input: %s\n", n)
+		fmt.Fprintf(env.out(), "input: %s\n", n)
 	}
-	fmt.Fprintln(env.TTY, "listening; ^C to stop")
+	fmt.Fprintln(env.out(), "listening; ^C to stop")
 	for {
 		i, v, ok := reflect.Select(cases)
 		switch {
@@ -56,7 +56,7 @@ func evtest(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 		case !ok:
 			return nil // a source went away with ctx
 		}
-		fmt.Fprintf(env.TTY, "%s: %s\n", names[i-2], v.Interface().(input.Event))
+		fmt.Fprintf(env.out(), "%s: %s\n", names[i-2], v.Interface().(input.Event))
 	}
 }
 
@@ -86,9 +86,9 @@ func kbd(_ context.Context, env Env, _ *proc.Proc, args []string) error {
 		return errors.New("no keyboard drivers")
 	}
 	if target != nil {
-		fmt.Fprintf(env.TTY, "layout %s on %s\n", target, strings.Join(setters, ", "))
+		fmt.Fprintf(env.out(), "layout %s on %s\n", target, strings.Join(setters, ", "))
 	} else {
-		fmt.Fprintf(env.TTY, "keyboards: %s; layouts: %s\n", strings.Join(setters, ", "), strings.Join(input.LayoutNames(), ", "))
+		fmt.Fprintf(env.out(), "keyboards: %s; layouts: %s\n", strings.Join(setters, ", "), strings.Join(input.LayoutNames(), ", "))
 	}
 	return nil
 }

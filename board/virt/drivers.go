@@ -17,6 +17,7 @@ import (
 	"godeep/drivers/sdhci"
 	"godeep/drivers/simplefb"
 	"godeep/drivers/usb/xhci"
+	virtiogpu "godeep/drivers/virtio/gpu"
 	virtiommio "godeep/drivers/virtio/mmio"
 	virtionet "godeep/drivers/virtio/net"
 	virtiop9 "godeep/drivers/virtio/p9"
@@ -39,6 +40,12 @@ func init() {
 	dev.Register(simplefb.Driver())
 	dev.Register(virtiorng.Driver(window, virtiorng.Options{Seed: mixSeed}))
 	dev.Register(virtiop9.Driver(window))
+	dev.Register(virtiogpu.Driver(window))
+	dev.Register(dev.Driver{Compatible: "godeep,cpus", Run: func(ctx context.Context, d *dev.Device) error {
+		d.Ready(cpuStats{})
+		<-ctx.Done()
+		return nil
+	}})
 	// Under HVF, device interrupts trigger QEMU's WFI bug (console.go), so
 	// the NIC is polled there: every 2 ms while frames flow, 20 ms when quiet.
 	netOpt := virtionet.Options{}
