@@ -1,0 +1,190 @@
+diff --git a/src/runtime/idle_tamago.go b/src/runtime/idle_tamago.go
+index 0c4742b7..7f520740 100644
+--- a/src/runtime/idle_tamago.go
++++ b/src/runtime/idle_tamago.go
+@@ -7,9 +7,32 @@
+ package runtime
+ 
+ import (
++	"internal/runtime/atomic"
++	"internal/runtime/sys"
+ 	"runtime/goos"
+ )
+ 
++// godeep: with several cores (goos.Task), TamaGo's Ms never park: an idle
++// M sleeps in goos.Idle still holding its P. Go's wake-up paths assume an
++// idle P (or a spinning M) takes new work, so before these changes an idle
++// core noticed work queued elsewhere, a stop-the-world or a GC worker
++// request only when its own idle sleep ended (often a second later):
++//
++//   - tamagoIdleMask has a bit per idle core (procid); wakep, finding no
++//     idle P, wakes one of them with goos.Wake (tamagoKick) so it steals
++//     the new work at once;
++//   - preemptall (stop-the-world, safe points) wakes every idle core
++//     (tamagoKickAll), and preemptone wakes an idle target (tamagoWakeM);
++//   - while another core runs, idle sleeps last at most tamagoIdleCap.
++//
++// There is still no preemption of a goroutine that never yields: that
++// needs a timer interrupt on every core.
++
++var tamagoIdleMask atomic.Uint64
++
++// tamagoIdleCap bounds an idle sleep while another core is busy.
++const tamagoIdleCap = 10 * 1000 * 1000 // 10 ms
++
+ // beforeIdle gets called by the scheduler if no goroutine is awake.
+ //
+ //go:yeswritebarrierrec
+@@ -19,7 +42,31 @@ func beforeIdle(now, pollUntil int64) (gp *g, otherReady bool) {
+ 	}
+ 
+ 	if goos.Idle != nil {
+-		goos.Idle(pollUntil)
++		id := getg().m.procid
++		bit := uint64(0)
++		if goos.Wake != nil && id < 64 {
++			bit = 1 << id
++			tamagoMask(bit, true)
++		}
++		// Dekker with tamagoKick: the bit is set before looking for
++		// work, wakers queue work before reading the mask.
++		if bit == 0 || !tamagoWorkPending() {
++			// While another core runs, sleep at most tamagoIdleCap: a
++			// wake-up that still goes astray then costs milliseconds,
++			// not the time to this core's next timer.
++			if bit != 0 && sys.OnesCount64(tamagoIdleMask.Load()) < int(gomaxprocs) {
++				if now == 0 {
++					now = nanotime()
++				}
++				if pollUntil == 0 || pollUntil > now+tamagoIdleCap {
++					pollUntil = now + tamagoIdleCap
++				}
++			}
++			goos.Idle(pollUntil)
++		}
++		if bit != 0 {
++			tamagoMask(bit, false)
++		}
+ 	}
+ 
+ 	if now > 0 {
+@@ -30,4 +77,77 @@ func beforeIdle(now, pollUntil int64) (gp *g, otherReady bool) {
+ 	return nil, true
+ }
+ 
++func tamagoMask(bit uint64, set bool) {
++	for {
++		old := tamagoIdleMask.Load()
++		v := old &^ bit
++		if set {
++			v = old | bit
++		}
++		if tamagoIdleMask.CompareAndSwap(old, v) {
++			return
++		}
++	}
++}
++
++// tamagoWorkPending reports runnable goroutines in any run queue.
++func tamagoWorkPending() bool {
++	if sched.runq.size != 0 {
++		return true
++	}
++	for _, pp := range allp {
++		if pp != nil && !runqempty(pp) {
++			return true
++		}
++	}
++	return false
++}
++
++// tamagoKick wakes one idle core other than this one (wakep found no idle
++// P to start an M on).
++//
++//go:nosplit
++func tamagoKick() {
++	if goos.Wake == nil {
++		return
++	}
++	self := getg().m.procid
++	for mask := tamagoIdleMask.Load(); mask != 0; {
++		id := uint64(sys.TrailingZeros64(mask))
++		mask &^= 1 << id
++		if id != self {
++			goos.Wake(id)
++			return
++		}
++	}
++}
++
++// tamagoKickAll wakes every idle core but this one: a stop-the-world or
++// safe-point request (preemptall) must reach Ms idling with their Ps.
++//
++//go:nosplit
++func tamagoKickAll() {
++	if goos.Wake == nil {
++		return
++	}
++	self := getg().m.procid
++	for mask := tamagoIdleMask.Load(); mask != 0; {
++		id := uint64(sys.TrailingZeros64(mask))
++		mask &^= 1 << id
++		if id != self {
++			goos.Wake(id)
++		}
++	}
++}
++
++// tamagoWakeM wakes mp's core if it's idle (preemptone on an M that is in
++// findRunnable: GC worker enlisting, safe points).
++//
++//go:nosplit
++func tamagoWakeM(mp *m) {
++	if goos.Wake != nil && mp.procid < 64 && tamagoIdleMask.Load()&(1<<mp.procid) != 0 {
++		goos.Wake(mp.procid)
++	}
++}
++
+ func checkTimeouts() {}
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+index 4f339b4b..5cd72a3c 100644
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -3296,6 +3296,7 @@ func wakep() {
+ 		}
+ 		unlock(&sched.lock)
+ 		releasem(mp)
++		tamagoKick() // godeep: tamago Ms keep their Ps; wake an idle core
+ 		return
+ 	}
+ 	// Since we always have a P, the race in the "No M is available"
+@@ -6972,6 +6973,7 @@ func preemptall() bool {
+ 			res = true
+ 		}
+ 	}
++	tamagoKickAll() // godeep: idle tamago Ms keep their Ps; wake them to notice
+ 	return res
+ }
+ 
+@@ -6992,6 +6994,7 @@ func preemptone(pp *p) bool {
+ 	}
+ 	gp := mp.curg
+ 	if gp == nil || gp == mp.g0 {
++		tamagoWakeM(mp) // godeep: an idle tamago M (in findRunnable) keeps its P
+ 		return false
+ 	}
+ 	if readgstatus(gp)&^_Gscan == _Gsyscall {
+diff --git a/src/runtime/stubs_nontamago.go b/src/runtime/stubs_nontamago.go
+index d302f570..6f392e63 100644
+--- a/src/runtime/stubs_nontamago.go
++++ b/src/runtime/stubs_nontamago.go
+@@ -7,3 +7,9 @@
+ package runtime
+ 
+ func sigReady() *g { return nil }
++
++func tamagoKick() {}
++
++func tamagoKickAll() {}
++
++func tamagoWakeM(mp *m) {}

@@ -58,7 +58,8 @@ const (
 	// device tree (for firmware; unused here), so start above it.
 	shimAddr = dramBase + 0x20_0000
 	fdtAddr  = dramBase + 0x30_0000
-	spinAddr = dramBase + 0x2f_0000     // spin table: 8 bytes per core, zero at reset
+	spinAddr = dramBase + 0x2f_0000     // spin table: 8 bytes per core, zero at reset (stacks above)
+	ptAddr   = dramBase + 0x2f_4000     // -secmmu: the secondaries' EL2 translation tables (3 pages)
 	lowRsvd  = 4 << 20                  // reserved for "m1n1": QEMU's tree, shim, our tree
 	fbBase   = dramBase + 0x3_e000_0000 // a carve-out near the top, like iBoot's
 
@@ -84,6 +85,8 @@ type config struct {
 	fault      int
 	smp        int
 	bootargs   string
+	park       string // "wfe" or "wfi": how secondaries wait on the spin table
+	secmmu     bool   // secondaries run with the EL2 MMU on when released
 }
 
 func (c *config) flags(fs *flag.FlagSet) {
@@ -95,6 +98,8 @@ func (c *config) flags(fs *flag.FlagSet) {
 	fs.StringVar(&c.format, "format", string(simplefb.X2R10G10B10), "framebuffer format")
 	fs.BoolVar(&c.e2h, "e2h", true, "enter the kernel with HCR_EL2.E2H=1, as Apple cores do")
 	fs.IntVar(&c.smp, "smp", 1, "cores (the Mac has 10): the others wait on m1n1's spin table (cpu-release-addr) until the kernel starts them")
+	fs.StringVar(&c.park, "park", "wfe", "how the other cores wait for release: wfe (m1n1's WFE mode: SEV wakes them) or wfi (deep-WFI mode: only an interrupt would)")
+	fs.BoolVar(&c.secmmu, "secmmu", false, "release the other cores with the EL2 MMU on (an identity map, as m1n1 may leave it), not off")
 	fs.StringVar(&c.bootargs, "bootargs", "", "/chosen/bootargs (as m1n1's chosen.bootargs=), e.g. godeep.nosmp")
 	fs.IntVar(&c.fault, "fault", 0, "make godeep fault at boot stage N (1-4) to test the fault screen (bootargs godeep.testfault=N)")
 }
@@ -193,7 +198,17 @@ func prepare(c *config) ([]string, error) {
 	if c.e2h {
 		hcr |= hcrE2H
 	}
-	shim, err := patchShim(uartBase, hcr, fdtAddr, c.kernelAddr)
+	if c.park != "wfe" && c.park != "wfi" {
+		return nil, fmt.Errorf("-park %q: wfe or wfi", c.park)
+	}
+	if c.secmmu && !c.e2h {
+		return nil, errors.New("-secmmu needs -e2h (the shim writes TCR_EL2 in the E2H=1 layout)")
+	}
+	var pt uint64
+	if c.secmmu {
+		pt = ptAddr
+	}
+	shim, err := patchShim(uartBase, hcr, fdtAddr, c.kernelAddr, pt, c.park == "wfi")
 	if err != nil {
 		return nil, err
 	}
@@ -206,25 +221,54 @@ func prepare(c *config) ([]string, error) {
 	}
 	shimPath, dtbPath := filepath.Join(c.out, "shim.bin"), filepath.Join(c.out, "boot.dtb")
 	regsPath := filepath.Join(c.out, "regs.bin")
-	for path, data := range map[string][]byte{shimPath: shim, dtbPath: dtb, regsPath: regsImage()} {
+	ptPath := filepath.Join(c.out, "pt.bin")
+	for path, data := range map[string][]byte{shimPath: shim, dtbPath: dtb, regsPath: regsImage(), ptPath: pageTables(ptAddr)} {
 		if err := os.WriteFile(path, data, 0o644); err != nil {
 			return nil, err
 		}
 	}
-	return []string{shimPath, dtbPath, regsPath}, nil
+	return []string{shimPath, dtbPath, regsPath, ptPath}, nil
 }
 
-// patchShim fills the shim's five trailing parameter words (shim.asm).
-func patchShim(uart, hcr, dtb, kernel uint64) ([]byte, error) {
+// pageTables is an EL2 identity map for -secmmu, 4 KB granule, 48-bit VA,
+// at base: level 0 (one page), then two level-1 tables of 1 GB blocks: the
+// first 512 GB as Device memory (sbsa-ref's MMIO), and the 512 GB from
+// 1 TB (DRAM) as Normal write-back memory.
+func pageTables(base uint64) []byte {
+	b := make([]byte, 3*4096)
+	put := func(page, idx int, v uint64) { binary.LittleEndian.PutUint64(b[page*4096+idx*8:], v) }
+	const (
+		table  = 0b11
+		block  = 0b01
+		af     = 1 << 10
+		inner  = 3 << 8
+		normal = 1 << 2 // MAIR attr1
+	)
+	put(0, 0, (base+0x1000)|table) // 0..512 GB
+	put(0, 2, (base+0x2000)|table) // 1 TB..1.5 TB
+	for i := 0; i < 512; i++ {
+		put(1, i, uint64(i)<<30|af|block)
+		put(2, i, (dramBase+uint64(i)<<30)|af|inner|normal|block)
+	}
+	return b
+}
+
+// patchShim fills the shim's seven trailing parameter words (shim.asm).
+func patchShim(uart, hcr, dtb, kernel, pt uint64, wfi bool) ([]byte, error) {
 	b := append([]byte{}, shimCode...)
-	if len(b) < 40 {
+	const words = 7
+	if len(b) < words*8 {
 		return nil, errors.New("shim too short: regenerate with go generate")
 	}
-	p := b[len(b)-40:]
+	p := b[len(b)-words*8:]
 	if binary.LittleEndian.Uint64(p) != 0x6000_0000 {
 		return nil, errors.New("shim parameter block not where expected: regenerate with go generate")
 	}
-	for i, v := range []uint64{uart, hcr, dtb, kernel, spinAddr} {
+	park := uint64(0)
+	if wfi {
+		park = 1
+	}
+	for i, v := range []uint64{uart, hcr, dtb, kernel, spinAddr, pt, park} {
 		binary.LittleEndian.PutUint64(p[i*8:], v)
 	}
 	return b, nil
@@ -639,6 +683,9 @@ func loaderArgs(c *config, image string) []string {
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "boot.dtb"), uint64(fdtAddr)),
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "regs.bin"), uint64(fakeRegs)),
 		"-device", fmt.Sprintf("loader,file=%s,addr=%#x", image, c.kernelAddr),
+	}
+	if c.secmmu {
+		args = append(args, "-device", fmt.Sprintf("loader,file=%s,addr=%#x", filepath.Join(c.out, "pt.bin"), uint64(ptAddr)))
 	}
 	args = append(args, "-device", fmt.Sprintf("loader,addr=%#x,cpu-num=0", uint64(shimAddr)))
 	for i := 1; i < c.smp; i++ { // every core starts in the shim, like m1n1

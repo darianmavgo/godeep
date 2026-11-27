@@ -18,6 +18,7 @@ import (
 	"godeep/kernel/irq"
 	"godeep/kernel/klog"
 	"godeep/kernel/proc"
+	"godeep/kernel/pstore"
 	"godeep/kernel/tty"
 	"godeep/kernel/vfs"
 	"godeep/net/netstack"
@@ -39,6 +40,9 @@ type Console struct {
 	In   <-chan byte
 	Out  io.Writer
 	Echo bool // the kernel must echo input (raw serial)
+	// Size, if set, is the screen's size in characters (a framebuffer
+	// console that is the only terminal): full-screen programs use it.
+	Size func() (cols, rows int)
 	// Input, if set, receives every event from every input device (mouse,
 	// trackpad, keyboards): a framebuffer console's pointer, scrollback and
 	// selection. nil: the console doesn't use pointing devices.
@@ -76,6 +80,14 @@ type Board struct {
 	// LogLabel: save the kernel log to the writable FAT32 partition with
 	// this label (godeep/log.txt; "": don't).
 	LogLabel string
+	// KexecCheck says whether Kexec could boot an image now; Kexec boots
+	// it (after the kernel stopped everything) and returns only if it
+	// can't. nil: no kexec on this board.
+	KexecCheck func(image []byte) error
+	Kexec      func(image []byte) error
+	// Pstore is the console record kept across resets (the board copies
+	// console and runtime output into it). nil: none.
+	Pstore *pstore.Ring
 	// NetWait is how long netd waits for a network device at boot: 0 means
 	// 10 s, negative forever (a USB Ethernet adapter plugged in later).
 	NetWait time.Duration
@@ -102,6 +114,9 @@ func Boot(ctx context.Context, b Board) error {
 
 	env := sh.Env{Table: tab, TTY: tty.New(con.In, con.Out, con.Echo), Boot: time.Now(),
 		Dev: mgr, IRQ: b.IRQ, DMA: b.DMA, Net: b.Net, FS: vfs.New(ctx, mgr), WASM: wasm.NewCache(wasm.DefaultCacheSize)}
+	if con.Size != nil {
+		env.TTY.SetSize(con.Size())
+	}
 	env.FS.Mount("ram", memfs.New("ram"))
 	env.FS.Mount("proc", procfs.Proc(tab, env.Boot, Version))
 	env.FS.Mount("sys", procfs.Sys(mgr))
@@ -110,6 +125,17 @@ func Boot(ctx context.Context, b Board) error {
 	defer env.TTY.Close()
 	env.Log = klog.New(env.TTY, 0)
 	env.Log.Record([]byte(banner))
+	crash := b.Pstore.Crash()
+	if crash != nil {
+		if v, err := env.FS.Open(ctx, "ram"); err == nil {
+			if w, ok := v.(vfs.Writable); ok {
+				w.WriteFile(crashFile, crash)
+			}
+		}
+		env.Log.Printf("pstore: the previous boot ended without a clean halt; its last %d bytes of console output are in ram:/%s", len(crash), crashFile)
+	} else if b.Pstore != nil {
+		env.Log.Printf("pstore: boot %d, %s", b.Pstore.Boots(), prevNote(b.Pstore))
+	}
 	if env.Net == nil {
 		pn := startNet(ctx, tab, mgr, b.NetConfig, b.NetWait, env.Log)
 		env.Net = pn
@@ -132,7 +158,7 @@ func Boot(ctx context.Context, b Board) error {
 	}
 	var saver *logSaver
 	if b.LogLabel != "" {
-		saver = &logSaver{label: b.LogLabel, mgr: mgr, fs: env.FS, log: env.Log}
+		saver = &logSaver{label: b.LogLabel, mgr: mgr, fs: env.FS, log: env.Log, crash: crash}
 		startLogd(ctx, tab, saver)
 		cd := &confd{label: b.LogLabel, mgr: mgr, fs: env.FS, log: env.Log, clock: clockOf(env)}
 		if pn, ok := env.Net.(*cap.PendingNet); ok {
@@ -147,6 +173,21 @@ func Boot(ctx context.Context, b Board) error {
 	halt := make(chan struct{})
 	var haltOnce sync.Once
 	env.Halt = func() { haltOnce.Do(func() { close(halt) }) }
+	var kexecImage []byte
+	if b.Kexec != nil {
+		env.Kexec = func(img []byte) error {
+			if b.KexecCheck != nil {
+				if err := b.KexecCheck(img); err != nil {
+					return err
+				}
+			}
+			haltOnce.Do(func() {
+				kexecImage = img
+				close(halt)
+			})
+			return nil
+		}
+	}
 	init := env.Table.Spawn(ctx, 0, proc.Spec{Name: "init", Stdout: env.TTY, Main: initd.Main(env, Version)})
 
 	var shutdown bool
@@ -171,8 +212,18 @@ func Boot(ctx context.Context, b Board) error {
 	for _, p := range env.Table.Shutdown(grace) {
 		env.Log.Printf("godeep: pid %d (%s) did not exit: %s", p.PID, p.Name, p.State())
 	}
+	if shutdown && kexecImage != nil {
+		env.Log.Printf("godeep: kexec: booting a %d-byte image", len(kexecImage))
+		if saver != nil {
+			saver.flush()
+		}
+		b.Pstore.MarkClean()
+		err := b.Kexec(kexecImage)
+		env.Log.Printf("godeep: kexec failed: %v; powering off", err)
+	}
 	if shutdown {
 		env.Log.Printf("godeep: halted")
+		b.Pstore.MarkClean()
 		if b.PowerOff != nil {
 			b.PowerOff()
 		}
@@ -181,6 +232,21 @@ func Boot(ctx context.Context, b Board) error {
 		return err
 	}
 	return nil
+}
+
+// crashFile is where a crashed boot's last console output goes: in ram:
+// and, through logd, on the data volume.
+const crashFile = "crash.txt"
+
+func prevNote(r *pstore.Ring) string {
+	_, clean, ok := r.Previous()
+	switch {
+	case !ok:
+		return "no record of a previous boot"
+	case clean:
+		return "the previous boot halted cleanly"
+	}
+	return "the previous boot left no output"
 }
 
 func clockOf(env sh.Env) *wallClock {

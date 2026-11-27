@@ -165,7 +165,7 @@ func serveConn(ctx context.Context, p *proc.Proc, c net.Conn, sc *ssh.ServerConf
 // session waits for "shell" or "exec", then runs sh on the channel.
 func session(ctx context.Context, p *proc.Proc, ch ssh.Channel, reqs <-chan *ssh.Request, gone <-chan struct{}, cfg *Config) {
 	defer ch.Close()
-	pty := false
+	pty, cols, rows := false, 0, 0
 	var args []string
 	for args == nil {
 		var r *ssh.Request
@@ -180,6 +180,15 @@ func session(ctx context.Context, p *proc.Proc, ch ssh.Channel, reqs <-chan *ssh
 		switch r.Type {
 		case "pty-req":
 			pty = true
+			var req struct {
+				Term       string
+				Cols, Rows uint32
+				W, H       uint32
+				Modes      string
+			}
+			if ssh.Unmarshal(r.Payload, &req) == nil {
+				cols, rows = int(req.Cols), int(req.Rows)
+			}
 			r.Reply(true, nil)
 		case "env":
 			r.Reply(true, nil) // accepted and ignored
@@ -213,11 +222,6 @@ func session(ctx context.Context, p *proc.Proc, ch ssh.Channel, reqs <-chan *ssh
 			r.Reply(false, nil)
 		}
 	}
-	p.Go(func(context.Context) { // window-change etc. after start
-		for r := range reqs {
-			r.Reply(r.Type == "window-change" || r.Type == "env", nil)
-		}
-	})
 
 	var out io.Writer = ch
 	if pty {
@@ -227,6 +231,18 @@ func session(ctx context.Context, p *proc.Proc, ch ssh.Channel, reqs <-chan *ssh
 	stdinEOF := make(chan struct{})
 	t := tty.NewFor(p, in, out, pty)
 	defer t.Close()
+	t.SetSize(cols, rows) // edit's screen
+	p.Go(func(context.Context) { // window-change etc. after start
+		for r := range reqs {
+			if r.Type == "window-change" {
+				var wc struct{ Cols, Rows, W, H uint32 }
+				if ssh.Unmarshal(r.Payload, &wc) == nil {
+					t.SetSize(int(wc.Cols), int(wc.Rows))
+				}
+			}
+			r.Reply(r.Type == "window-change" || r.Type == "env", nil)
+		}
+	})
 	p.Go(func(ctx context.Context) { pump(ctx, ch, in, stdinEOF) })
 
 	env := cfg.Shell

@@ -37,9 +37,51 @@ type TTY struct {
 	stop   chan struct{}
 	once   sync.Once
 	closed atomic.Bool
+	raw    atomic.Pointer[rawReader] // set: input bypasses the line editor
+	size   atomic.Uint64             // cols<<32 | rows; 0: unknown
 
 	mu  sync.Mutex
 	out io.Writer
+}
+
+type rawReader struct {
+	c    chan byte
+	done chan struct{}
+}
+
+// ErrBusy is returned by Raw when another program already reads raw input.
+var ErrBusy = errors.New("tty: raw input already taken")
+
+// Raw hands every input byte to the returned channel, unechoed and
+// unedited (^C included), until release is called; then line editing
+// resumes. For full-screen programs (an editor). One at a time.
+func (t *TTY) Raw() (in <-chan byte, release func(), err error) {
+	r := &rawReader{c: make(chan byte, 64), done: make(chan struct{})}
+	if !t.raw.CompareAndSwap(nil, r) {
+		return nil, nil, ErrBusy
+	}
+	var once sync.Once
+	return r.c, func() {
+		once.Do(func() {
+			t.raw.CompareAndSwap(r, nil)
+			close(r.done)
+		})
+	}, nil
+}
+
+// SetSize records the terminal's size in characters (a framebuffer's, an
+// SSH client's window).
+func (t *TTY) SetSize(cols, rows int) {
+	if cols > 0 && rows > 0 {
+		t.size.Store(uint64(cols)<<32 | uint64(uint32(rows)))
+	}
+}
+
+// Size is the terminal's size in characters; 0, 0 if unknown (a serial
+// line: ask the terminal, or assume 80x24).
+func (t *TTY) Size() (cols, rows int) {
+	v := t.size.Load()
+	return int(v >> 32), int(uint32(v))
 }
 
 // New starts the line discipline over a driver's byte channel. If echo is
@@ -275,6 +317,16 @@ func (t *TTY) discipline(in <-chan byte) {
 				return
 			}
 			b = c
+		}
+		if r := t.raw.Load(); r != nil {
+			esc, lastCR = 0, false
+			select {
+			case r.c <- b:
+			case <-r.done:
+			case <-t.stop:
+				return
+			}
+			continue
 		}
 		switch esc {
 		case 1:

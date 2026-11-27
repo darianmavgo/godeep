@@ -19,7 +19,7 @@ import (
 
 // Proc returns the proc: volume over a process table:
 //
-//	proc:/PID/status      name, pid, ppid, state, uptime, goroutines, I/O bytes
+//	proc:/PID/status      name, pid, ppid, state, uptime, goroutines, I/O bytes, limits
 //	proc:/PID/cmdline     the name and arguments, one per line
 //	proc:/PID/goroutines  the Proc's goroutines: id, state, function
 //	proc:/uptime          seconds since boot
@@ -88,6 +88,7 @@ func procDir(p *proc.Proc) *synth.Node {
 			fmt.Fprintf(&b, "name\t%s\npid\t%d\nppid\t%d\nstate\t%s\n", p.Name, p.PID, p.PPID, p.State())
 			fmt.Fprintf(&b, "uptime\t%s\ngoroutines\t%d\nread\t%d\nwritten\t%d\n",
 				time.Since(p.Started).Truncate(time.Millisecond), n, in, out)
+			fmt.Fprintf(&b, "limits\t%s\n", p.Limits)
 			return b.String()
 		}),
 		"cmdline": synth.Text(func() string {

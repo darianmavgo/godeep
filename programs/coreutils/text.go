@@ -74,16 +74,22 @@ func grep(ctx context.Context, p *proc.Proc) error {
 	}
 	n := 0
 	w := bufio.NewWriter(p.Stdout)
+	var werr error // the reader went away: stop (don't read stdin forever)
 	err = lines(ctx, p.Stdin, func(l string) bool {
 		if re.MatchString(l) != invert {
 			n++
 			if !count {
 				w.WriteString(l)
-				w.WriteByte('\n')
+				if werr = w.WriteByte('\n'); werr != nil {
+					return false
+				}
 			}
 		}
 		return true
 	})
+	if werr != nil {
+		return werr
+	}
 	if count {
 		fmt.Fprintln(w, n)
 	}

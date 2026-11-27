@@ -23,6 +23,7 @@ const (
 	logDir     = "godeep"
 	logFile    = "godeep/log.txt"
 	logPrev    = "godeep/log.prev.txt"
+	logCrash   = "godeep/crash.txt" // the last output of a boot that didn't halt cleanly
 	logTimeout = 3 * time.Second
 )
 
@@ -31,6 +32,7 @@ type logSaver struct {
 	mgr   *dev.Manager
 	fs    *vfs.NS
 	log   *klog.Log
+	crash []byte // written once as logCrash (nil: none)
 
 	mu      sync.Mutex
 	vol     string // the partition found ("nvme0p2")
@@ -103,6 +105,12 @@ func (s *logSaver) save(ctx context.Context) error {
 		w.Remove(logPrev)
 		w.Rename(logFile, logPrev)
 		s.rotated = true
+	}
+	if s.crash != nil {
+		if err := w.WriteFile(logCrash, s.crash); err == nil {
+			s.log.Printf("logd: the crashed boot's output saved as %s:/%s", s.vol, logCrash)
+			s.crash = nil
+		}
 	}
 	if err := w.WriteFile(logFile, b); err != nil {
 		s.vol = "" // look again next time (the disk may have gone)

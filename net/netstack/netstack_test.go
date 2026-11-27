@@ -148,3 +148,65 @@ func TestAddresses(t *testing.T) {
 		t.Fatalf("Devices: %q", got)
 	}
 }
+
+func TestPing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	var wg sync.WaitGroup
+	a, b := cable()
+	sa := run(t, ctx, &wg, a, "10.0.0.1/24")
+	sb := run(t, ctx, &wg, b, "10.0.0.2/24")
+	defer func() { cancel(); wg.Wait(); sa.Close(); sb.Close() }()
+	for seq := uint16(1); seq <= 3; seq++ {
+		from, rtt, err := sa.Ping(ctx, "10.0.0.2", seq, 56)
+		if err != nil {
+			t.Fatalf("ping %d: %v", seq, err)
+		}
+		if from.String() != "10.0.0.2" || rtt <= 0 {
+			t.Fatalf("ping %d: from %v in %v", seq, from, rtt)
+		}
+	}
+	// Nobody at .3: the deadline ends the wait.
+	short, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer stop()
+	if _, _, err := sa.Ping(short, "10.0.0.3", 1, 8); err == nil {
+		t.Fatal("ping to nobody succeeded")
+	}
+}
+
+func TestUDP(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	var wg sync.WaitGroup
+	a, b := cable()
+	sa := run(t, ctx, &wg, a, "10.0.0.1/24")
+	sb := run(t, ctx, &wg, b, "10.0.0.2/24")
+	defer func() { cancel(); wg.Wait(); sa.Close(); sb.Close() }()
+	pc, err := sb.ListenPacket(ctx, "udp", ":5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pc.Close()
+	c, err := sa.Dial(ctx, "udp", "10.0.0.2:5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 100)
+	pc.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, from, err := pc.ReadFrom(buf)
+	if err != nil || string(buf[:n]) != "ping" {
+		t.Fatalf("server got %q from %v: %v", buf[:n], from, err)
+	}
+	if _, err := pc.WriteTo([]byte("pong"), from); err != nil {
+		t.Fatal(err)
+	}
+	c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if n, err := c.Read(buf); err != nil || string(buf[:n]) != "pong" {
+		t.Fatalf("client got %q: %v", buf[:n], err)
+	}
+	if _, err := sa.Dial(ctx, "sctp", "10.0.0.2:1"); err == nil {
+		t.Fatal("sctp dialed")
+	}
+}

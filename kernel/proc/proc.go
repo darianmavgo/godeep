@@ -14,6 +14,7 @@ import (
 	"runtime/pprof"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +25,60 @@ type Main func(ctx context.Context, p *Proc) error
 
 // ErrKilled is the exit error of a Proc stopped by Kill.
 var ErrKilled = errors.New("killed")
+
+// ErrLimit is the cause of a Proc stopped by one of its Limits.
+var ErrLimit = errors.New("resource limit")
+
+// Limits bound what a Proc (and every Proc it spawns: a child gets the
+// tighter of its parent's limits and its own) may use. Zero fields don't
+// limit. There is no Go heap limit per Proc (the runtime can't attribute
+// memory to goroutines): Memory caps WASM linear memory, where untrusted
+// code allocates.
+type Limits struct {
+	Time       time.Duration // wall-clock lifetime; then killed with ErrLimit
+	Goroutines int           // live tracked goroutines (main + Go); Go fails beyond
+	Output     int64         // bytes written to Stdout; then killed with ErrLimit
+	Memory     int64         // bytes of WASM linear memory per program
+}
+
+// Narrow returns the tighter of l and m, field by field.
+func (l Limits) Narrow(m Limits) Limits {
+	minNZ := func(a, b int64) int64 {
+		if a == 0 || (b != 0 && b < a) {
+			return b
+		}
+		return a
+	}
+	return Limits{
+		Time:       time.Duration(minNZ(int64(l.Time), int64(m.Time))),
+		Goroutines: int(minNZ(int64(l.Goroutines), int64(m.Goroutines))),
+		Output:     minNZ(l.Output, m.Output),
+		Memory:     minNZ(l.Memory, m.Memory),
+	}
+}
+
+// IsZero reports whether no limit is set.
+func (l Limits) IsZero() bool { return l == Limits{} }
+
+func (l Limits) String() string {
+	var parts []string
+	if l.Time != 0 {
+		parts = append(parts, "time "+l.Time.String())
+	}
+	if l.Goroutines != 0 {
+		parts = append(parts, fmt.Sprintf("goroutines %d", l.Goroutines))
+	}
+	if l.Output != 0 {
+		parts = append(parts, fmt.Sprintf("output %d bytes", l.Output))
+	}
+	if l.Memory != 0 {
+		parts = append(parts, fmt.Sprintf("wasm memory %d bytes", l.Memory))
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, ", ")
+}
 
 // Spec describes a Proc to spawn.
 type Spec struct {
@@ -36,6 +91,8 @@ type Spec struct {
 	// returned): the pipe ends it holds, so the other side sees EOF or a
 	// closed pipe, and a goroutine of this Proc blocked on one wakes up.
 	Ends []io.Closer
+	// Limits are narrowed by the parent's (ppid's) limits.
+	Limits Limits
 }
 
 // Proc is a process: a set of goroutines that live and die together.
@@ -46,6 +103,7 @@ type Proc struct {
 	Stdin     io.Reader // never nil
 	Stdout    io.Writer // counts bytes (IO)
 	Started   time.Time
+	Limits    Limits // effective (inherited and narrowed); read-only
 
 	in, out atomic.Int64 // bytes through Stdin/Stdout
 
@@ -74,13 +132,26 @@ func (c countReader) Read(b []byte) (int, error) {
 }
 
 type countWriter struct {
-	w io.Writer
-	n *atomic.Int64
+	w   io.Writer
+	n   *atomic.Int64
+	max int64 // 0: no limit
+	p   *Proc // killed when max is reached
 }
 
 func (c countWriter) Write(b []byte) (int, error) {
+	var over bool
+	if c.max > 0 {
+		if room := c.max - c.n.Load(); int64(len(b)) > room {
+			b, over = b[:max(room, 0)], true
+		}
+	}
 	n, err := c.w.Write(b)
 	c.n.Add(int64(n))
+	if over && err == nil {
+		err = fmt.Errorf("%w: output over %d bytes", ErrLimit, c.max)
+		c.p.setErr(err)
+		c.p.cancel(err)
+	}
 	return n, err
 }
 
@@ -132,10 +203,11 @@ func (p *Proc) Wait(ctx context.Context) error {
 }
 
 // Go starts an accounted goroutine in the Proc. A panic in fn kills the Proc,
-// not the kernel. It returns false if the Proc is already dead.
+// not the kernel. It returns false if the Proc is already dead, or already
+// has as many goroutines as its Limits allow.
 func (p *Proc) Go(fn func(ctx context.Context)) bool {
 	p.mu.Lock()
-	if p.live == 0 {
+	if p.live == 0 || (p.Limits.Goroutines > 0 && p.live >= p.Limits.Goroutines) {
 		p.mu.Unlock()
 		return false
 	}
@@ -218,9 +290,13 @@ func (t *Table) Spawn(parent context.Context, ppid int, s Spec) *Proc {
 	t.mu.Lock()
 	pid := t.next
 	t.next++
+	lim := s.Limits
+	if pp, ok := t.procs[ppid]; ok {
+		lim = pp.Limits.Narrow(lim)
+	}
 	p := &Proc{
 		PID: pid, PPID: ppid, Name: s.Name, Args: s.Args,
-		Started: time.Now(), table: t, cancel: cancel,
+		Started: time.Now(), Limits: lim, table: t, cancel: cancel,
 		done: make(chan struct{}), live: 1,
 	}
 	in := s.Stdin
@@ -229,12 +305,12 @@ func (t *Table) Spawn(parent context.Context, ppid int, s Spec) *Proc {
 	}
 	p.Stdin = countReader{in, &p.in}
 	if s.Stdout != nil {
-		p.Stdout = countWriter{s.Stdout, &p.out}
+		p.Stdout = countWriter{w: s.Stdout, n: &p.out, max: lim.Output, p: p}
 	}
+	// Set up before it's in the table: List and Get readers see it whole.
+	p.ctx = pprof.WithLabels(ctx, pprof.Labels("pid", strconv.Itoa(pid), "proc", s.Name))
 	t.procs[pid] = p
 	t.mu.Unlock()
-
-	p.ctx = pprof.WithLabels(ctx, pprof.Labels("pid", strconv.Itoa(pid), "proc", s.Name))
 	if len(s.Ends) > 0 {
 		ends := s.Ends
 		context.AfterFunc(ctx, func() {
@@ -242,6 +318,14 @@ func (t *Table) Spawn(parent context.Context, ppid int, s Spec) *Proc {
 				e.Close()
 			}
 		})
+	}
+	if lim.Time > 0 {
+		t := time.AfterFunc(lim.Time, func() {
+			err := fmt.Errorf("%w: time %v", ErrLimit, lim.Time)
+			p.setErr(err)
+			p.cancel(err)
+		})
+		context.AfterFunc(ctx, func() { t.Stop() })
 	}
 	p.spawn(func() error { return s.Main(p.ctx, p) }, true)
 	return p

@@ -140,6 +140,14 @@ func startSMP() {
 
 	n := uint32(1)
 	var failed []string
+	// The boot core takes wake-up SGIs too (goos.Wake(boot) when work or a
+	// stop-the-world waits for it): without SGI 0 enabled in its own
+	// redistributor it slept on until its next timer.
+	if base, ok := redistributor(self); ok {
+		if err := wakeRedistributor(base); err != nil {
+			failed = append(failed, err.Error())
+		}
+	}
 	for _, aff := range cpus {
 		if aff == self || n == maxCPUs {
 			continue

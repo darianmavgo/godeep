@@ -5,6 +5,7 @@ package applem1
 import (
 	"fmt"
 	"os"
+	"sync/atomic"
 	"unsafe"
 
 	"godeep/drivers/arm/pl011"
@@ -13,6 +14,7 @@ import (
 	"godeep/kernel/dev"
 	"godeep/kernel/dma"
 	"godeep/kernel/fdt"
+	"godeep/kernel/pstore"
 )
 
 // set by cpuinit (entry_arm64.s)
@@ -37,11 +39,17 @@ func printk(c byte) {
 	if uartBase != 0 {
 		uartPut(c)
 	}
+	pstoreRing.Load().WriteByte(c) // nil until NewBoard: no-op
 }
+
+// pstoreRing records the console and runtime output across resets.
+var pstoreRing atomic.Pointer[pstore.Ring]
 
 // NewBoard brings up the framebuffer console and describes the machine.
 func NewBoard() kernel.Board {
 	stage(StageRuntime)
+	ring := pstore.Open(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(PSTORE_BASE))), PSTORE_SIZE))
+	pstoreRing.Store(ring)
 	var root *fdt.Node
 	info := []string{}
 	if bootFDT != 0 {
@@ -66,6 +74,7 @@ func NewBoard() kernel.Board {
 	if uartReady {
 		out = tee{out, uartWriter{}}
 	}
+	out = tee{out, ring}
 
 	el := "EL1"
 	if bootEL == 2 {
@@ -108,6 +117,10 @@ func NewBoard() kernel.Board {
 		// After halt has stopped every driver (the SSD shut its firmware
 		// down): goos.Exit powers off through the SMC, or keeps the screen.
 		PowerOff: func() { os.Exit(0) },
+		Pstore:   ring,
+	}
+	if console != nil && !uartReady {
+		b.Console.Size = console.Size // the screen is the only terminal
 	}
 	if console != nil {
 		// The trackpad (and any mouse) drives the console: pointer, two-finger
@@ -116,7 +129,7 @@ func NewBoard() kernel.Board {
 	}
 	b.DMA = dma.New(dma.Region{
 		Base: DMA_BASE + FDT_RESERVE,
-		Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
+		Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE-PSTORE_SIZE),
 	})
 	if root != nil {
 		b.Devices = fromFDT(root)

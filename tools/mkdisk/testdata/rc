@@ -1,0 +1,2 @@
+X=rc
+lsdev nvme1 > ram:/rc-devs && echo "$X ran, status $?"

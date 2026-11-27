@@ -25,6 +25,11 @@ const (
 	// The boot device tree is copied to the start of the DMA region by
 	// cpuinit (entry_arm64.s, FDT_COPY); the allocator gets the rest.
 	FDT_RESERVE = 0x200000 // 2MB
+
+	// The last MB of the DMA region keeps the console record across
+	// resets (kernel/pstore): QEMU doesn't clear guest RAM on reset.
+	PSTORE_SIZE = 0x100000
+	PSTORE_BASE = DMA_BASE + DMA_SIZE - PSTORE_SIZE
 )
 
 //go:linkname ramStackOffset runtime/goos.RamStackOffset

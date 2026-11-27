@@ -44,6 +44,16 @@ type Console struct {
 	drag         bool     // a selection is being dragged out
 	selA, selB   pos      // anchor and moving end (absolute line, column)
 	ptrX0, ptrY0 int      // where the pointer was drawn
+
+	// ANSI escapes (ansi.go): parser state, the reverse-video attribute
+	// for new text, and the text cursor (shown after ESC [ ? 25 h).
+	esc       int // 0: text; 1: after ESC; 2: in a CSI sequence
+	escParams []byte
+	reverse   bool
+	cursorOn  bool
+	curShown  bool
+	curCol    int
+	curRow    int
 }
 
 // pos is a character position in the whole text: absolute line, column.
@@ -92,6 +102,10 @@ func (c *Console) Size() (cols, rows int) { return c.cols, c.rows }
 func (c *Console) top() int { return len(c.lines) - c.rows }
 
 func (c *Console) glyph(r rune, col, row int, fg, bg uint32) {
+	if r&revBit != 0 {
+		r &^= revBit
+		fg, bg = bg, fg
+	}
 	idx := -1
 	for _, rg := range face.Ranges {
 		if r >= rg.Low && r < rg.High {
@@ -183,16 +197,25 @@ func (c *Console) Write(p []byte) (int, error) {
 	defer c.mu.Unlock()
 	c.hidePointer()
 	defer c.showPointer()
+	c.hideCursor()
+	defer c.showCursor()
 	if c.view != 0 {
 		c.view = 0
 		c.redraw()
 	}
 	put := func(r rune) {
+		if c.reverse {
+			r |= revBit
+		}
 		c.lines[c.top()+c.row][c.col] = r
 		c.cell(c.col, c.row)
 		c.col++
 	}
 	for _, b := range string(p) {
+		if c.esc != 0 || b == 0x1b {
+			c.escape(b)
+			continue
+		}
 		switch b {
 		case '\n':
 			c.newline()
@@ -487,7 +510,11 @@ func (c *Console) selectionText() string {
 		if l == b.line {
 			c1 = b.col
 		}
-		out = append(out, strings.TrimRight(string(line[c0:c1+1]), " "))
+		seg := make([]rune, 0, c1+1-c0)
+		for _, r := range line[c0 : c1+1] {
+			seg = append(seg, r&^revBit)
+		}
+		out = append(out, strings.TrimRight(string(seg), " "))
 	}
 	return strings.Join(out, "\n")
 }

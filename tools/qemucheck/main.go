@@ -13,6 +13,7 @@
 // Other steps (QMP ones need -qmp, the socket QEMU was given):
 //
 //	send:CMD      type CMD on the serial console; don't wait for the prompt
+//	raw:TEXT      type TEXT as is (Go escapes: \x13 is ^S), no Enter, no waiting
 //	wait:TEXT     wait until TEXT appears in output since the previous step
 //	keys:TEXT     type TEXT on QEMU's keyboard (USB) through QMP; \r is Enter
 //	qmp:JSON      send a QMP command, e.g. an input-send-event with mouse moves
@@ -33,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -180,6 +182,17 @@ func run(st steps, argv []string, timeout time.Duration, logPath, qmpPath string
 			if _, err := io.WriteString(in, arg+"\r"); err != nil {
 				return err
 			}
+			continue
+		case "raw":
+			b, err := strconv.Unquote(`"` + arg + `"`)
+			if err != nil {
+				return fmt.Errorf("raw:%s: %v", arg, err)
+			}
+			mark = len(seen)
+			if _, err := io.WriteString(in, b); err != nil {
+				return err
+			}
+			fmt.Printf("qemucheck: OK: typed %q\n", b)
 			continue
 		case "wait":
 			if err := wait(fmt.Sprintf("%q", arg), mark, func(s string) bool { return strings.Contains(s, arg) }); err != nil {

@@ -371,7 +371,7 @@ func resolve(env Env, args []string) (stage, error) {
 
 func execute(ctx context.Context, env Env, p *proc.Proc, pl *pipeline) error {
 	// Alone in the foreground, a builtin runs in the shell.
-	if len(pl.stages) == 1 && !pl.bg && pl.in == "" && pl.out == "" {
+	if len(pl.stages) == 1 && !pl.bg && pl.in == "" && pl.out == "" && env.Limits.IsZero() {
 		args := pl.stages[0]
 		if b, ok := builtins[args[0]]; ok {
 			return b.run(ctx, env, p, args[1:])
@@ -395,7 +395,7 @@ func execute(ctx context.Context, env Env, p *proc.Proc, pl *pipeline) error {
 		}
 	}()
 	for i, s := range stages {
-		specs[i] = proc.Spec{Name: s.name, Args: s.args, Main: s.main}
+		specs[i] = proc.Spec{Name: s.name, Args: s.args, Main: s.main, Limits: env.Limits}
 	}
 
 	// Input of the first stage: a file, the terminal (foreground), or none.

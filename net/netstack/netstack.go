@@ -284,16 +284,44 @@ func (st *Stack) Listen(ctx context.Context, network, addr string) (net.Listener
 	return closeOnDone(ctx, l), nil
 }
 
-// Dial implements cap.Net ("tcp" or "tcp4").
+// Dial implements cap.Net ("tcp", "tcp4", "udp" or "udp4": a UDP socket
+// connected to addr).
 func (st *Stack) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
-	if network != "tcp" && network != "tcp4" {
+	switch network {
+	case "tcp", "tcp4", "udp", "udp4":
+	default:
 		return nil, fmt.Errorf("dial %s: unsupported network", network)
 	}
 	fa, err := st.fullAddr(ctx, addr, false)
 	if err != nil {
 		return nil, err
 	}
+	if strings.HasPrefix(network, "udp") {
+		c, err := gonet.DialUDP(st.s, nil, &fa, ipv4.ProtocolNumber)
+		if err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
 	return gonet.DialContextTCP(ctx, st.s, fa, ipv4.ProtocolNumber)
+}
+
+// ListenPacket implements cap.PacketNet ("udp" or "udp4"): a UDP port that
+// receives from anyone. It closes when ctx is done.
+func (st *Stack) ListenPacket(ctx context.Context, network, addr string) (net.PacketConn, error) {
+	if network != "udp" && network != "udp4" {
+		return nil, fmt.Errorf("listen %s: unsupported network", network)
+	}
+	fa, err := st.fullAddr(ctx, addr, true)
+	if err != nil {
+		return nil, err
+	}
+	c, err := gonet.DialUDP(st.s, &fa, nil, ipv4.ProtocolNumber)
+	if err != nil {
+		return nil, err
+	}
+	context.AfterFunc(ctx, func() { c.Close() })
+	return c, nil
 }
 
 // listener closes the wrapped listener when ctx is done. The watcher is

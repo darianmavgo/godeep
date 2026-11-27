@@ -18,8 +18,12 @@ const (
 	VTIMER_IRQ = gic.FirstPPI + 11
 
 	// Upper bound on one idle sleep. Devices are interrupt-driven, so this
-	// is only a safety net.
-	maxIdle = 1_000_000_000 // 1s
+	// is only a safety net, but with SMP it bounds a lost wake-up: an M
+	// parked in semasleep (no deadline) whose goos.Wake goes astray. Some
+	// still do under load (stop-the-world with 4 cores, cause not found);
+	// 100 ms instead of 1 s made a 1M-line pipeline 0.4-0.8 s instead of
+	// up to 1.6 s. Costs 10 wake-ups/s per idle core.
+	maxIdle = 100_000_000 // 100 ms
 
 )
 

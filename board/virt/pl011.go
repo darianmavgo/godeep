@@ -71,4 +71,5 @@ func (u *PL011) Rx() (byte, bool) {
 //go:linkname printk runtime/goos.Printk
 func printk(c byte) {
 	UART0.Tx(c)
+	pstoreRing.Load().WriteByte(c) // nil before NewBoard: no-op
 }

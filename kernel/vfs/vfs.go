@@ -402,13 +402,21 @@ func BlockVolume(ctx context.Context, mgr *dev.Manager, name string) (block.Devi
 	return nil, fmt.Errorf("%s: no such volume (see lsblk)", name)
 }
 
-// OpenFS recognizes the filesystem on a block volume. FAT on a writable
-// device opens for writing (fs/fat), ext2/3/4 is read-only.
+// OpenFS recognizes the filesystem on a block volume. On a writable device
+// FAT (fs/fat) and ext4 with extents (fs/ext4: Writable says whether its
+// features allow writing) open for writing; ext2/3 and read-only devices
+// are read-only.
 func OpenFS(ctx context.Context, d block.Device) (Volume, error) {
 	r := block.NewReader(ctx, d)
 	switch {
 	case ext4.Probe(r):
-		f, err := ext4.New(r)
+		var f *ext4.FS
+		var err error
+		if block.Writable(d) {
+			f, err = ext4.NewWritable(r, r)
+		} else {
+			f, err = ext4.New(r)
+		}
 		if err != nil {
 			return nil, err // not a typed nil in a non-nil Volume
 		}

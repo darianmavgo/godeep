@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -116,3 +117,55 @@ func TestHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestRaw(t *testing.T) {
+	in := make(chan byte, 16)
+	out := &bytes.Buffer{}
+	var mu sync.Mutex
+	w := writerFunc(func(b []byte) (int, error) { mu.Lock(); defer mu.Unlock(); return out.Write(b) })
+	tt := New(in, w, true)
+	defer tt.Close()
+	raw, release, err := tt.Raw()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := tt.Raw(); err != ErrBusy {
+		t.Fatalf("second Raw: %v", err)
+	}
+	for _, b := range []byte("a\x1b[A\x03\r") {
+		in <- b
+	}
+	var got []byte
+	for len(got) < 6 {
+		got = append(got, <-raw)
+	}
+	if string(got) != "a\x1b[A\x03\r" {
+		t.Fatalf("raw got %q", got)
+	}
+	mu.Lock()
+	echoed := out.String()
+	mu.Unlock()
+	if echoed != "" {
+		t.Fatalf("raw input echoed: %q", echoed)
+	}
+	release()
+	release()
+	for _, b := range []byte("ls\r") {
+		in <- b
+	}
+	line, err := tt.ReadLine(context.Background())
+	if err != nil || line != "ls" {
+		t.Fatalf("after release: %q %v", line, err)
+	}
+	if c, r := tt.Size(); c != 0 || r != 0 {
+		t.Fatal("size known")
+	}
+	tt.SetSize(100, 40)
+	if c, r := tt.Size(); c != 100 || r != 40 {
+		t.Fatalf("size %d %d", c, r)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(b []byte) (int, error) { return f(b) }

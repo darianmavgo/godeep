@@ -59,6 +59,9 @@ type Program struct {
 	Stderr io.Writer // nil: defaults to Stdout
 	Mounts []Mount
 	Cache  *Cache // optional: reuse runtime and compiled modules across runs
+	// MemoryLimit caps the program's linear memory below MemoryLimit (0:
+	// the default). A lower cap needs a runtime of its own: no Cache.
+	MemoryLimit int64
 }
 
 // ExitError is a nonzero exit status.
@@ -123,10 +126,14 @@ func (c *Cache) Close() error {
 	return nil
 }
 
-func newRuntime(ctx context.Context) (wazero.Runtime, error) {
+func newRuntime(ctx context.Context, limit int64) (wazero.Runtime, error) {
+	if limit <= 0 || limit > MemoryLimit {
+		limit = MemoryLimit
+	}
+	pages := uint32(max(limit/65536, 1))
 	rtc := wazero.NewRuntimeConfigInterpreter().
 		WithCloseOnContextDone(true).
-		WithMemoryLimitPages(MemoryLimit / 65536)
+		WithMemoryLimitPages(pages)
 	rt := wazero.NewRuntimeWithConfig(ctx, rtc)
 	if _, err := wasi_snapshot_preview1.Instantiate(ctx, rt); err != nil {
 		rt.Close(context.Background())
@@ -152,7 +159,7 @@ func (c *Cache) acquire(ctx context.Context, code []byte) (wazero.Runtime, *cach
 	}
 	if c.rt == nil {
 		// Runtime outlives individual Procs; Cache.Close shuts it down.
-		rt, err := newRuntime(context.Background())
+		rt, err := newRuntime(context.Background(), 0)
 		if err != nil {
 			c.mu.Unlock()
 			return nil, nil, err
@@ -235,6 +242,9 @@ func Run(ctx context.Context, p Program) error {
 		compiled wazero.CompiledModule
 		err      error
 	)
+	if p.MemoryLimit > 0 && p.MemoryLimit < MemoryLimit {
+		p.Cache = nil // the shared runtime has the default limit
+	}
 	if p.Cache != nil {
 		var entry *cacheEntry
 		rt, entry, err = p.Cache.acquire(ctx, p.Code)
@@ -244,7 +254,7 @@ func Run(ctx context.Context, p Program) error {
 		defer p.Cache.release(entry)
 		compiled = entry.mod
 	} else {
-		rt, err = newRuntime(ctx)
+		rt, err = newRuntime(ctx, p.MemoryLimit)
 		if err != nil {
 			return err
 		}

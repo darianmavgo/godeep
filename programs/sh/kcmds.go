@@ -16,7 +16,7 @@ import (
 )
 
 func init() {
-	builtins["restrict"] = builtin{"restrict [-vol A,B] [-ro] [-net none|dial] [-ports A,B] [-nodev] CMD ARGS...: run CMD with narrower capabilities", restrict}
+	builtins["restrict"] = builtin{"restrict [-vol A,B] [-ro] [-net none|dial] [-ports A,B] [-nodev] [-time DUR] [-goroutines N] [-out BYTES] [-mem BYTES] CMD ARGS...: run CMD with narrower capabilities and resource limits (sizes take K/M/G)", restrict}
 	builtins["ports"] = builtin{"named ipc ports: type, servers, calls", ports}
 	builtins["kvd"] = builtin{"kvd [NAME]: serve a key-value store on ipc port NAME (default kv); kvd & runs it in the background", kvd}
 	builtins["kv"] = builtin{"kv [-p NAME] set K V | get K | del K | list: talk to a kvd", kv}
@@ -30,7 +30,8 @@ func init() {
 // Narrowing is one-way: a restricted command
 // that runs restrict again only narrows further.
 func restrict(ctx context.Context, env Env, p *proc.Proc, args []string) error {
-	usage := errors.New("usage: restrict [-vol A,B] [-ro] [-net none|dial] [-ports A,B] [-nodev] CMD ARGS...")
+	usage := errors.New("usage: restrict [-vol A,B] [-ro] [-net none|dial] [-ports A,B] [-nodev] [-time DUR] [-goroutines N] [-out BYTES] [-mem BYTES] CMD ARGS...")
+	var lim proc.Limits
 	var vols, portNames []string
 	ro, nodev, setVols, setPorts := false, false, false, false
 	netMode := ""
@@ -62,6 +63,14 @@ func restrict(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 				return err
 			}
 			portNames, setPorts = splitList(v), true
+		case "-time", "-goroutines", "-out", "-mem":
+			v, err := val()
+			if err != nil {
+				return err
+			}
+			if err := setLimit(&lim, flag, v); err != nil {
+				return err
+			}
 		case "-net":
 			v, err := val()
 			if err != nil {
@@ -97,9 +106,57 @@ func restrict(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 		}
 	}
 	if nodev {
-		e.Dev, e.IRQ, e.DMA, e.Halt, e.NoPower = nil, nil, nil, nil, true
+		e.Dev, e.IRQ, e.DMA, e.Halt, e.Kexec, e.NoPower = nil, nil, nil, nil, nil, true
 	}
+	e.Limits = e.Limits.Narrow(lim)
 	return execute(ctx, e, p, &pipeline{stages: [][]string{args}})
+}
+
+func setLimit(l *proc.Limits, flag, v string) error {
+	bad := fmt.Errorf("restrict %s %s: bad value", flag, v)
+	switch flag {
+	case "-time":
+		d, err := time.ParseDuration(v)
+		if err != nil || d <= 0 {
+			return bad
+		}
+		l.Time = d
+	case "-goroutines":
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			return bad
+		}
+		l.Goroutines = n
+	case "-out", "-mem":
+		n, err := parseSize(v)
+		if err != nil || n < 1 {
+			return bad
+		}
+		if flag == "-out" {
+			l.Output = n
+		} else {
+			l.Memory = n
+		}
+	}
+	return nil
+}
+
+// parseSize reads 512, 64K, 16M, 1G (powers of 1024).
+func parseSize(v string) (int64, error) {
+	mult := int64(1)
+	switch strings.ToUpper(v[len(v)-1:]) {
+	case "K":
+		mult = 1 << 10
+	case "M":
+		mult = 1 << 20
+	case "G":
+		mult = 1 << 30
+	}
+	if mult != 1 {
+		v = v[:len(v)-1]
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	return n * mult, err
 }
 
 func splitList(s string) []string {

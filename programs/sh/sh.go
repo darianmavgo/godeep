@@ -47,10 +47,18 @@ type Env struct {
 	// of a pipeline (or with a redirection); nil: the terminal.
 	Out io.Writer
 	In  io.Reader
+	// Sh is the shell's state (variables, $?, jobs); Main makes one.
+	Sh *State
 	// Ports are the named ipc services this shell may find and offer.
 	Ports *ipc.Namespace
+	// Limits apply to every process this shell starts (restrict narrows
+	// them); with limits set, builtins run as processes too.
+	Limits proc.Limits
 	// NoPower: halt and reboot are refused (a restricted command).
 	NoPower bool
+	// Kexec stops everything like Halt, then boots image instead of
+	// powering off (nil: the board can't).
+	Kexec func(image []byte) error
 	// Halt asks the kernel for a clean shutdown: every process (drivers
 	// included) stops, then the board powers off. nil: halt exits at once.
 	Halt func()
@@ -69,6 +77,32 @@ type builtin struct {
 }
 
 var builtins = map[string]builtin{} // filled from init()s
+
+// kexecCmd boots another kernel Image in place of this one.
+func kexecCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: kexec VOLUME:PATH")
+	}
+	if env.NoPower {
+		return errors.New("not permitted")
+	}
+	if env.Kexec == nil {
+		return errors.New("this board can't kexec")
+	}
+	fsys, rel, err := openPath(ctx, env, args[0])
+	if err != nil {
+		return err
+	}
+	img, err := fs.ReadFile(fsys, rel)
+	if err != nil {
+		return err
+	}
+	if err := env.Kexec(img); err != nil {
+		return err
+	}
+	<-ctx.Done() // the shutdown kills this shell too
+	return ctx.Err()
+}
 
 // halt shuts down cleanly when the kernel offers it: drivers finish (the
 // Mac's SSD shuts its firmware down) before the board cuts power.
@@ -93,6 +127,7 @@ func init() {
 		"mem":      {"memory and scheduler stats", mem},
 		"halt":     {"power off (stops every process and driver first)", halt},
 		"reboot":   {"reset the machine (needs a reboot device, e.g. a watchdog)", reboot},
+		"kexec":    {"kexec VOLUME:PATH: stop everything (like halt), then boot that godeep Image instead of powering off", kexecCmd},
 		"exit":     {"exit this shell (init starts a new one)", nil},
 		"lsdev":    {"lsdev [NAME...]: devices (or those whose name starts with NAME), drivers, state", lsdev},
 		"irqstat":  {"interrupt lines and counts", irqstat},
@@ -129,17 +164,20 @@ func init() {
 // env.TTY.
 func Main(env Env) proc.Main {
 	return func(ctx context.Context, p *proc.Proc) error {
+		env := env
+		env.Sh = NewState()
 		t := env.TTY
 		if len(p.Args) >= 1 && p.Args[0] == "-c" {
 			line := strings.Join(p.Args[1:], " ")
 			err := runLine(ctx, env, p, line)
-			if err != nil {
-				fmt.Fprintf(t, "%s: %v\n", firstWord(line), err)
-			}
+			report(t, firstWord(line), err)
 			return err
 		}
 		fmt.Fprintln(t, "type 'help' for commands")
 		for {
+			for _, j := range env.Sh.prune() {
+				fmt.Fprintf(t, "%%%d done\t%s\n", j.id, j.line)
+			}
 			fmt.Fprint(t, "godeep$ ")
 			line, err := t.ReadLine(ctx)
 			if errors.Is(err, tty.ErrInterrupt) {
@@ -151,9 +189,7 @@ func Main(env Env) proc.Main {
 			if w := firstWord(line); w == "exit" && len(strings.Fields(line)) == 1 {
 				return nil
 			}
-			if err := runLine(ctx, env, p, line); err != nil {
-				fmt.Fprintf(t, "%s: %v\n", firstWord(line), err)
-			}
+			report(t, firstWord(line), runLine(ctx, env, p, line))
 		}
 	}
 }
@@ -176,7 +212,7 @@ func (e Env) out() io.Writer {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.out())
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "ntp", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "evtest", "exit", "halt", "reboot", "dmesg", "pprof", "kbd", "top", "restrict", "ports", "kvd", "kv", "gpu"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "ntp", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "ping", "nc", "evtest", "exit", "halt", "reboot", "kexec", "dmesg", "pprof", "kbd", "top", "restrict", "ports", "kvd", "kv", "gpu", "wm", "set", "unset", "source", "jobs", "wait", "fg", "true", "false", "test"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")
@@ -186,7 +222,9 @@ func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	}
 	w.Flush()
 	fmt.Fprintln(env.out(), "\nA | B pipes A into B; < VOLUME:PATH reads, > / >> VOLUME:PATH writes / appends a file;")
-	fmt.Fprintln(env.out(), "'quotes' keep blanks and | < > & in one word; append & to run in the background; ^C kills the foreground")
+	fmt.Fprintln(env.out(), "a ; b runs both, a && b / a || b runs b if a succeeded / failed; NAME=VALUE sets a variable, $NAME $? $1 use them;")
+	fmt.Fprintln(env.out(), "time PIPELINE prints how long it took;")
+	fmt.Fprintln(env.out(), "'quotes' keep blanks, $ and | < > & ; in one word; append & to run in the background; ^C kills the foreground; # comments")
 	fmt.Fprintln(env.out(), "VOLUME:PATH.wasm ARGS... runs a WASI program (scp prog.wasm godeep: puts it in ram:)")
 	return nil
 }
@@ -301,6 +339,7 @@ func wasmMain(env Env, file string, envVars []string) proc.Main {
 			Name: path.Base(file), Code: code, Args: p.Args, Env: envVars,
 			Stdin:  p.Stdin,
 			Stdout: p.Stdout, Mounts: mounts, Cache: env.WASM,
+			MemoryLimit: p.Limits.Memory,
 		})
 	}
 }

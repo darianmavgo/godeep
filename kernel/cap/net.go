@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"time"
 )
 
 // Net is the authority to use a network: listen and dial. On QEMU and the
@@ -22,6 +23,28 @@ type Net interface {
 // Resolver is a Net that resolves names (DNS).
 type Resolver interface {
 	LookupHost(ctx context.Context, name string) ([]netip.Addr, error)
+}
+
+// PacketNet is a Net that also receives datagrams on a port of its own
+// ("udp"): the datagram counterpart of Listen. (Dial "udp" sends to one
+// peer.)
+type PacketNet interface {
+	ListenPacket(ctx context.Context, network, addr string) (net.PacketConn, error)
+}
+
+// ListenPacket opens a datagram port on n, if n is a PacketNet.
+func ListenPacket(ctx context.Context, n Net, network, addr string) (net.PacketConn, error) {
+	pn, ok := n.(PacketNet)
+	if !ok {
+		return nil, fmt.Errorf("listen %s: this network has no datagram ports", network)
+	}
+	return pn.ListenPacket(ctx, network, addr)
+}
+
+// Pinger is a Net that sends ICMP echo requests: one request of size
+// bytes to host, and the reply's round-trip time.
+type Pinger interface {
+	Ping(ctx context.Context, host string, seq uint16, size int) (netip.Addr, time.Duration, error)
 }
 
 // ErrNoNetwork is returned when the system has no network to hand out.
@@ -69,6 +92,14 @@ func (p *PendingNet) Listen(ctx context.Context, network, addr string) (net.List
 	return n.Listen(ctx, network, addr)
 }
 
+func (p *PendingNet) ListenPacket(ctx context.Context, network, addr string) (net.PacketConn, error) {
+	n, err := p.Wait(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ListenPacket(ctx, n, network, addr)
+}
+
 func (p *PendingNet) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	n, err := p.Wait(ctx)
 	if err != nil {
@@ -104,6 +135,15 @@ func (r *Restricted) Listen(ctx context.Context, network, addr string) (net.List
 	return r.N.Listen(ctx, network, addr)
 }
 
+// ListenPacket opens a datagram port: a service offered to the network,
+// so it needs the authority to listen.
+func (r *Restricted) ListenPacket(ctx context.Context, network, addr string) (net.PacketConn, error) {
+	if r.NoListen {
+		return nil, fmt.Errorf("listen %s: %w", addr, ErrPermission)
+	}
+	return ListenPacket(ctx, r.N, network, addr)
+}
+
 func (r *Restricted) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	if r.NoDial {
 		return nil, fmt.Errorf("dial %s: %w", addr, ErrPermission)
@@ -126,6 +166,23 @@ func (r *Restricted) LookupHost(ctx context.Context, name string) ([]netip.Addr,
 		return nil, errors.New("this network doesn't resolve names")
 	}
 	return res.LookupHost(ctx, name)
+}
+
+// Ping goes through the underlying network if dialing is allowed (an echo
+// request is outgoing traffic).
+func (r *Restricted) Ping(ctx context.Context, host string, seq uint16, size int) (netip.Addr, time.Duration, error) {
+	if r.NoDial {
+		return netip.Addr{}, 0, fmt.Errorf("ping %s: %w", host, ErrPermission)
+	}
+	n, err := Ready(ctx, r.N)
+	if err != nil {
+		return netip.Addr{}, 0, err
+	}
+	p, ok := n.(Pinger)
+	if !ok {
+		return netip.Addr{}, 0, errors.New("this network can't ping")
+	}
+	return p.Ping(ctx, host, seq, size)
 }
 
 // Unwrap is the network underneath, for describing it (ifconfig), not for

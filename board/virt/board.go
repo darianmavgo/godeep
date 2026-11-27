@@ -23,6 +23,7 @@ import (
 	"godeep/kernel/irq"
 	kmmio "godeep/kernel/mmio"
 	"godeep/kernel/proc"
+	"godeep/kernel/pstore"
 )
 
 // gicController adapts TamaGo's GICv3 driver to irq.Controller.
@@ -109,11 +110,14 @@ func NewBoard() kernel.Board {
 	CPU.EnableInterrupts()
 	startSMP()
 	nodes, source := devices()
+	noteVirtio(nodes)
 	// The first FDT_RESERVE bytes hold the boot device tree (entry_arm64.s).
 	alloc := dma.New(dma.Region{
 		Base: DMA_BASE + FDT_RESERVE,
-		Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE),
+		Mem:  unsafe.Slice((*byte)(unsafe.Pointer(uintptr(DMA_BASE+FDT_RESERVE))), DMA_SIZE-FDT_RESERVE-PSTORE_SIZE),
 	})
+	ring := pstore.Open(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(PSTORE_BASE))), PSTORE_SIZE))
+	pstoreRing.Store(ring) // runtime output (printk) from now on
 	info := BootInfo(source) + "; " + SMPInfo()
 	nodes = append(nodes, dev.Node{Name: "cpus", Compatible: "godeep,cpus"})
 	con := NewConsole(Bridge)
@@ -127,15 +131,19 @@ func NewBoard() kernel.Board {
 	} else if note != "" {
 		info += "; " + note
 	}
+	con.Out = tee{ring, con.Out}
 	return kernel.Board{
-		Info:     info,
-		Console:  con,
-		Shutdown: shutdown,
-		PowerOff: psciPowerOff,
-		IRQ:      Bridge,
-		DMA:      alloc,
-		Devices:  nodes,
-		LogLabel: "GODEEPDATA", // like the Mac: a disk with that FAT32 label gets the log
+		Info:       info,
+		Console:    con,
+		Shutdown:   shutdown,
+		PowerOff:   psciPowerOff,
+		IRQ:        Bridge,
+		DMA:        alloc,
+		Devices:    nodes,
+		LogLabel:   "GODEEPDATA", // like the Mac: a disk with that FAT32 label gets the log
+		Pstore:     ring,
+		KexecCheck: kexecCheck,
+		Kexec:      kexec,
 	}
 }
 
@@ -170,6 +178,9 @@ func framebuffer(nodes []dev.Node, a *dma.Allocator) (*simplefb.Console, string)
 	}
 	return nil, ""
 }
+
+// pstoreRing gets the runtime's output too (printk: panics, throws).
+var pstoreRing atomic.Pointer[pstore.Ring]
 
 // tee writes the console to the framebuffer and the UART.
 type tee struct{ fb, uart io.Writer }

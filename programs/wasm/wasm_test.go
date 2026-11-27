@@ -69,6 +69,10 @@ func main() {
 		for _, e := range ents {
 			fmt.Println("entry:", e.Name())
 		}
+	case "alloc":
+		b := make([]byte, 64<<20)
+		b[len(b)-1] = 1
+		fmt.Println("allocated", len(b))
 	case "exit":
 		os.Exit(3)
 	case "spin":
@@ -298,5 +302,23 @@ func TestKill(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("a spinning program ignored cancellation")
+	}
+}
+
+func TestMemoryLimit(t *testing.T) {
+	code := program(t)
+	cache := NewCache(0)
+	defer cache.Close()
+	for _, c := range []struct {
+		limit int64
+		ok    bool
+	}{{0, true}, {256 << 20, true}, {16 << 20, false}} {
+		out := &bytes.Buffer{}
+		err := Run(context.Background(), Program{Name: "t.wasm", Code: code, Args: []string{"alloc"},
+			Stdout: out, Cache: cache, MemoryLimit: c.limit})
+		got := strings.Contains(out.String(), "allocated 67108864")
+		if got != c.ok || (err == nil) != c.ok {
+			t.Errorf("limit %d: err %v, output %q", c.limit, err, out)
+		}
 	}
 }

@@ -29,7 +29,14 @@ import (
 //	dns = 192.168.1.1        repeatable
 //	ntp = time.apple.com     time server (off: none)
 //	run = lsdev usb          a shell command run at boot, repeatable
-const confFile = "godeep/godeep.conf"
+//
+// After those, godeep/rc on the same volume, if there is one, runs as a
+// shell script (source: variables, ;, &&, ||, test...). Either file alone
+// is enough for confd to pick the volume.
+const (
+	confFile = "godeep/godeep.conf"
+	rcFile   = "godeep/rc"
+)
 
 // ConfWait is how long confd looks for the data volume (USB sticks and the
 // Mac's SSD take a few seconds to appear).
@@ -106,8 +113,9 @@ type confd struct {
 	once sync.Once
 }
 
-// find returns the conf file's contents ("", false while there's none).
-func (c *confd) find(ctx context.Context) (string, []byte, bool) {
+// find returns the volume holding godeep.conf or godeep/rc, the conf
+// file's contents (nil: none) and whether there's an rc script.
+func (c *confd) find(ctx context.Context) (vol string, conf []byte, rc bool, found bool) {
 	for name, d := range vfs.Disks(c.mgr) {
 		parts, _, err := block.Partitions(ctx, d)
 		if err != nil {
@@ -122,20 +130,28 @@ func (c *confd) find(ctx context.Context) (string, []byte, bool) {
 			if err != nil {
 				continue
 			}
-			if b, err := fs.ReadFile(v, confFile); err == nil {
-				return vol, b, true
+			b, cerr := fs.ReadFile(v, confFile)
+			_, rerr := fs.Stat(v, rcFile)
+			if cerr == nil || rerr == nil {
+				return vol, b, rerr == nil, true
 			}
 		}
 	}
-	return "", nil, false
+	return "", nil, false, false
 }
 
 func (c *confd) start(ctx context.Context, tab *proc.Table) {
 	tab.Spawn(ctx, 0, proc.Spec{Name: "confd", Main: func(ctx context.Context, p *proc.Proc) error {
 		deadline := time.Now().Add(ConfWait)
 		for {
-			if vol, b, ok := c.find(ctx); ok {
-				c.apply(ctx, vol, ParseConf(strings.NewReader(string(b))))
+			if vol, b, rc, ok := c.find(ctx); ok {
+				if b != nil {
+					c.apply(ctx, vol, ParseConf(strings.NewReader(string(b))))
+				}
+				if rc {
+					fmt.Fprintf(c.log, "confd: source %s:/%s\n", vol, rcFile)
+					c.run(ctx, fmt.Sprintf("source %s:/%s", vol, rcFile))
+				}
 				return nil
 			}
 			if time.Now().After(deadline) {

@@ -25,6 +25,13 @@ const (
 
 	// The boot device tree is copied to the start of the DMA region.
 	FDT_RESERVE = 0x200000
+
+	// The last MB of the DMA region keeps the console record across a
+	// watchdog reset (kernel/pstore), if iBoot and m1n1 leave that RAM
+	// alone: a fixed physical address every boot, checked by a magic and
+	// size before it's trusted.
+	PSTORE_SIZE = 0x100000
+	PSTORE_BASE = DMA_BASE + DMA_SIZE - PSTORE_SIZE
 )
 
 //go:linkname ramStart runtime/goos.RamStart

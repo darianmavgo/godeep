@@ -3,10 +3,13 @@ package kernel
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"godeep/kernel/pstore"
 )
 
 type syncBuf struct {
@@ -123,5 +126,48 @@ func TestHaltIsClean(t *testing.T) {
 	}
 	if s := out.String(); !strings.Contains(s, "halted") || strings.Contains(s, "did not exit") {
 		t.Fatalf("unclean halt:\n%s", s)
+	}
+}
+
+// A boot that didn't halt cleanly leaves its last output in the pstore
+// region: the next boot shows it as ram:/crash.txt. A clean halt doesn't.
+func TestPstoreCrash(t *testing.T) {
+	mem := make([]byte, 64<<10)
+	boot := func(script string) string {
+		t.Helper()
+		ring := pstore.Open(mem)
+		in := make(chan byte, 256)
+		for _, b := range []byte(script) {
+			in <- b
+		}
+		out := &syncBuf{}
+		done := make(chan error)
+		go func() {
+			done <- Boot(context.Background(), Board{Console: Console{In: in, Out: io.MultiWriter(out, ring)},
+				Pstore: ring, PowerOff: func() {}})
+		}()
+		if !strings.Contains(script, "halt") {
+			// "crash": stop once the marker is out, without a halt
+			deadline := time.Now().Add(5 * time.Second)
+			for !strings.Contains(out.String(), "marker-") {
+				if time.Now().After(deadline) {
+					t.Fatalf("no marker:\n%s", out)
+				}
+				runtimeYield()
+			}
+			close(in)
+		}
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	boot("echo marker-one\n")
+	out := boot("cat ram:/crash.txt\nhalt\n")
+	if !strings.Contains(out, "without a clean halt") || strings.Count(out, "marker-one") < 1 {
+		t.Fatalf("second boot:\n%s", out)
+	}
+	if out := boot("cat ram:/crash.txt\nhalt\n"); strings.Contains(out, "without a clean halt") || !strings.Contains(out, "halted cleanly") {
+		t.Fatalf("after a clean halt:\n%s", out)
 	}
 }

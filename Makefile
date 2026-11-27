@@ -23,8 +23,12 @@
 #   make stop              from another terminal: power godeep off cleanly (falls back to kill)
 #   make kill              from another terminal: kill QEMU immediately
 
-# TamaGo toolchain: https://github.com/usbarmory/tamago-go (set TAMAGO to its bin/go)
-TAMAGO ?= $(HOME)/tamago-go/bin/go
+# TamaGo toolchain: https://github.com/usbarmory/tamago-go (set TAMAGO to its bin/go).
+# make tamago-go builds bin/tamago-go: a copy of ~/tamago-go with godeep's
+# runtime patch (third_party/tamago-go/godeep-runtime.patch: SMP wake-ups);
+# it's used once it exists, else ~/tamago-go as is.
+TAMAGO_SRC ?= $(HOME)/tamago-go
+TAMAGO ?= $(if $(wildcard $(CURDIR)/bin/tamago-go/bin/go),$(CURDIR)/bin/tamago-go/bin/go,$(TAMAGO_SRC)/bin/go)
 ARCH   ?= arm64
 
 TAMAGO_ENV = GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=$(ARCH) GOEXPERIMENT=simd
@@ -90,8 +94,10 @@ QEMU_DISK   += -device usb-hub,bus=xhci.0,port=3 \
 # host port SSH_PORT forwarded to the guest's sshd), and virtio-rng. Modern
 # virtio-mmio (version 2) only: godeep has no legacy transport.
 SSH_PORT    ?= 2222
+# the guest's port 80 (httpd) on the host
+HTTP_PORT   ?= 8080
 QEMU_NET    = -device ramfb -global virtio-mmio.force-legacy=false -device virtio-rng-device -device virtio-gpu-device,id=gpu0 \
-	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22 -device virtio-net-device,netdev=net0 \
+	-netdev user,id=net0,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22,hostfwd=tcp:127.0.0.1:$(HTTP_PORT)-:80 -device virtio-net-device,netdev=net0 \
 	-fsdev local,id=share0,path=$(CURDIR),security_model=none,readonly=on -device virtio-9p-device,fsdev=share0,mount_tag=host
 QEMU_DEPS   := $(DISK) $(DISK_RW)
 else ifeq ($(ARCH),amd64)
@@ -211,6 +217,7 @@ hot: keys $(QEMU_DEPS)
 # drags over "godeep", and a right click pastes it into the shell. The
 # screen ends up in bin/check-virt-screen.png.
 check-virt: SSH_PORT = 2223
+check-virt: HTTP_PORT = 8083
 check-virt: DISK_RW = bin/disk-check.img
 check-virt: wasm
 	@if [ "$(ARCH)" != arm64 ] || [ "$(BOARD)" = applem1 ]; then echo "check-virt is for ARCH=arm64 on QEMU virt"; exit 1; fi
@@ -222,6 +229,8 @@ check-virt: wasm
 	  -step 'lsblk=>nvme0p1,FAT32,GODEEPFAT,nvme0p2,ext4,godeep-ext4' \
 	  -step 'ls nvme0p2:/=>docs/,link-to-hello@,big.bin' \
 	  -step 'cat nvme0p2:/link-to-hello=>hello from godeep' \
+	  -step 'mkdir nvme0p2:/fromgodeep; yes ext4 | head -n 5000 > nvme0p2:/fromgodeep/lines.txt=>' \
+	  -step 'wc -l < nvme0p2:/fromgodeep/lines.txt=>5000' -step 'rm nvme0p2:/fromgodeep/lines.txt nvme0p2:/fromgodeep=>' \
 	  -step 'cat nvme0p1:/many/f123.txt=>file 123' \
 	  -step 'ls nvme0p1:/docs=>readme.md' \
 	  -step 'lsdev xhci=>HID boot keyboard,HID boot mouse' \
@@ -252,12 +261,25 @@ check-virt: wasm
 	  -step 'lsdev rng0=>seeded crypto/rand' \
 	  -step 'ifconfig=>10.0.2.15/24,52:54:00,dhcp from 10.0.2.2,dns 10.0.2.3' \
 	  -step 'get http://10.0.2.2:2280/go.mod=>module godeep' \
+	  -step 'ping -c 2 -i 0.2 10.0.2.2=>2 received' \
+	  -step 'echo GET /go.mod HTTP/1.0 > ram:/req; echo >> ram:/req=>' \
+	  -step 'nc 10.0.2.2 2280 < ram:/req | grep ^module=>module godeep' \
+	  -step "echo 'N=\$$1; test -e ram:/req && echo have \$$N, \$$# arg' > ram:/t.sh=>" \
+	  -step 'source ram:/t.sh it=>have it, 1 arg' \
+	  -step 'false || echo status-$$?=>status-1' \
+	  -step 'sleep 0.3 & wait; echo waited-$$?=>waited-0' \
+	  -step 'restrict -time 300ms sleep 5=>resource limit: time 300ms' \
+	  -step 'restrict -out 100 yes | wc=>50 50 100' \
+	  -step 'echo from-godeep-httpd > ram:/web.txt=>' -step 'send:httpd &' -step 'wait:serving' \
+	  -step 'local:curl -s http://127.0.0.1:$(HTTP_PORT)/ram/web.txt=>from-godeep-httpd' \
+	  -step 'send:edit ram:/ed.txt' -step 'wait:new file' -step 'raw:typed in edit\x1b[D\x1b[D!\x13\x11' \
+	  -step 'cat ram:/ed.txt=>typed in ed!it' \
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 ps=>sshd,netd,PID' \
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 lsdev net0=>virtio,device1,ready,rx' \
 	  -step 'local:echo uptime | ssh $(SSH_OPTS) -tt root@127.0.0.1=>godeep$$ ' \
 	  -step 'lsdev net0=>tx' \
 	  -step 'local:scp $(SCP_OPTS) bin/wasm/hello.wasm root@127.0.0.1:=>' \
-	  -step 'df=>ram,memfs,rw,nvme0p2,ext4,ro' \
+	  -step 'df=>ram,memfs,rw,nvme0p2,ext4,rw' \
 	  -step 'ls ram:/=>hello.wasm' \
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 ram:/hello.wasm a b=>hello from WebAssembly,["a" "b"],/ram,/nvme0p2/hello.txt: hello from godeep' \
 	  -step 'ram:/hello.wasm from the console=>args: ["from" "the" "console"]' \
@@ -284,6 +306,8 @@ check-virt: wasm
 	  -step 'local:ssh $(SSH_OPTS) root@127.0.0.1 "ls sys:/ | grep net"=>net0' \
 	  -qmp bin/qmp-check.sock -http 127.0.0.1:2280=. -ninep 127.0.0.1:5641=bin/ninep-check -ntp 127.0.0.1:2123 \
 	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_DISK) $(QEMU_NET) -qmp unix:bin/qmp-check.sock,server=on,wait=off -kernel $(BOOTFILE)
+	go run ./tools/fsckpart $(DISK_RW) 2
+	go run ./tools/fsckpart $(DISK_RW) 1
 	@$(MAKE) -s check-usbnet
 	@$(MAKE) -s check-uas
 	@$(MAKE) -s check-smp SMP=4
@@ -291,6 +315,8 @@ check-virt: wasm
 	@$(MAKE) -s check-iommu
 	@$(MAKE) -s check-hotplug
 	@$(MAKE) -s check-linklocal
+	@$(MAKE) -s check-kexec
+	@$(MAKE) -s check-wm
 
 # USB Ethernet (CDC ECM) as the only network: QEMU's usb-net on the xHCI,
 # DHCP and SSH over it. The Mac's USB-C gadget link will look like this
@@ -326,6 +352,39 @@ check-smp:
 	  -- $(QEMU) -name godeep-smp $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
 	  -kernel $(BOOTFILE)
 
+# kexec: boot the same Image again from the running kernel (read over the
+# 9p host share), without QEMU's help: the second boot finds the first's
+# clean halt in pstore, and its devices (virtio-net, 9p) work again.
+check-kexec:
+	@$(MAKE) -s image
+	go run ./tools/qemucheck -log bin/qemucheck-kexec.log \
+	  -step 'lsdev net0=>ready' -step 'cat host:/go.mod=>module godeep' \
+	  -step 'send:kexec host:/$(BOOTFILE)' -step 'wait:kexec: booting' -step 'wait:godeep 0.1.0' \
+	  -step 'dmesg=>pstore: boot 2, the previous boot halted cleanly' \
+	  -step 'lsdev net0=>ready' -step 'cat host:/go.mod=>module godeep' \
+	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_NET) -kernel $(BOOTFILE)
+
+# The compositor (kernel/wm) on virtio-gpu: three windows come up where
+# the cascade puts them, and the pattern window follows a drag of its title
+# bar through the USB tablet (QMP; pauses between steps, since the tablet's
+# position and the mouse's button reach wm from different devices).
+check-wm:
+	@$(MAKE) -s image
+	@rm -f bin/qmp-wm.sock
+	go run ./tools/qemucheck -log bin/qemucheck-wm.log -qmp bin/qmp-wm.sock \
+	  -step 'send:wm 60 &' -step 'wait:pattern at 120,138' -step 'local:sleep 1=>' \
+	  -step 'qmp:{"execute":"screendump","arguments":{"filename":"bin/check-wm.png","device":"gpu0","format":"png"}}' \
+	  -step 'local:go run ./tools/pngpix bin/check-wm.png 140,188 180,188 20,20=>#ffffff #ffff00 #2b3a4a' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"abs","data":{"axis":"x","value":5124}},{"type":"abs","data":{"axis":"y","value":5290}}]}}' -step 'local:sleep 0.3=>' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":true,"button":"left"}}]}}' -step 'local:sleep 0.3=>' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"abs","data":{"axis":"x","value":10000}},{"type":"abs","data":{"axis":"y","value":5290}}]}}' -step 'local:sleep 0.3=>' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"abs","data":{"axis":"x","value":15371}},{"type":"abs","data":{"axis":"y","value":5290}}]}}' -step 'local:sleep 0.3=>' \
+	  -step 'qmp:{"execute":"input-send-event","arguments":{"events":[{"type":"btn","data":{"down":false,"button":"left"}}]}}' -step 'local:sleep 0.3=>' \
+	  -step 'qmp:{"execute":"screendump","arguments":{"filename":"bin/check-wm2.png","device":"gpu0","format":"png"}}' \
+	  -step 'local:go run ./tools/pngpix bin/check-wm2.png 540,188 140,320=>#ffffff #2b3a4a' \
+	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_NET) -device qemu-xhci,id=xhci -device usb-mouse,bus=xhci.0 -device usb-tablet,bus=xhci.0,port=4 \
+	  -qmp unix:bin/qmp-wm.sock,server=on,wait=off -kernel $(BOOTFILE)
+
 check-usbnet:
 	@$(MAKE) -s image
 	go run ./tools/qemucheck -log bin/qemucheck-usbnet.log \
@@ -341,8 +400,11 @@ check-usbnet:
 check-pcie:
 	@$(MAKE) -s image $(DISK)
 	@cp $(DISK) bin/sd-check.img
-	@go run ./tools/mkdisk -mac -size 134217728 -o bin/mac-check.img >/dev/null
-	go run ./tools/qemucheck -log bin/qemucheck-pcie.log \
+	@go run ./tools/mkdisk -mac -size 134217728 -put godeep/rc=tools/mkdisk/testdata/rc -o bin/mac-check.img >/dev/null
+	@rm -f bin/qmp-pcie.sock
+	go run ./tools/qemucheck -log bin/qemucheck-pcie.log -qmp bin/qmp-pcie.sock \
+	  -step 'wait:rc ran, status 0' -step 'cat ram:/rc-devs=>godeep-mac' \
+	  -step 'dmesg=>confd: source nvme1p2:/godeep/rc,pstore: boot' \
 	  -step 'lsdev pci=>bridge0,bridge to buses 1-1,nvme0 01:00.0,nvme1 03:00.0' \
 	  -step 'lsblk=>nvme0p1,FAT32,nvme0p2,ext4' \
 	  -step 'cat nvme0p2:/hello.txt=>hello from godeep' \
@@ -359,7 +421,13 @@ check-pcie:
 	  -step 'ls nvme1p3:/=>docs' \
 	  -step 'dmesg=>logd: saving the kernel log to nvme1p2' \
 	  -step 'ls nvme1p2:/godeep=>log.txt' \
+	  -step 'echo last-words-before-reset=>last-words' \
+	  -step 'qmp:{"execute":"system_reset"}' -step 'wait:godeep 0.1.0' \
+	  -step 'dmesg=>pstore: the previous boot ended without a clean halt' \
+	  -step 'grep -c last-words-before-reset < ram:/crash.txt=>2' \
+	  -step 'dmesg=>crashed boot' -step 'cat nvme1p2:/godeep/crash.txt | grep -c last-words=>2' \
 	  -- $(QEMU) $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -qmp unix:bin/qmp-pcie.sock,server=on,wait=off -action reboot=reset \
 	  -device pcie-root-port,id=rp1,bus=pcie.0,chassis=1 \
 	  -drive if=none,id=d0,file=$(DISK),format=raw,readonly=on -device nvme,serial=godeep1,drive=d0,bus=rp1 \
 	  -device pcie-root-port,id=rp2,bus=pcie.0,chassis=2 -device sdhci-pci,id=sd0,bus=rp2 \
@@ -453,6 +521,8 @@ check-applem1:
 	bin/fakem1n1-check check -fault 1 -o bin/fakem1n1/fault1
 	bin/fakem1n1-check check -fault 3 -o bin/fakem1n1/fault3
 	bin/fakem1n1-check check -smp 10 -o bin/fakem1n1/smp10 -want "board:,10 of 10 cores,uptime,wake-ups/s"
+	bin/fakem1n1-check check -smp 10 -secmmu -o bin/fakem1n1/secmmu -want "board:,10 of 10 cores,uptime"
+	bin/fakem1n1-check check -smp 4 -park wfi -o bin/fakem1n1/wfi -want "board:,1 of 4 cores,didn't start,uptime"
 
 # The Mac itself: host tests, build bin/godeep-applem1.img, rehearse it on
 # QEMU (check-applem1), then install it on the godeep boot partition so m1n1
@@ -465,6 +535,18 @@ native:
 	@echo "built bin/godeep-applem1.img"
 	@$(MAKE) -s check-applem1
 	BOOTARGS="$(BOOTARGS)" tools/godeep-partition.sh install $(if $(DRY),--dry-run)
+
+# The patched TamaGo toolchain (about a minute): a shared clone of
+# $(TAMAGO_SRC) at the same commit, the patch, make.bash. It won't touch an
+# existing bin/tamago-go: delete that first to rebuild.
+tamago-go:
+	@test ! -e bin/tamago-go || { echo "bin/tamago-go exists: delete it to rebuild"; exit 1; }
+	@mkdir -p bin && echo "module godeep-bin // keeps bin/ (this toolchain's sources) out of godeep's ./..." > bin/go.mod
+	git clone -q --shared $(TAMAGO_SRC) bin/tamago-go
+	git -C bin/tamago-go -c advice.detachedHead=false checkout -q $$(git -C $(TAMAGO_SRC) rev-parse HEAD)
+	git -C bin/tamago-go apply $(CURDIR)/third_party/tamago-go/godeep-runtime.patch
+	cd bin/tamago-go/src && ./make.bash >/dev/null
+	@echo "bin/tamago-go: TamaGo with godeep's runtime patch (now the default TAMAGO)"
 
 stop:
 	@tools/qemu-stop.sh

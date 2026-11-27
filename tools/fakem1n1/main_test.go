@@ -8,7 +8,7 @@ import (
 )
 
 func testConfig() *config {
-	return &config{out: "unused", kernelAddr: dramBase + 0x8000_0000, width: 3456, height: 2234, format: "x2r10g10b10", e2h: true}
+	return &config{out: "unused", kernelAddr: dramBase + 0x8000_0000, width: 3456, height: 2234, format: "x2r10g10b10", e2h: true, park: "wfe"}
 }
 
 // The tree must give board/applem1 what it looks for: a framebuffer
@@ -52,17 +52,17 @@ func TestDeviceTree(t *testing.T) {
 }
 
 func TestPatchShim(t *testing.T) {
-	b, err := patchShim(uartBase, hcrRW|hcrE2H, fdtAddr, 0x10080000000)
+	b, err := patchShim(uartBase, hcrRW|hcrE2H, fdtAddr, 0x10080000000, ptAddr, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := b[len(b)-40:]
-	for i, want := range []uint64{uartBase, hcrRW | hcrE2H, fdtAddr, 0x10080000000, spinAddr} {
+	p := b[len(b)-56:]
+	for i, want := range []uint64{uartBase, hcrRW | hcrE2H, fdtAddr, 0x10080000000, spinAddr, ptAddr, 1} {
 		if got := binary.LittleEndian.Uint64(p[i*8:]); got != want {
 			t.Errorf("parameter %d = %#x, want %#x", i, got, want)
 		}
 	}
-	if binary.LittleEndian.Uint64(shimCode[len(shimCode)-40:]) != uartBase {
+	if binary.LittleEndian.Uint64(shimCode[len(shimCode)-56:]) != uartBase {
 		t.Error("patchShim modified shimCode in place")
 	}
 }
@@ -73,6 +73,8 @@ func TestPrepareRejects(t *testing.T) {
 		func(c *config) { c.kernelAddr = shimAddr },          // on the shim
 		func(c *config) { c.kernelAddr = fbBase },            // on the framebuffer
 		func(c *config) { c.width, c.height = 16384, 16384 }, // framebuffer too big
+		func(c *config) { c.park = "spin" },                  // unknown park mode
+		func(c *config) { c.secmmu, c.e2h = true, false },    // MMU tables need E2H=1
 	} {
 		c := testConfig()
 		c.out = t.TempDir()
@@ -80,5 +82,22 @@ func TestPrepareRejects(t *testing.T) {
 		if _, err := prepare(c); err == nil {
 			t.Errorf("accepted %+v", c)
 		}
+	}
+}
+
+func TestPageTables(t *testing.T) {
+	b := pageTables(ptAddr)
+	l0 := func(i int) uint64 { return binary.LittleEndian.Uint64(b[i*8:]) }
+	l1 := func(page, i int) uint64 { return binary.LittleEndian.Uint64(b[page*4096+i*8:]) }
+	if l0(0) != ptAddr+0x1000|3 || l0(2) != ptAddr+0x2000|3 || l0(1) != 0 {
+		t.Fatalf("level 0: %#x %#x %#x", l0(0), l0(1), l0(2))
+	}
+	// the UART (1 GB block 1) is device memory; the kernel's RAM is normal
+	if v := l1(1, uartBase>>30); v&^0xfff != 0x4000_0000 || v&0x1c != 0 {
+		t.Fatalf("uart block %#x", v)
+	}
+	k := uint64(0x10080000000)
+	if v := l1(2, int((k-dramBase)>>30)); v&^0xfff != k&^(1<<30-1) || v&0x1c != 4 || v&(1<<10) == 0 {
+		t.Fatalf("kernel block %#x", v)
 	}
 }

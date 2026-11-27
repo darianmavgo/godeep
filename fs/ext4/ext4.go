@@ -61,6 +61,7 @@ type FS struct {
 	incompat  uint32
 	label     string
 	kind      string
+	wr        *writer // NewWritable: nil means read-only
 }
 
 // Probe reports whether r holds an ext2/3/4 superblock.

@@ -3,6 +3,7 @@ package sh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"reflect"
 	"strings"
@@ -54,22 +55,24 @@ type shell struct {
 	env Env
 	out *syncBuf
 	sh  *proc.Proc
+	in  chan byte // typed into the terminal
 }
 
 func newShell(t *testing.T) *shell {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	out := &syncBuf{}
-	term := tty.New(make(chan byte), out, false)
+	in := make(chan byte, 16)
+	term := tty.New(in, out, false)
 	t.Cleanup(term.Close)
 	tab := proc.NewTable()
 	ns := vfs.New(ctx, nil)
 	ns.Mount("ram", memfs.New("ram"))
 	ns.Mount("proc", procfs.Proc(tab, time.Now(), "test"))
-	env := Env{Table: tab, TTY: term, FS: ns, Boot: time.Now(), Ports: ipc.NewNamespace()}
+	env := Env{Table: tab, TTY: term, FS: ns, Boot: time.Now(), Ports: ipc.NewNamespace(), Sh: NewState()}
 	// The shell's own process, so stages have a parent.
 	self := tab.Spawn(ctx, 0, proc.Spec{Name: "sh", Main: func(ctx context.Context, _ *proc.Proc) error { <-ctx.Done(); return nil }})
-	return &shell{t: t, ctx: ctx, env: env, out: out, sh: self}
+	return &shell{t: t, ctx: ctx, env: env, out: out, sh: self, in: in}
 }
 
 func (s *shell) run(line string) (string, error) {
@@ -242,6 +245,54 @@ func TestTop(t *testing.T) {
 		if p.Name == "grep" {
 			p.Kill() // and yes then fails on the closed pipe
 		}
+	}
+	waitFor(t, func() bool { return len(s.env.Table.List()) == 1 })
+}
+
+func TestRestrictLimits(t *testing.T) {
+	s := newShell(t)
+	start := time.Now()
+	_, err := s.run("restrict -time 200ms sleep 10")
+	if !errors.Is(err, proc.ErrLimit) || time.Since(start) > 5*time.Second {
+		t.Fatalf("time limit: %v after %v", err, time.Since(start))
+	}
+	out, err := s.run("restrict -out 1K yes")
+	if !errors.Is(err, proc.ErrLimit) || len(out) != 1024 {
+		t.Fatalf("output limit: %v, %d bytes", err, len(out))
+	}
+	// A limited builtin runs as a process, so the limit applies to it too.
+	if _, err := s.run("restrict -out 5 help"); !errors.Is(err, proc.ErrLimit) {
+		t.Fatalf("limited builtin: %v", err)
+	}
+	// Children inherit (and only narrow) the limits; status shows them.
+	s.must("restrict -time 1h restrict -time 2h -goroutines 4 sleep 30 &")
+	var pid int
+	waitFor(t, func() bool {
+		for _, p := range s.env.Table.List() {
+			if p.Name == "sleep" {
+				pid = p.PID
+				return true
+			}
+		}
+		return false
+	})
+	if got := s.must(fmt.Sprintf("grep limits < proc:/%d/status", pid)); got != "limits\ttime 1h0m0s, goroutines 4\n" {
+		t.Fatalf("inherited limits: %q", got)
+	}
+	s.must(fmt.Sprintf("kill %d", pid))
+	for _, bad := range []string{"restrict -time x ls", "restrict -out 0 ls", "restrict -goroutines -1 ls", "restrict -mem 1Q ls"} {
+		if _, err := s.run(bad); err == nil {
+			t.Errorf("%s: no error", bad)
+		}
+	}
+}
+
+// A filter in the middle stops when its reader goes away, so an endless
+// source upstream ends too.
+func TestMiddleStageStops(t *testing.T) {
+	s := newShell(t)
+	if got := s.must("yes | grep y | head -n 3 | wc -l"); got != "3\n" {
+		t.Fatalf("got %q", got)
 	}
 	waitFor(t, func() bool { return len(s.env.Table.List()) == 1 })
 }

@@ -50,6 +50,21 @@ func (Net) Listen(ctx context.Context, network, addr string) (net.Listener, erro
 	return &listener{l, stop}, nil
 }
 
+// ListenPacket opens a UDP port on the loopback interface (low ports moved
+// like Listen's); it closes when ctx is done.
+func (Net) ListenPacket(ctx context.Context, network, addr string) (net.PacketConn, error) {
+	a, err := HostAddr(addr)
+	if err != nil {
+		return nil, err
+	}
+	c, err := (&net.ListenConfig{}).ListenPacket(ctx, network, a)
+	if err != nil {
+		return nil, err
+	}
+	context.AfterFunc(ctx, func() { c.Close() })
+	return c, nil
+}
+
 func (Net) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	return (&net.Dialer{}).DialContext(ctx, network, addr)
 }
