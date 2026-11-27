@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"godeep/drivers/apple/agx"
 	"godeep/drivers/apple/ans"
 	"godeep/drivers/apple/dwc3"
 	"godeep/drivers/apple/fpwm"
@@ -52,6 +53,8 @@ func init() {
 	dev.Register(fpwm.Driver(window))
 	// The internal SSD (ANS2), read-only.
 	dev.Register(ans.Driver(func(base uint64) mmio.Regs64 { return mmio.Window{Base: base} }))
+	// The GPU (AGX), stage 1: UAT handoff only; opt-in with godeep.agx.
+	dev.Register(agx.Driver(func(base uint64) mmio.Shared { return mmio.Window{Base: base} }))
 	// QEMU only (tools/fakem1n1): typing in the terminal. The Mac has no PL011.
 	dev.Register(pl011.Driver(window))
 }

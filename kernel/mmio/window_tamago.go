@@ -20,6 +20,22 @@ func (w Window) Write32(off uint64, v uint32) { atomic.StoreUint32(w.p(off), v) 
 // the end of a virtio device's configuration).
 func (w Window) Read8(off uint64) uint8 { return *(*uint8)(unsafe.Pointer(uintptr(w.Base + off))) }
 
+// Write8 stores one byte without disturbing its neighbours, even when
+// another agent (a coprocessor) writes them at the same time: a
+// compare-and-swap loop on the aligned 32-bit word that holds it. Shared
+// memory only (lock flags), not device registers.
+func (w Window) Write8(off uint64, v uint8) {
+	a := w.Base + off
+	p := (*uint32)(unsafe.Pointer(uintptr(a &^ 3)))
+	shift := 8 * (a & 3)
+	for {
+		old := atomic.LoadUint32(p)
+		if atomic.CompareAndSwapUint32(p, old, old&^(0xff<<shift)|uint32(v)<<shift) {
+			return
+		}
+	}
+}
+
 // Read64 and Write64 are single 64-bit accesses, for registers that must be
 // written whole (Apple's ASC mailbox: the second word of a message sends it).
 func (w Window) Read64(off uint64) uint64 {

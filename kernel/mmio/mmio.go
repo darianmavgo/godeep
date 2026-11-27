@@ -33,6 +33,15 @@ type Regs64 interface {
 	Write64(off uint64, v uint64)
 }
 
+// Shared is memory shared with a coprocessor (Apple's GPU firmware): 32-
+// and 64-bit words plus single bytes, each access atomic on its own
+// (Window and Fake).
+type Shared interface {
+	Regs64
+	Read8(off uint64) uint8
+	Write8(off uint64, v uint8)
+}
+
 // Modify is a read-modify-write for ordinary read/write registers only.
 //
 // Never use it on write-1-to-set / write-1-to-clear registers (interrupt
@@ -98,6 +107,18 @@ func (f *Fake) Write32(off uint64, v uint32) {
 // Read8 reads one byte of the 32-bit register that holds off.
 func (f *Fake) Read8(off uint64) uint8 {
 	return uint8(f.Read32(off&^3) >> (8 * (off & 3)))
+}
+
+// Write8 replaces one byte of the 32-bit register that holds off, under
+// the Fake's lock (so a concurrent model's writes to the other bytes
+// survive, as with Window's compare-and-swap). Logged as a 32-bit write.
+func (f *Fake) Write8(off uint64, v uint8) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	shift := 8 * (off & 3)
+	w := f.regs[off&^3]&^(0xff<<shift) | uint32(v)<<shift
+	f.regs[off&^3] = w
+	f.log = append(f.log, Access{Write: true, Off: off &^ 3, Val: w})
 }
 
 // Read64 reads two 32-bit registers, low word first (each logged; OnRead

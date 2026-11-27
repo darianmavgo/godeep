@@ -7,8 +7,11 @@ import (
 
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"unsafe"
 
+	"godeep/drivers/apple/agx"
 	"godeep/drivers/apple/aic"
 	"godeep/drivers/apple/ans"
 	"godeep/drivers/apple/dwc3"
@@ -179,6 +182,15 @@ func configureNodes(root *fdt.Node, nodes []dev.Node, keys chan<- byte) (extra [
 			if rc, err := rtcConfig(fn); err == nil {
 				extra = append(extra, dev.Node{Name: "rtc", Compatible: smc.RTCCompatible, Config: rc,
 					Needs: []string{"smc", rc.SPMI}})
+			}
+		case agx.Compatible:
+			n.Name = "gpu0"
+			if !bootArg(root, "godeep.agx") {
+				n.Config = errors.New("agx: off (godeep.agx in bootargs turns it on)")
+			} else if c, err := agx.ConfigFromFDT(fn); err != nil {
+				n.Config = err
+			} else {
+				n.Config = c
 			}
 		case fpwm.Compatible:
 			n.Name = "kbdlight"
@@ -360,3 +372,15 @@ func fpwmConfig(n *fdt.Node) any {
 // partition labelled GODEEPDATA (block.Fence). Turn it on only after a
 // boot has shown `lsblk` and `ls nvme0p…:/` reading the SSD correctly.
 const ssdWrites = false
+
+// bootArg reports whether word is one of /chosen/bootargs' words.
+func bootArg(root *fdt.Node, word string) bool {
+	if ch := root.Find("/chosen"); ch != nil {
+		for _, a := range ch.Strings("bootargs") {
+			if slices.Contains(strings.Fields(a), word) {
+				return true
+			}
+		}
+	}
+	return false
+}
