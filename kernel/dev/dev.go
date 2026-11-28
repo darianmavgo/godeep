@@ -424,3 +424,17 @@ type Lister interface{ Devices() []string }
 // Rebooter resets the machine (e.g. a watchdog with a zero timeout). Reboot
 // may return before the reset lands.
 type Rebooter interface{ Reboot() }
+
+// Feature is a part of the machine a board can leave off at boot and turn
+// on later from the shell (`enable NAME`): the Mac's secondary cores, its
+// GPU. Enable is called at most once at a time; calling it on a feature
+// that is already on returns nil and does nothing.
+type Feature interface {
+	Name() string
+	Help() string  // one line: what turning it on does
+	State() string // "off", "on: ...", or why it failed
+	Enable(ctx context.Context) error
+}
+
+// Features is the service of a board device that offers Features.
+type Features interface{ Features() []Feature }

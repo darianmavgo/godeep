@@ -5,6 +5,7 @@ package applem1
 import (
 	"fmt"
 	"os"
+	"slices"
 	"sync/atomic"
 	"unsafe"
 
@@ -27,6 +28,12 @@ var bootFDT, bootEL, bootE2H uint64
 // wake-up rate, the watchdog's countdown, and how far the keyboard driver
 // got (hid-transport@0), so a boot that can't type still reports.
 var Autorun = "lsdev\rps\rmem\ruptime\rsleep 5\rlsdev idle watchdog hid usb nvme smc rtc kbdlight\r"
+
+// Desktop follows Autorun: terminal windows on the framebuffer
+// (programs/sh/desktop.go), as on Parallels. Super+Q leaves it for the
+// plain console; godeep.nodesktop in bootargs skips it. `enable` lists
+// what the board left off at boot (smp, agx).
+var Desktop = "enable\rdesktop\r"
 
 // Typeahead from the keyboard beyond this is dropped (counted in lsdev).
 const keyBuffer = 256
@@ -112,8 +119,9 @@ func NewBoard() kernel.Board {
 		}
 		nodes = len(fromFDT(root))
 		devices = append(devices, checkMemory(root), bootEntropy(root))
+		bootRoot = root
 		blog("smp: start\n")
-		startSMP(root)
+		smpDefault(root)
 		blog("smp: " + SMPInfo() + "\n")
 		devices = append(devices, SMPInfo())
 	} else {
@@ -123,9 +131,13 @@ func NewBoard() kernel.Board {
 	// One input stream: autorun first, then the keyboard driver's bytes (and
 	// on QEMU, the serial port's).
 	// Never closed.
-	in := make(chan byte, len(Autorun)+keyBuffer)
-	for i := 0; i < len(Autorun); i++ {
-		in <- Autorun[i]
+	autorun := Autorun
+	if root == nil || !bootArg(root, "godeep.nodesktop") {
+		autorun += Desktop
+	}
+	in := make(chan byte, len(autorun)+keyBuffer)
+	for i := 0; i < len(autorun); i++ {
+		in <- autorun[i]
 	}
 
 	b := kernel.Board{
@@ -159,6 +171,9 @@ func NewBoard() kernel.Board {
 			b.Devices = withNode(b.Devices, kbd)
 		}
 		b.Devices = append(b.Devices, configureNodes(root, b.Devices, in)...)
+		if agxOff != nil { // off until `enable agx` (features.go)
+			b.Devices = slices.DeleteFunc(b.Devices, func(n dev.Node) bool { return n.Name == agxOff.Name })
+		}
 		var irqInfo string
 		b.IRQ, irqInfo = interrupts(root)
 		b.Info += "; " + irqInfo
@@ -168,7 +183,8 @@ func NewBoard() kernel.Board {
 			}
 		}
 	}
-	b.Devices = append(b.Devices, dev.Node{Name: "idle", Compatible: idleCompatible})
+	b.Devices = append(b.Devices, dev.Node{Name: "idle", Compatible: idleCompatible},
+		dev.Node{Name: "features", Compatible: featuresCompatible})
 	if console != nil {
 		b.Devices = append(b.Devices, dev.Node{Name: "fbcon", Compatible: simplefb.DeviceCompatible, Config: console})
 	}

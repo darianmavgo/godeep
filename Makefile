@@ -118,6 +118,12 @@ $(error ARCH must be arm64 or amd64)
 endif
 
 TAMAGO_LDFLAGS ?= -s -w -T $(TEXT_START) -R 0x1000
+# NOGC=1: the kernel never runs the garbage collector (debug.SetGCPercent(-1)
+# before anything else; cmd/godeep). The heap only grows: until the board's
+# RAM runs out, then the runtime dies with "out of memory".
+ifneq ($(NOGC),)
+TAMAGO_LDFLAGS += -X main.noGC=1
+endif
 ifeq ($(BOARD),applem1)
 KERNEL := bin/godeep-applem1.elf
 IMAGE  := bin/godeep-applem1.img
@@ -553,12 +559,14 @@ shot-applem1:
 check-applem1:
 	@$(APPLEM1)
 	@go build -o bin/fakem1n1-check ./tools/fakem1n1
-	bin/fakem1n1-check check
+	bin/fakem1n1-check check -bootargs godeep.nodesktop
 	bin/fakem1n1-check check -fault 1 -o bin/fakem1n1/fault1
 	bin/fakem1n1-check check -fault 3 -o bin/fakem1n1/fault3
-	bin/fakem1n1-check check -smp 10 -o bin/fakem1n1/smp10 -want "board:,10 of 10 cores,uptime,wake-ups/s"
-	bin/fakem1n1-check check -smp 10 -secmmu -o bin/fakem1n1/secmmu -want "board:,10 of 10 cores,uptime"
-	bin/fakem1n1-check check -smp 4 -park wfi -o bin/fakem1n1/wfi -want "board:,1 of 4 cores,didn't start,uptime"
+	bin/fakem1n1-check check -o bin/fakem1n1/desktop -want "board:,FEATURE,smp,agx" -type ""
+	bin/fakem1n1-check check -smp 10 -bootargs godeep.nodesktop -o bin/fakem1n1/enable -type "$$(printf 'enable smp agx\r')" -reply "smp: 10 of 10 cores"
+	bin/fakem1n1-check check -smp 10 -bootargs "godeep.smp godeep.nodesktop" -o bin/fakem1n1/smp10 -want "board:,10 of 10 cores,uptime,wake-ups/s"
+	bin/fakem1n1-check check -smp 10 -secmmu -bootargs "godeep.smp godeep.nodesktop" -o bin/fakem1n1/secmmu -want "board:,10 of 10 cores,uptime"
+	bin/fakem1n1-check check -smp 4 -park wfi -bootargs "godeep.smp godeep.nodesktop" -o bin/fakem1n1/wfi -want "board:,1 of 4 cores,didn't start,uptime"
 
 # The Mac itself: host tests, build bin/godeep-applem1.img, rehearse it on
 # QEMU (check-applem1), then install it on the godeep boot partition so m1n1

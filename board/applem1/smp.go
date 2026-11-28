@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/goos"
-	"slices"
-	"strings"
 	"sync/atomic"
 	"time"
 	"unsafe"
@@ -48,8 +46,13 @@ var (
 	smpWoken [maxCPUs]uint32 // goos.Wake's flag, cleared by the core's idle
 	smpN     uint32
 	smpNext  uint32
-	smpInfo  = "1 core"
 )
+
+// smpInfo describes the cores in use (lsdev idle, the boot banner). It
+// changes at run time when `enable smp` starts the other cores.
+var smpInfo atomic.Pointer[string]
+
+func setSMPInfo(s string) { smpInfo.Store(&s) }
 
 // defined in smp_arm64.s
 func secondaryEntryAddr() uint64
@@ -106,8 +109,12 @@ func spinTable(root *fdt.Node) (cpus []spinCPU, others int) {
 	return cpus, others
 }
 
-// startSMP releases every parked core and sets GOMAXPROCS to match.
-func startSMP(root *fdt.Node) {
+// smpDefault decides at boot: the Mac stays on its boot core unless
+// /chosen/bootargs has godeep.smp (releasing the other cores has hung a
+// boot on the hardware: never debugged); the shell's `enable smp` releases
+// them later. godeep.nosmp, the old opt-out, is still accepted.
+func smpDefault(root *fdt.Node) {
+	setSMPInfo("1 core")
 	if root == nil {
 		return
 	}
@@ -115,15 +122,26 @@ func startSMP(root *fdt.Node) {
 	if len(cpus)+others < 2 {
 		return
 	}
-	// godeep.nosmp in /chosen/bootargs: stay on the boot core (a way back
-	// if releasing the others ever goes wrong on the hardware)
-	if ch := root.Find("/chosen"); ch != nil {
-		for _, a := range ch.Strings("bootargs") {
-			if slices.Contains(strings.Fields(a), "godeep.nosmp") {
-				smpInfo = fmt.Sprintf("1 of %d cores (godeep.nosmp)", len(cpus)+others)
-				return
-			}
-		}
+	if bootArg(root, "godeep.smp") && !bootArg(root, "godeep.nosmp") {
+		startSMP(root)
+		return
+	}
+	setSMPInfo(fmt.Sprintf("1 of %d cores (smp off: `enable smp`, or godeep.smp in bootargs)", len(cpus)+others))
+}
+
+// smpStarted: startSMP ran (once only: the cores it released are ours).
+var smpStarted atomic.Bool
+
+// startSMP releases every parked core and sets GOMAXPROCS to match. It
+// runs once, at boot (godeep.smp) or from `enable smp`; later calls do
+// nothing.
+func startSMP(root *fdt.Node) {
+	if root == nil || !smpStarted.CompareAndSwap(false, true) {
+		return
+	}
+	cpus, others := spinTable(root)
+	if len(cpus)+others < 2 {
+		return
 	}
 	self := affinity(read_mpidr())
 	save_boot_regs(&smpBoot)
@@ -162,6 +180,7 @@ func startSMP(root *fdt.Node) {
 				alive = true
 				break
 			}
+			runtime.Gosched() // from the shell: let the others run meanwhile
 		}
 		if alive {
 			blog(": up\n")
@@ -188,7 +207,7 @@ func startSMP(root *fdt.Node) {
 		failed = append(failed, fmt.Sprintf("%d cores without a spin table", others))
 	}
 	if alive < 2 {
-		smpInfo = fmt.Sprintf("1 of %d cores (%v)", len(cpus)+others, failed)
+		setSMPInfo(fmt.Sprintf("1 of %d cores (%v)", len(cpus)+others, failed))
 		return
 	}
 	atomic.StoreUint32(&smpN, n)
@@ -200,10 +219,11 @@ func startSMP(root *fdt.Node) {
 	blogDec(uint64(alive))
 	blog("\n")
 	runtime.GOMAXPROCS(int(alive))
-	smpInfo = fmt.Sprintf("%d of %d cores", alive, len(cpus)+others)
+	info := fmt.Sprintf("%d of %d cores", alive, len(cpus)+others)
 	if len(failed) > 0 {
-		smpInfo += fmt.Sprintf(" (%v)", failed)
+		info += fmt.Sprintf(" (%v)", failed)
 	}
+	setSMPInfo(info)
 }
 
 // smpDead marks slots whose core didn't start: Task skips them.
@@ -245,4 +265,9 @@ func wake(procid uint64) {
 }
 
 // SMPInfo describes the cores in use.
-func SMPInfo() string { return smpInfo }
+func SMPInfo() string {
+	if p := smpInfo.Load(); p != nil {
+		return *p
+	}
+	return "1 core"
+}

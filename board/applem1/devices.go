@@ -185,14 +185,19 @@ func configureNodes(root *fdt.Node, nodes []dev.Node, keys chan<- byte) (extra [
 			}
 		case agx.Compatible:
 			n.Name = "gpu0"
-			// On by default, like everything built (godeep.agx, the old
-			// opt-in, is still accepted); godeep.noagx turns it off.
-			if bootArg(root, "godeep.noagx") {
-				n.Config = errors.New("agx: off (godeep.noagx in bootargs)")
-			} else if c, err := agx.ConfigFromFDT(fn); err != nil {
+			agxPresent = true
+			if c, err := agx.ConfigFromFDT(fn); err != nil {
 				n.Config = err
 			} else {
 				n.Config = c
+			}
+			// Off by default: godeep.agx in bootargs starts it at boot,
+			// `enable agx` later (features.go). The board leaves the node
+			// out of the device list until then. (godeep.noagx, the old
+			// opt-out, still wins.)
+			if !bootArg(root, "godeep.agx") || bootArg(root, "godeep.noagx") {
+				off := *n
+				agxOff = &off
 			}
 		case fpwm.Compatible:
 			n.Name = "kbdlight"

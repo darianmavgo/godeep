@@ -38,6 +38,7 @@ func init() {
 		dev.Register(d)
 	}
 	dev.Register(dev.Driver{Compatible: idleCompatible, Run: runIdleStats})
+	dev.Register(dev.Driver{Compatible: featuresCompatible, Run: runFeatures})
 	dev.Register(spihid.Driver(window))
 	dev.Register(simplefb.Driver())
 	// USB-C ports (USB 2 host): port controllers on I2C, DWC3 + xHCI, and

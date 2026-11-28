@@ -213,7 +213,7 @@ func (e Env) out() io.Writer {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.out())
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "ntp", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "curl", "ping", "nc", "evtest", "exit", "halt", "reboot", "kexec", "dmesg", "pprof", "kbd", "top", "restrict", "ports", "kvd", "kv", "gpu", "wm", "set", "unset", "source", "jobs", "wait", "fg", "true", "false", "test"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "ntp", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "curl", "ping", "nc", "evtest", "exit", "halt", "reboot", "enable", "kexec", "dmesg", "pprof", "kbd", "top", "restrict", "ports", "kvd", "kv", "gpu", "wm", "set", "unset", "source", "jobs", "wait", "fg", "true", "false", "test"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")
