@@ -17,18 +17,27 @@ The polish that makes Omarchy *feel* like Omarchy (blur, shadows, 120 Hz animati
 
 That alone gets the look and the keyboard flow.
 
-## What you can see today
+## What you can see today: `desktop` (2026-11-27)
 
-`wm` is a shell builtin: `wm [SECONDS]` starts the compositor (`kernel/wm`) with three demo windows: a clock, an input log and a test pattern. You can click, focus and drag them by their title bars. It's a proof of the compositor's design, not a desktop.
+`desktop [-n N] [-t SECONDS]` is the start of G1: themed terminal windows (Tokyo Night colors, anti-aliased Go Mono text, a title bar with a [x] close button, shadows, a gradient), each running its own godeep shell. It runs on every board:
 
-It needs a `gpu.Display`, and **today only QEMU's virtio-gpu publishes one**, so it runs only there:
+- **Parallels and the Mac:** on the firmware framebuffer, which the console lends to the compositor while the desktop runs (`drivers/simplefb/display.go`). `lsdev fbcon` says "screen lent to a compositor"; the console keeps its text and log meanwhile and redraws when the desktop ends.
+- **QEMU:** on virtio-gpu (`make check-desktop` checks it in a screendump).
 
-```
-make qemu QEMU_DISPLAY=cocoa     # a window on the Mac showing godeep's screen
-godeep$ wm 60                    # typed in that window or the terminal; ^C ends it
-```
+How it's built, the way the user asked for it: one desktop goroutine owns the compositor (`kernel/wm`, Night theme) and the keyboard. Each terminal is a **process** of its own (`termN` in `ps`) with a window, a `kernel/vt` screen, a `tty.NewFor` and a child `sh`, exactly like an SSH session. The [x] kills that terminal's shell, which ends its process and so its window; `exit` in the shell or `kill PID` from anywhere does the same.
 
-`check-virt` drives it headlessly: it drags a window over QMP and checks the screendump. On **Parallels and the Mac**, the screen is the framebuffer console (`drivers/simplefb` on GOP or m1n1's framebuffer), which isn't a `gpu.Display`, so `wm` answers "no display". Publishing one there is the first task of G1 (§11): a `gpu.Display` on the firmware framebuffer, handing the screen back to the console when the compositor exits.
+| Action | How |
+|---|---|
+| new terminal | click the empty desktop, or Super+Return |
+| close a terminal | its [x], Super+W, `exit`, or `kill` its `termN` |
+| type | the focused window gets every key (^C included): from the console keyboard, the Mac's, or the SSH/serial line `desktop` was started from |
+| focus / move | click a window / drag its title bar |
+| scroll back | mouse wheel over a terminal (2000 lines) |
+| leave | Super+Q (or `-t SECONDS`) |
+
+Super combinations type nothing (`kernel/input`): they're the desktop's. On Parallels, macOS or Parallels may keep some Command combinations for themselves; clicking and [x] always work. The old `wm [SECONDS]` demo (Classic theme: clock, input log, test pattern) is still there.
+
+Next in G1: a TrueType font with more polish (JetBrains Mono, OFL), tiling and workspaces, selection and paste in terminals, then `fbbench` to set the CPU budget on the Mac.
 
 ## 1. Omarchy, piece by piece
 
