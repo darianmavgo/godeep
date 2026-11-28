@@ -42,6 +42,7 @@ Not yet: `window-change` handling beyond acknowledging it, and the Mac transport
 - [9. What SSH won't replace](#9-what-ssh-wont-replace)
 - [10. Suggested order](#10-suggested-order)
 - [11. Risks and open questions](#11-risks-and-open-questions)
+- [12. Parallels: ssh from another computer on the LAN](#12-parallels-ssh-from-another-computer-on-the-lan)
 
 ---
 
@@ -335,3 +336,95 @@ Host godeep
 - **`net.SocketFunc` is tamago-go specific.** Host builds (`board/hosted`) use the real OS network, so `sshd` should only depend on `cap.Net` and run on both. That also gives a fast host loop: `make hosted`, then `ssh -p 2222 localhost`.
 - **The hypervisor UART's speed and buffering** for SSH under m1n1 are untested. If it's too slow or loses bytes, the bridge won't hold and USB Ethernet becomes the only path.
 - **Image size and boot time** with gVisor + SSH on the Mac: measure them, since every chainload transfers the whole image.
+
+---
+
+## 12. Parallels: ssh from another computer on the LAN
+
+godeep on Parallels Desktop (`docs/Parallels.md`) sits on Parallels' **Shared** network by default: the VM gets `10.211.55.x` from Parallels' DHCP, behind NAT. The Mac itself reaches that address directly (`make ssh-parallels`, tested). Other computers on the LAN can't, so pick one of the two ways below. Either one puts a root shell on your LAN, so read the security notes first.
+
+Status (2026-11-27): the Mac-side path (`make ssh-parallels`, `scp` into `ram:`) is tested. The two LAN setups below are written from Parallels' CLI and haven't been run yet: they open the VM to the LAN, so you run them.
+
+### 12.1 Security first
+
+- **Logins are by key only** (no passwords), against the `authorized_keys` built into the image (`make keys`; `programs/sshd/keys/`). Anyone who has `bin/ssh/id_ed25519` gets a root shell, and in godeep that shell has the whole machine (volumes, network, `halt`).
+- **The host key is the development key** `bin/ssh/host_ed25519`, the same on every build: fine for telling *your* godeep apart, not a secret.
+- **No real entropy on this board** (sshd's banner says so): `board/virt` on Parallels has no virtio-rng, so `crypto/rand` is seeded from the counter. Keys exchanged in a session are predictable in principle. Use it on a LAN you trust, never on a network you share with strangers, and remove the forward or bridge when you're done.
+
+### 12.2 Authorize the other computer
+
+Better than copying the Mac's dev private key around: build the other computer's public key into the image.
+
+```sh
+# on the other computer (create a key once if it has none: ssh-keygen -t ed25519)
+cat ~/.ssh/id_ed25519.pub            # copy this line to the Mac, e.g. into ~/laptop.pub
+# on the Mac
+make parallels SSH_AUTHORIZED_KEYS=~/laptop.pub   # rebuilds the image with the key, reboots the VM
+```
+
+`SSH_AUTHORIZED_KEYS` takes one or more files (space separated); they're appended to the dev key. The keys are part of the image, so pass it on every build that should keep them (or set it in your environment).
+
+### 12.3 Option A: forward a port on the Mac (keeps the Shared network)
+
+Parallels' NAT can forward a port of the Mac to the VM. The rule names the VM, so it keeps working when the VM's DHCP address changes.
+
+```sh
+# on the Mac: forward the Mac's TCP 2224 to GoDeep's port 22
+prlsrvctl net set Shared --nat-tcp-add godeep-ssh,2224,GoDeep,22
+prlsrvctl net info Shared            # lists the rule under "NAT server"
+ipconfig getifaddr en0               # the Mac's LAN address, e.g. 192.168.4.36
+
+# on the other computer
+ssh -p 2224 root@192.168.4.36
+
+# when you're done
+prlsrvctl net set Shared --nat-tcp-del godeep-ssh
+```
+
+- If `prlsrvctl` doesn't accept the VM's name in the rule, use its UUID (`prlctl list -i GoDeep | grep '^ID'`).
+- Use a port other than 2222: `make qemu`/`make hosted` listen on 127.0.0.1:2222, and check-virt on 2223.
+- If the macOS firewall is on (System Settings → Network → Firewall), allow incoming connections for Parallels' NAT service when macOS asks, or under the firewall's Options.
+- It only works while the Mac is awake and the VM is running.
+
+### 12.4 Option B: bridge the VM onto the LAN
+
+The VM gets its own address from the LAN's router, as if it were another computer on the network.
+
+```sh
+# on the Mac
+prlctl stop GoDeep --kill
+prlctl set GoDeep --device-set net0 --type bridged --iface en0   # en0: the Mac's Wi-Fi (or its Ethernet)
+make parallels
+make ssh-parallels CMD=ifconfig      # won't work here: it reads Parallels' Shared-network leases
+```
+
+Read the address on the VM's window or serial console (`nc -U bin/parallels/serial.sock`, then `ifconfig`): for example `eth0: 192.168.4.57/24 (dhcp from 192.168.4.1)`. Then, from the other computer:
+
+```sh
+ssh root@192.168.4.57
+```
+
+- Bridging over Wi-Fi works on most home networks. Networks with client isolation or one-device-per-login (offices, hotels) may not give the VM an address, or may block traffic between clients: use option A there.
+- The address can change on every boot (the router's DHCP). Reserve one for the VM's MAC (`prlctl list -i GoDeep | grep net0`) in the router if you use it often.
+- Go back to the Shared network with `prlctl set GoDeep --device-set net0 --type shared`.
+
+### 12.5 On the other computer
+
+```
+# ~/.ssh/config
+Host godeep-pd
+    HostName 192.168.4.36    # option A: the Mac's address; option B: the VM's
+    Port 2224                # option A only (B: 22)
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+```sh
+ssh godeep-pd                         # a shell (pty session)
+ssh godeep-pd 'lsdev cpus; top -n 1'  # one command
+scp notes.txt godeep-pd:              # lands in ram:/notes.txt (RAM, lost at reboot)
+ssh godeep-pd 'curl -s -w "%{http_code}\n" -o ram:/x https://example.com'
+```
+
+The first connection asks to trust godeep's host key: its fingerprint is in the VM's `dmesg` (`sshd: listening on :22, host key SHA256:...`), the same value on every build made with this Mac's `bin/ssh`.
+
