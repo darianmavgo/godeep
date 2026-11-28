@@ -124,6 +124,47 @@ route to host" and an incomplete ARP entry on the Mac; with a fresh address
 the Mac resolved the VM at once, so it looked like a stale entry, not a
 guest problem.
 
+## Parallels vs the Mac image on QEMU (2026-11-28)
+
+The same checks were run on both: `make check-parallels` (which now also
+runs `enable` and a `desktop` and screenshots it into
+`bin/parallels/desktop.png`) and `make check-applem1` (the Mac image on
+QEMU `sbsa-ref` through `tools/fakem1n1`). They're two different kernels.
+Parallels boots the `board/virt` Image. fakem1n1 boots
+`bin/godeep-applem1.img`, the image `make native` installs on the Mac.
+Both passed.
+
+| | Parallels (board/virt) | QEMU sbsa-ref + fakem1n1 (board/applem1) |
+|---|---|---|
+| Speed | Hypervisor.framework, native | TCG (sbsa-ref needs EL3), emulated |
+| Entry | EL1, from tools/efiboot (UEFI) | EL2 with VHE (E2H=1) from the m1n1 stand-in, dropped to EL1 |
+| Device tree | static, from mkdtb (transcribed ACPI): 3 board devices + PCI | m1n1-style, Apple nodes: 22 devices from the tree, 25 in all |
+| Cores at boot | all (4): PSCI `CPU_ON`, GIC SGIs | **1**: SMP is off by default on the Mac image |
+| `enable` | "this board has no optional features" | `smp` and `agx`; `enable smp` releases 10 of 10 cores at run time |
+| GPU | none (Parallels' virtio-gpu not enabled) | no AGX node in fakem1n1's tree: `enable agx` says "no GPU in the device tree" |
+| Desktop | started by hand (`desktop`), or by check-parallels | starts from autorun (`godeep.nodesktop` skips it) |
+| Framebuffer | GOP 1024x768 x8r8g8b8: desktop at scale 1 | 3456x2234 x2r10g10b10: same desktop, larger window, same theme |
+| Keyboard/pointer | USB (xHCI: HID boot keyboard, tablet, mouse) | PL011 serial only. The SPI keyboard path runs over preloaded RAM pages, so you can't type through it |
+| Interrupts | GICv3; UART in irq mode | AIC2 polled every 1 ms; no GIC |
+| Idle | WFI + virtual timer | WFE + event stream every 66 µs; under TCG it barely sleeps (~280k wake-ups/s; ~1,500/s on the Mac) |
+| Network | legacy virtio-net over PCI, DHCP, ssh to 10.211.55.x | none (the Mac needs a USB Ethernet adapter) |
+| Entropy | none yet (no RNG device) | 72 bytes of /chosen seeds |
+| After boot | 14.8 MiB heap, 57 goroutines (network, sshd, 4 cores) | 2 MiB heap, 30 goroutines |
+
+What each one can tell you: Parallels is the fast loop for anything above
+the board (shell, desktop, wm, network, SMP scheduling on real
+virtualization). fakem1n1 is the only rehearsal of the Mac's boot path
+(m1n1 handoff, EL2/VHE drop, spin-table release, Apple device tree,
+fault screen). Neither one exercises the Mac's own hardware: AGX, the SPI
+keyboard's timing, the SSD, or what m1n1 really leaves in the caches. A
+failure seen only on the Mac lies in that gap.
+
+Gotcha: `prlctl stop --kill` does nothing to a **suspended** VM, and
+`prlctl start` then *resumes* the old kernel instead of booting the new
+image (the checks passed against a stale kernel until `enable` came back
+"command not found"). `make parallels` now resumes a suspended VM before it
+kills it.
+
 ## Not done (by size)
 
 - **Disk**: AHCI (platform, `PRL4010`): a new driver. Files can come in

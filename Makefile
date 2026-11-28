@@ -625,6 +625,8 @@ parallels-setup:
 # to bin/parallels/serial.sock (e.g. `nc -U bin/parallels/serial.sock`).
 parallels: image efiboot
 	go run ./tools/efiboot/mkdtb -cpus $(PD_CPUS) -o bin/parallels/parallels.dtb
+	@# a suspended VM ignores stop, and start would resume the old kernel
+	-@prlctl list -a | grep -q "suspended.* $(PD_VM)$$" && prlctl resume $(PD_VM) >/dev/null 2>&1; true
 	-prlctl stop $(PD_VM) --kill >/dev/null 2>&1
 	mcopy -o -i "$$(ls $(PD_DISK)/*.hds)" bin/parallels/BOOTAA64.EFI ::/EFI/BOOT/BOOTAA64.EFI
 	mcopy -o -i "$$(ls $(PD_DISK)/*.hds)" $(BOOTFILE) ::/godeep.img
@@ -649,7 +651,9 @@ check-parallels: parallels
 	go run ./tools/pdcheck -vm $(PD_VM) -sock bin/parallels/serial.sock \
 	  -step 'cat proc:/version=>GOMAXPROCS=$(PD_CPUS)' -step 'lsdev cpus=>$(PD_CPUS) cores' \
 	  -step 'load:burn $(PD_CPUS) 10=>$(shell echo "$(PD_CPUS) - 0.5" | bc)' -step 'uptime=>up' \
-	  -step 'ifconfig=>dhcp from'
+	  -step 'ifconfig=>dhcp from' \
+	  -step 'enable=>no optional features' -step 'desktop -n 1 -t 30 &=>desktop (%' -step 'ps=>term1'
+	@sleep 2; prlctl capture $(PD_VM) --file bin/parallels/desktop.png >/dev/null && echo "check-parallels: desktop screenshot: bin/parallels/desktop.png"
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 	  out=$$($(PD_SSH) -o ConnectTimeout=3 root@$(PD_IP) cat proc:/version 2>&1) && break; sleep 2; done; \
 	  echo "$$out" | grep -q "GOMAXPROCS=$(PD_CPUS)" && echo "check-parallels: OK: ssh root@$(PD_IP)" || \
