@@ -35,6 +35,15 @@ func (fn exceptionHandler) vector() uint64 {
 
 var isThrowing bool
 
+// FaultPanics, set by a board (godeep), turns synchronous faults taken in
+// a goroutine (data and instruction aborts, such as a nil pointer read,
+// alignment faults, undefined instructions) into a Go panic in that
+// goroutine, which a deferred recover can stop, as on hosted Go. It needs
+// godeep's runtime patch (the godeepruntime build tag, which godeep's
+// Makefile sets with bin/tamago-go): without it, or for anything else
+// (SError, a fault in the runtime itself), SystemExceptionHandler runs.
+var FaultPanics bool
+
 // DefaultExceptionHandler handles an exception by printing its vector and
 // processor mode before panicking.
 func DefaultExceptionHandler(pc uintptr) {
@@ -99,3 +108,6 @@ func (cpu *CPU) initVectorTable() {
 func (cpu *CPU) CurrentEL() int {
 	return int(read_el()&0b1100) >> 2
 }
+
+// defined in fault_godeep.s / fault_stock.s
+func faultPanic()

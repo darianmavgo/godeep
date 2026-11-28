@@ -443,7 +443,7 @@ Scope: this Mac only (t6000, J316sAP, the Asahi device tree m1n1 hands over), de
 | `drivers/apple/aic` | `apple,t6000-aic` | AIC2: mask all, enable, `irq.Controller`; the `irq` thread polls the event register every 1 ms (no IRQ exceptions yet) | fake AIC2: "AIC2: 64 IRQs, 1 dies" |
 | `drivers/apple/dwc3/atc.go` | ATC PHY (`apple,tunable-*` from m1n1) | USB 3 (5 Gb/s) per cable: tunables, lanes by plug orientation, pipehandler BIST; falls back to USB 2 | — |
 | `drivers/apple/dwc3/gadget.go` | (per port) → `usbgadget-usb@…` | device mode: the Mac as a CDC ECM Ethernet adapter when another computer is the host | — |
-| `drivers/apple/agx` (2026-11-27) | `apple,agx-t6000` → `gpu0` | the GPU, stage 1 of 5 (`AGX.md`): ID, UAT page tables, handoff with the GPU firmware, the kernel's slot; opt-in with `godeep.agx` | — (no GPU node in fakem1n1); host-tested |
+| `drivers/apple/agx` (2026-11-27) | `apple,agx-t6000` → `gpu0` | the GPU, stage 1 of 5 (`AGX.md`): ID, UAT page tables, handoff with the GPU firmware, the kernel's slot; on by default, `godeep.noagx` turns it off | — (no GPU node in fakem1n1); host-tested |
 | `drivers/apple/fpwm` | `apple,t6000-fpwm` → `kbdlight` | keyboard backlight; shell `kbdlight [0-100]` | fake page: "keyboard backlight 0%" |
 
 The autorun's last line is now `lsdev idle watchdog hid usb nvme smc rtc kbdlight`: one photo of the next boot covers everything above.

@@ -20,24 +20,18 @@ func init() {
 // surface belongs to the shell (its ctx): it stays on screen until the
 // shell exits, or SECONDS pass.
 func gpuCmd(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
-	var name string
-	var d gpu.Display
-	for _, s := range env.Dev.List() {
-		if g, ok := s.Service.(gpu.Display); ok {
-			if d == nil {
-				name, d = s.Name, g
-			}
-			if len(args) == 0 {
+	if len(args) == 0 { // list them
+		for _, s := range env.Dev.List() {
+			if g, ok := s.Service.(gpu.Display); ok {
 				sz := g.Size()
 				fmt.Fprintf(env.out(), "%s: %dx%d\n", s.Name, sz.X, sz.Y)
 			}
 		}
-	}
-	if d == nil {
-		return errors.New("no display (QEMU: -device virtio-gpu-device)")
-	}
-	if len(args) == 0 {
 		return nil
+	}
+	d, name, err := findDisplay(env) // a GPU before the console's framebuffer
+	if err != nil {
+		return err
 	}
 	sctx := ctx
 	var c *color.RGBA

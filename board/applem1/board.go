@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"unsafe"
 
+	"github.com/usbarmory/tamago/arm64"
+
 	"godeep/drivers/arm/pl011"
 	"godeep/drivers/simplefb"
 	"godeep/kernel"
@@ -48,7 +50,8 @@ var pstoreRing atomic.Pointer[pstore.Ring]
 // NewBoard brings up the framebuffer console and describes the machine.
 func NewBoard() kernel.Board {
 	stage(StageRuntime)
-	ring := pstore.Open(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(PSTORE_BASE))), PSTORE_SIZE))
+	prevLog := prevBootLog()
+	ring := pstore.Open(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(PSTORE_BASE+BOOTLOG_SIZE))), PSTORE_SIZE-BOOTLOG_SIZE))
 	pstoreRing.Store(ring)
 	var root *fdt.Node
 	info := []string{}
@@ -58,6 +61,9 @@ func NewBoard() kernel.Board {
 		r, err := fdt.Parse(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(bootFDT))), size))
 		if err == nil {
 			root = r
+			blog("fdt: parsed\n")
+		} else {
+			blog("fdt: " + err.Error() + "\n")
 		}
 	}
 
@@ -65,10 +71,24 @@ func NewBoard() kernel.Board {
 	if root != nil {
 		if fb, err := framebuffer(root); err == nil {
 			if c, err := simplefb.NewConsole(fb, 0); err == nil {
+				// the console clears the screen: show the boot log so far
+				// on it (blog prints there from now on)
+				fmt.Fprintf(c, "boot log (this boot):\n%s", curBootLog())
 				console, out = c, c
 				info = append(info, fmt.Sprintf("framebuffer %dx%d %s", fb.Width, fb.Height, fb.Format))
+			} else {
+				blog("console: " + err.Error() + "\n")
 			}
+		} else {
+			blog("console: " + err.Error() + "\n")
 		}
+	}
+	if console != nil {
+		blog("console: up\n")
+		// From now on a fault in a goroutine panics in it (its process
+		// dies, the kernel stays: docs/UnderstandingGoRoutineFailure.md);
+		// before, the fault screen (lateFault) was the only report.
+		arm64.FaultPanics = true
 	}
 
 	if uartReady {
@@ -92,7 +112,9 @@ func NewBoard() kernel.Board {
 		}
 		nodes = len(fromFDT(root))
 		devices = append(devices, checkMemory(root), bootEntropy(root))
+		blog("smp: start\n")
 		startSMP(root)
+		blog("smp: " + SMPInfo() + "\n")
 		devices = append(devices, SMPInfo())
 	} else {
 		devices = append(devices, "no device tree from the boot loader")
@@ -150,6 +172,10 @@ func NewBoard() kernel.Board {
 	if console != nil {
 		b.Devices = append(b.Devices, dev.Node{Name: "fbcon", Compatible: simplefb.DeviceCompatible, Config: console})
 	}
+	blog("board: ")
+	blogDec(uint64(len(b.Devices)))
+	blog(" devices, starting the kernel\n")
+	b.BootLog, b.PrevBootLog = curBootLog(), prevLog
 	return b
 }
 

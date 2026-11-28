@@ -174,6 +174,113 @@ index 4f339b4b..5cd72a3c 100644
  		return false
  	}
  	if readgstatus(gp)&^_Gscan == _Gsyscall {
+diff --git a/src/runtime/sigpanic_tamago.go b/src/runtime/sigpanic_tamago.go
+new file mode 100644
+index 00000000..2d98d278
+--- /dev/null
++++ b/src/runtime/sigpanic_tamago.go
+@@ -0,0 +1,56 @@
++// Copyright 2026 The godeep Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build tamago && arm64
++
++package runtime
++
++import _ "unsafe" // go:linkname
++
++// godeep: CPU faults as Go panics on bare metal, like the signal-based
++// ports. A board's synchronous exception vector jumps to tamagoFault
++// (sigpanic_tamago_arm64.s) on the faulting goroutine's stack; it records
++// the fault in g, restores the interrupted code's interrupt mask, arranges
++// the stack as sigctxt.preparePanic does and enters sigpanic, so the
++// unwinder treats the faulting frame as stopped by a trap (FuncID_sigpanic)
++// and a deferred recover in that goroutine stops the panic.
++//
++// g.sigcode0 is ESR_EL1, g.sigcode1 FAR_EL1, g.sigpc ELR_EL1.
++
++const (
++	ecUnknown     = 0x00 // undefined instruction
++	ecInstrAbort  = 0x20 // from a lower EL
++	ecInstrAbortE = 0x21 // from the same EL
++	ecPCAlign     = 0x22
++	ecDataAbort   = 0x24
++	ecDataAbortE  = 0x25
++	ecSPAlign     = 0x26
++)
++
++func sigpanic() {
++	gp := getg()
++	if !canpanic() {
++		print("fault: esr=", hex(gp.sigcode0), " far=", hex(gp.sigcode1), " pc=", hex(gp.sigpc), "\n")
++		throw("unexpected fault during runtime execution")
++	}
++	switch gp.sigcode0 >> 26 & 0x3f {
++	case ecDataAbort, ecDataAbortE, ecInstrAbort, ecInstrAbortE:
++		if gp.sigcode1 < 0x1000 {
++			panicmem()
++		}
++		panicmemAddr(gp.sigcode1)
++	case ecPCAlign, ecSPAlign:
++		panic(errorString("unaligned PC or stack pointer"))
++	case ecUnknown:
++		panic(errorString("illegal instruction"))
++	}
++	print("fault: esr=", hex(gp.sigcode0), " far=", hex(gp.sigcode1), " pc=", hex(gp.sigpc), "\n")
++	throw("unexpected fault")
++}
++
++// tamagoFault (sigpanic_tamago_arm64.s) is entered from TamaGo's exception
++// vectors (github.com/usbarmory/tamago/arm64, fault_godeep.s).
++//
++//go:linkname tamagoFault
++func tamagoFault()
+diff --git a/src/runtime/sigpanic_tamago_arm64.s b/src/runtime/sigpanic_tamago_arm64.s
+new file mode 100644
+index 00000000..6d5f6689
+--- /dev/null
++++ b/src/runtime/sigpanic_tamago_arm64.s
+@@ -0,0 +1,39 @@
++// Copyright 2026 The godeep Authors. All rights reserved.
++// Use of this source code is governed by a BSD-style
++// license that can be found in the LICENSE file.
++
++//go:build tamago
++
++#include "go_asm.h"
++#include "textflag.h"
++
++// godeep: tamagoFault turns a synchronous exception taken from Go code at
++// EL1 into a call to sigpanic (sigpanic_tamago.go). A board's exception
++// vector jumps here, still inside the exception, on the faulting
++// goroutine's stack (g in R28), with
++//
++//	R0 = FAR_EL1, R1 = ELR_EL1 (faulting PC), R2 = ESR_EL1,
++//	R3 = SPSR_EL1, R30 = the interrupted code's LR.
++//
++// The exception is never returned from (no ERET): like a signal handler
++// that injects sigpanic, it continues in Go as if the faulting
++// instruction had called sigpanic.
++TEXT runtime·tamagoFault(SB),NOSPLIT|NOFRAME,$0
++	MOVD	R2, g_sigcode0(g)
++	MOVD	R0, g_sigcode1(g)
++	MOVD	R1, g_sigpc(g)
++	// Taking the exception masked interrupts: back to the interrupted
++	// code's mask (SPSR and DAIF keep D, A, I, F in bits 9:6).
++	AND	$0x3c0, R3, R3
++	MSR	R3, DAIF
++	// As sigctxt.preparePanic (signal_arm64.go): always save LR on the
++	// stack, so panics in leaf functions unwind, and a frame pointer below
++	// it; then make it look like the faulting PC called sigpanic (unless
++	// the PC is 0: a call through a nil func, whose caller is in LR).
++	SUB	$16, RSP
++	MOVD	R30, (RSP)
++	MOVD	R29, -8(RSP)
++	CBZ	R1, nopush
++	MOVD	R1, R30
++nopush:
++	B	runtime·sigpanic<ABIInternal>(SB)
 diff --git a/src/runtime/stubs_nontamago.go b/src/runtime/stubs_nontamago.go
 index d302f570..6f392e63 100644
 --- a/src/runtime/stubs_nontamago.go

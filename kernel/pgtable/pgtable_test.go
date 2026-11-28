@@ -45,12 +45,16 @@ func TestAppleM1Layout(t *testing.T) {
 	heapEnd := ram + 6<<30      // 6 GB of Go heap
 	dmaEnd := heapEnd + 512<<20 // 512 MB DMA region
 	b := &Builder{Mem: mem{}, ArenaNext: ram + 0x4000, ArenaEnd: text, Limit: dram + 16<<30}
+	must(t, b.Add(0, NilGuard, Unmapped))
 	must(t, b.Add(dram, ram, NormalNC)) // firmware/m1n1 RAM below godeep
 	must(t, b.Add(ram, textEnd, NormalExec))
 	must(t, b.Add(textEnd, heapEnd, Normal))
 	must(t, b.Add(heapEnd, dmaEnd, Normal))
 	must(t, b.Add(dmaEnd, dram+16<<30, NormalNC)) // framebuffer and firmware RAM above
 	run(t, b, []check{
+		{va: 0, fault: true},                            // nil
+		{va: NilGuard - 8, fault: true},                 // nil + offset
+		{va: NilGuard, attr: Device, level: 3},          // right after the guard
 		{va: 0x2_3510_0000, attr: Device, level: 1},     // SoC MMIO (first 512 GB, 1 GB block)
 		{va: dram, attr: NormalNC, level: 1},            // iBoot/m1n1 RAM below godeep: not ours
 		{va: ram, attr: NormalExec, level: 3},           // vectors
@@ -74,10 +78,14 @@ func TestQEMUVirtLayout(t *testing.T) {
 	const ram = 0x4000_0000
 	text, textEnd := uint64(ram+0xf000), uint64(ram+0xd8000)
 	b := &Builder{Mem: mem{}, ArenaNext: ram + 0x4000, ArenaEnd: text, Limit: 1 << 39}
+	must(t, b.Add(0, NilGuard, Unmapped))
 	must(t, b.Add(ram, textEnd, NormalExec))
 	must(t, b.Add(textEnd, ram+0xe000_0000, Normal))
 	must(t, b.Add(0x1_2000_0000, 0x1_4000_0000, Normal)) // DMA region
 	run(t, b, []check{
+		{va: 0, fault: true}, // nil (QEMU's flash is there)
+		{va: 0x1000, fault: true},
+		{va: NilGuard, attr: Device},
 		{va: 0x0900_0000, attr: Device}, // PL011
 		{va: ram, attr: NormalExec, level: 3},
 		{va: textEnd + 0x1000, attr: Normal, level: 3},
@@ -87,6 +95,8 @@ func TestQEMUVirtLayout(t *testing.T) {
 	})
 	if used := (b.ArenaNext - (ram + 0x4000)) / 4096; used > (text-ram-0x4000)/4096 {
 		t.Fatalf("arena overflow: %d tables", used)
+	} else {
+		t.Logf("%d of %d table pages", used, (text-ram-0x4000)/4096)
 	}
 }
 

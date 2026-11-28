@@ -29,6 +29,10 @@
 # it's used once it exists, else ~/tamago-go as is.
 TAMAGO_SRC ?= $(HOME)/tamago-go
 TAMAGO ?= $(if $(wildcard $(CURDIR)/bin/tamago-go/bin/go),$(CURDIR)/bin/tamago-go/bin/go,$(TAMAGO_SRC)/bin/go)
+# godeepruntime: the toolchain has the patch's CPU-fault panics
+# (runtime·tamagoFault), so third_party/tamago's vectors can use them.
+GODEEP_RUNTIME_TAG = $(if $(wildcard $(dir $(TAMAGO))../src/runtime/sigpanic_tamago_arm64.s),$(comma)godeepruntime)
+comma := ,
 ARCH   ?= arm64
 
 TAMAGO_ENV = GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=$(ARCH) GOEXPERIMENT=simd
@@ -129,7 +133,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: efiboot parallels-setup parallels check-parallels ssh-parallels wasm push hot check-usbnet check-pcie check-iommu check-hotplug check-linklocal test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
+.PHONY: check-crash check-desktop efiboot parallels-setup parallels check-parallels ssh-parallels wasm push hot check-usbnet check-pcie check-iommu check-hotplug check-linklocal test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
 
 # ---- SSH keys (development) ----
 # bin/ssh keeps them across builds: host_ed25519 is godeep's host key,
@@ -182,7 +186,7 @@ hosted: keys
 	./bin/godeep-hosted
 
 kernel: keys
-	$(TAMAGO_ENV) $(TAMAGO) build -tags "$(TAMAGO_TAGS)" -trimpath -ldflags "$(TAMAGO_LDFLAGS)" -o $(KERNEL) ./cmd/godeep
+	$(TAMAGO_ENV) $(TAMAGO) build -tags "$(TAMAGO_TAGS)$(GODEEP_RUNTIME_TAG)" -trimpath -ldflags "$(TAMAGO_LDFLAGS)" -o $(KERNEL) ./cmd/godeep
 
 image: kernel
 	go run ./tools/mkimage -ram $(RAM_BASE) -o $(IMAGE) $(KERNEL)
@@ -317,6 +321,8 @@ check-virt: wasm
 	@$(MAKE) -s check-linklocal
 	@$(MAKE) -s check-kexec
 	@$(MAKE) -s check-wm
+	@$(MAKE) -s check-desktop
+	@$(MAKE) -s check-crash
 
 # USB Ethernet (CDC ECM) as the only network: QEMU's usb-net on the xHCI,
 # DHCP and SSH over it. The Mac's USB-C gadget link will look like this
@@ -342,6 +348,22 @@ check-uas:
 # started (board/virt/smp.go), a CPU-bound program on as many goroutines
 # makes QEMU use more than (cores - 1.5) host cores, and the shell still
 # answers under that load.
+# CPU faults in a goroutine panic in it (third_party/tamago-go README: CPU
+# faults as panics): each kind of fault kills only its process, again and
+# again; a program recovers from one; 8000 recovered with GC running; then
+# timers and the shell still work. Needs bin/tamago-go (make tamago-go).
+check-crash:
+	@$(MAKE) -s image
+	@test -n "$(GODEEP_RUNTIME_TAG)" || { echo "check-crash: needs bin/tamago-go with the runtime patch (make tamago-go)"; exit 1; }
+	go run ./tools/qemucheck -log bin/qemucheck-crash.log -timeout 120s \
+	  -step 'crash panic=>panic: crash: on purpose' -step 'crash nil=>nil pointer dereference' \
+	  -step 'crash nil=>nil pointer dereference' -step 'crash write=>nil pointer dereference' \
+	  -step 'crash leaf=>nil pointer dereference' -step 'crash frame=>nil pointer dereference' \
+	  -step 'crash recover && echo rc0=>rc0' -step 'crash child=>nil pointer dereference' \
+	  -step 'crash storm=>4000 faults recovered' -step 'sleep 1 && echo slept=>slept' -step 'ps=>init' \
+	  -- $(QEMU) -name godeep-crash $(QEMU_FLAGS) -global virtio-mmio.force-legacy=false -device virtio-rng-device \
+	  -kernel $(BOOTFILE)
+
 check-smp:
 	@$(MAKE) -s image
 	go run ./tools/qemucheck -log bin/qemucheck-smp.log \
@@ -368,6 +390,20 @@ check-kexec:
 # the cascade puts them, and the pattern window follows a drag of its title
 # bar through the USB tablet (QMP; pauses between steps, since the tablet's
 # position and the mouse's button reach wm from different devices).
+# The desktop (programs/sh/desktop.go) on QEMU's virtio-gpu: one terminal
+# window, Night theme: the gradient's bottom, the focused title bar and the
+# terminal's background in a screendump (window at 36,64 on 1280x800).
+check-desktop:
+	@$(MAKE) -s image
+	@rm -f bin/qmp-desktop.sock
+	go run ./tools/qemucheck -log bin/qemucheck-desktop.log -qmp bin/qmp-desktop.sock \
+	  -step 'send:desktop -n 1 -t 60 &' -step 'local:sleep 2=>' \
+	  -step 'ps=>term1' \
+	  -step 'qmp:{"execute":"screendump","arguments":{"filename":"bin/check-desktop.png","device":"gpu0","format":"png"}}' \
+	  -step 'local:go run ./tools/pngpix bin/check-desktop.png 5,795 400,50 300,400=>#10111a #24283b #1a1b26' \
+	  -- $(QEMU) $(QEMU_FLAGS) $(QEMU_NET) -device qemu-xhci,id=xhci -device usb-tablet,bus=xhci.0,port=4 \
+	  -qmp unix:bin/qmp-desktop.sock,server=on,wait=off -kernel $(BOOTFILE)
+
 check-wm:
 	@$(MAKE) -s image
 	@rm -f bin/qmp-wm.sock

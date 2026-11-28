@@ -16,6 +16,16 @@
 #define DMA_SIZE 0x20000000		// mem.go
 #define EARLY_VECTORS 0x800		// early.go earlyVectors
 
+// Boot log (mem.go BOOTLOG_*, bootlog.go): the previous boot's half and
+// this boot's, in RAM that a warm reset keeps. One letter per step here:
+//   E entry  R running at the link address  H entered at EL2  V VHE
+//   L at EL1  F device tree copied  X early vectors  M MMU on  G Go runtime next
+#define BOOTLOG_PREV 0x1021ff00000
+#define BOOTLOG_CUR  0x1021ff01000
+#define BOOTLOG_MAGIC 0x474c544f4f424447	// "GDBOOTLG" (kernel/pstore.BootLogMagic64)
+#define RELOCATED 0x52454c4f			// in R23 when cpuinit restarts after relocation
+#define BOOTMARK(c) MOVD $c, R22; BL bootlog_mark(SB)
+
 // Link address of the Image (TEXT_START in the Makefile - 0x1000: the ELF
 // header page that the Image header replaces). Must match the Makefile
 // (BOARD=applem1) and mem.go.
@@ -41,6 +51,15 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 start:
 	ADR	start, R1		// where cpuinit is running (PC-relative)
 	MOVD	R0, R19			// device tree from the boot loader (or 0)
+
+	// The boot log, before anything else can go wrong (only once: the
+	// restart after relocation has R23 = RELOCATED).
+	MOVD	$RELOCATED, R2
+	CMP	R2, R23
+	BEQ	logged
+	BL	bootlog_init(SB)
+	BOOTMARK('E')
+logged:
 
 	// Self-relocation. Boot loaders don't all honour the Image's
 	// text_offset: m1n1 puts the kernel at any 2 MB-aligned address in
@@ -81,14 +100,17 @@ copied_image:
 	DSB	$15
 	ISB	$15
 	MOVD	R19, R0
+	MOVD	$RELOCATED, R23
 	B	(R2)			// restart at cpuinit's link address
 relocated:
+	BOOTMARK('R')
 	MOVD	$0, R21			// E2H seen at EL2 (bootE2H)
 	MRS	CurrentEL, R20
 	LSR	$2, R20, R20
 	AND	$3, R20, R20		// entry exception level
 	CMP	$2, R20
 	BNE	at_el1
+	BOOTMARK('H')
 
 	// EL2 -> EL1 (docs/TargetMyMac.md §3.2). No stage-2 translation, no
 	// traps, EL1 owns the timers and the GIC CPU interface.
@@ -110,6 +132,7 @@ relocated:
 	B	cptr
 vhe:
 	MOVD	$1, R21
+	BOOTMARK('V')
 	MOVD	$(3<<20), R0		// CPTR_EL2 (E2H=1, CPACR layout): FPEN=0b11
 cptr:
 	WORD	$0xd51c1140		// msr cptr_el2, x0
@@ -164,12 +187,14 @@ copied:
 	MOVD	$FDT_COPY, R1
 	MOVD	$·bootFDT(SB), R2
 	MOVD	R1, (R2)
+	BOOTMARK('F')
 no_fdt:
 	// SCTLR_EL1 to a known state: MMU, caches and alignment checks off,
 	// little-endian, RES1 bits set (the firmware's value is unknown).
 	MOVD	$0x30d00800, R0
 	MSR	R0, SCTLR_EL1
 	ISB	$15
+	BOOTMARK('L')
 
 	// Early exception vectors (early.go), until TamaGo's CPU.Init installs
 	// its own: 16 entries of "ldr x18, #8; br x18; .quad earlyFault" at
@@ -194,6 +219,7 @@ vec:
 	ISB	$15
 	MSR	R10, VBAR_EL1
 	ISB	$15
+	BOOTMARK('X')
 
 	// Early identity map, so Go code (the page-table builder in Hwinit0)
 	// runs on Normal memory: with the MMU off everything is Device memory
@@ -267,6 +293,7 @@ no_console:
 	ORR	$(1<<0), R0, R0		// MMU on
 	MSR	R0, SCTLR_EL1
 	ISB	$15
+	BOOTMARK('M')
 
 	// stack at the top of RAM, then start the Go runtime
 	MOVD	runtime∕goos·RamStart(SB), R1
@@ -275,4 +302,61 @@ no_console:
 	MOVD	runtime∕goos·RamStackOffset(SB), R2
 	ADD	R1, RSP
 	SUB	R2, RSP
+	BOOTMARK('G')
 	B	_rt0_tamago_start(SB)
+
+// bootlog_init keeps the previous boot's log (if this boot's half holds
+// one, it's the previous boot's: copy it to BOOTLOG_PREV) and starts an
+// empty one, then writes both halves back to memory: the MMU and caches
+// may be on or off here (m1n1's state, or ours), and a reset loses what
+// is only in a cache. Position-independent; uses R22-R26 and LR.
+TEXT bootlog_init(SB),NOSPLIT|NOFRAME,$0
+	MOVD	$BOOTLOG_CUR, R24
+	MOVD	$BOOTLOG_PREV, R25
+	MOVD	$BOOTLOG_MAGIC, R22
+	MOVD	(R24), R26
+	CMP	R22, R26
+	BNE	noprev
+	MOVD	$(0x1000/8), R26
+copyprev:
+	MOVD	(R24), R22
+	MOVD	R22, (R25)
+	ADD	$8, R24, R24
+	ADD	$8, R25, R25
+	SUB	$1, R26, R26
+	CBNZ	R26, copyprev
+	B	newlog
+noprev:
+	MOVD	ZR, (R25)		// no previous log
+newlog:
+	MOVD	$BOOTLOG_CUR, R24
+	MOVD	$BOOTLOG_MAGIC, R22
+	MOVD	R22, (R24)
+	MOVD	ZR, 8(R24)
+	DSB	$15
+	MOVD	$BOOTLOG_PREV, R24
+	MOVD	$(0x2000/64), R26
+flush:
+	WORD	$0xd50b7e38		// dc civac, x24
+	ADD	$64, R24, R24
+	SUB	$1, R26, R26
+	CBNZ	R26, flush
+	DSB	$15
+	RET
+
+// bootlog_mark appends the byte in R22 to this boot's log and writes it
+// back to memory. Position-independent; uses R22, R24-R26.
+TEXT bootlog_mark(SB),NOSPLIT|NOFRAME,$0
+	MOVD	$BOOTLOG_CUR, R24
+	MOVWU	8(R24), R25
+	AND	$0x7ff, R25, R26	// the entry code writes a few bytes: no need to check for the end
+	ADD	$16, R26, R26
+	ADD	R24, R26, R26
+	MOVB	R22, (R26)
+	ADD	$1, R25, R25
+	MOVW	R25, 8(R24)
+	DSB	$15
+	WORD	$0xd50b7e38		// dc civac, x24 (the count)
+	WORD	$0xd50b7e3a		// dc civac, x26 (the byte)
+	DSB	$15
+	RET

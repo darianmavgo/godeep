@@ -32,6 +32,14 @@ const (
 	// size before it's trusted.
 	PSTORE_SIZE = 0x100000
 	PSTORE_BASE = DMA_BASE + DMA_SIZE - PSTORE_SIZE
+
+	// Its first 8 KB hold the boot log (bootlog.go, kernel/pstore
+	// BootLog*): the previous boot's half, then this boot's, written from
+	// the first instruction of entry_arm64.s on (BOOTLOG_* there). The
+	// console record (pstore.Ring) gets the rest.
+	BOOTLOG_PREV = PSTORE_BASE
+	BOOTLOG_CUR  = PSTORE_BASE + 0x1000
+	BOOTLOG_SIZE = 0x2000
 )
 
 //go:linkname ramStart runtime/goos.RamStart

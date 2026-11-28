@@ -142,6 +142,10 @@ func startSMP(root *fdt.Node) {
 			failed = append(failed, fmt.Sprintf("%#x: no release address", c.aff))
 			continue
 		}
+		blog("smp: core ")
+		blogHex(c.aff)
+		blog(" release at ")
+		blogHex(c.release)
 		smpMPIDR[n] = c.aff
 		// the core looks itself up in smpMPIDR and reads smpBoot with
 		// its MMU off: both must be in memory, not just in our cache
@@ -158,6 +162,11 @@ func startSMP(root *fdt.Node) {
 				alive = true
 				break
 			}
+		}
+		if alive {
+			blog(": up\n")
+		} else {
+			blog(": didn't start\n")
 		}
 		if !alive {
 			// it may still come up later and wait on its slot: leave the
@@ -187,6 +196,9 @@ func startSMP(root *fdt.Node) {
 	goos.ProcID = procID
 	goos.Task = task
 	goos.Wake = wake
+	blog("smp: GOMAXPROCS ")
+	blogDec(uint64(alive))
+	blog("\n")
 	runtime.GOMAXPROCS(int(alive))
 	smpInfo = fmt.Sprintf("%d of %d cores", alive, len(cpus)+others)
 	if len(failed) > 0 {

@@ -46,8 +46,9 @@ func hwinit0() {
 	pt = pgtable.Builder{Mem: &pm, ArenaNext: ramStart + tableArena, ArenaEnd: textStart &^ 0xfff, Limit: 1 << 39}
 	// A framebuffer below RAM (Parallels' GOP at 512 MB) as Normal
 	// non-cacheable: as Device, Go's unaligned and vector stores fault.
-	// Regions go in address order.
-	if e, ok := scanEarly(); ok && e.HasFB && e.FB.Size > 0 && e.FB.Base+e.FB.Size <= ramStart {
+	// Regions go in address order. First the nil guard: page 0 must fault.
+	check(pt.Add(0, pgtable.NilGuard, pgtable.Unmapped))
+	if e, ok := scanEarly(); ok && e.HasFB && e.FB.Size > 0 && e.FB.Base >= pgtable.NilGuard && e.FB.Base+e.FB.Size <= ramStart {
 		check(pt.Add(e.FB.Base&^0xfff, (e.FB.Base+e.FB.Size+0xfff)&^0xfff, pgtable.NormalNC))
 	}
 	check(pt.Add(ramStart, textEnd, pgtable.NormalExec)) // vectors + kernel code

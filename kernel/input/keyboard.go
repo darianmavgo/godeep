@@ -54,6 +54,9 @@ func (d *Keyboard) State(mods byte, keys []byte, now time.Time) {
 			d.caps = !d.caps
 			continue
 		}
+		if mods&(ModLGUI|ModRGUI) != 0 {
+			continue // Super (Command) combinations are shortcuts, not text: events only
+		}
 		if b := d.layout.get().translate(k, mods, d.caps); len(b) > 0 {
 			if d.Emit != nil {
 				d.Emit(b)

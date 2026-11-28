@@ -22,8 +22,12 @@ const History = 2000
 // All methods are safe for concurrent use (output, printk and the mouse
 // arrive from different goroutines).
 type Console struct {
-	mu           sync.Mutex
-	fb           *Framebuffer
+	mu     sync.Mutex
+	fb     *Framebuffer // where drawing goes: the screen, or a shadow while suspended
+	screen *Framebuffer // the real framebuffer while suspended (display.go); nil otherwise
+
+	dispOnce     sync.Once
+	disp         *display
 	scale        int
 	cw, ch       int // character cell in pixels
 	cols         int
@@ -534,6 +538,9 @@ func (c *Console) Status() string {
 	}
 	if c.sel {
 		s += fmt.Sprintf(", %d characters selected", len(c.selectionText()))
+	}
+	if c.screen != nil {
+		s += ", screen lent to a compositor"
 	}
 	return s
 }

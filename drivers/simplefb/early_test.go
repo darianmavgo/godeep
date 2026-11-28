@@ -115,3 +115,18 @@ func TestEarlyNoAllocs(t *testing.T) {
 		t.Fatalf("early drawing allocates (%v per run); it must not", n)
 	}
 }
+
+func TestEarlyTextCase(t *testing.T) {
+	fbU, u := newEarly(t, 200, 20, X8R8G8B8)
+	fbL, l := newEarly(t, 200, 20, X8R8G8B8)
+	u.Text(1, 1, 1, "SMP: CORE 0X101 (OK)", 0xffffff)
+	l.Text(1, 1, 1, "smp: core 0x101 (ok)", 0xffffff)
+	if string(fbU.Pix) != string(fbL.Pix) {
+		t.Fatal("lower case isn't drawn as upper case")
+	}
+	for _, c := range "JKQZ.,()/?+_>" {
+		if font5x7[c] == [7]uint8{} {
+			t.Errorf("no glyph for %q", c)
+		}
+	}
+}

@@ -16,9 +16,13 @@ var CPU = &arm64.CPU{TimerOffset: 1}
 //
 //go:linkname Init runtime/goos.Hwinit1
 func Init() {
+	blog("hwinit1: cpu")
 	CPU.Init()
+	blog(", caches")
 	CPU.EnableCache()
+	blog(", timers")
 	CPU.InitGenericTimers(0, 0) // 24 MHz, programmed by the firmware
+	blog("\n")
 
 	// CPU.Init installed TamaGo's vectors over the early ones: keep the
 	// fault screen until the console exists (early.go).
@@ -27,6 +31,7 @@ func Init() {
 
 	// Idle in WFE, woken by the timer event stream (idle.go).
 	initIdle()
+	blog("idle: wfe\n")
 
 	// No PSCI: halt (and a fatal runtime error) stops here, with the
 	// watchdog disarmed so the screen stays (hold the power button).

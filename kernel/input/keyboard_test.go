@@ -156,3 +156,27 @@ func TestLayouts(t *testing.T) {
 		t.Fatalf("typed %q in %s", out, k.Layout())
 	}
 }
+
+// Super (Command) combinations are shortcuts: key events, no text.
+func TestSuperTypesNothing(t *testing.T) {
+	var out []byte
+	b := &Broadcaster{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ev := b.Subscribe(ctx)
+	d := Keyboard{Emit: func(p []byte) { out = append(out, p...) }, Events: b}
+	now := time.Now()
+	d.State(ModLGUI, []byte{0x28}, now) // Super+Return
+	d.State(0, nil, now)
+	d.State(0, []byte{0x04}, now) // a
+	if string(out) != "a" {
+		t.Fatalf("typed %q, want only \"a\"", out)
+	}
+	if e := <-ev; e.Kind != KeyDown || e.Code != 0x28 || e.Mods != ModLGUI {
+		t.Fatalf("first event %v, want Super+Return down", e)
+	}
+	d.Tick(now.Add(time.Second)) // no repeat of the Super combination
+	if string(out) != "a" && string(out) != "aa" {
+		t.Fatalf("after tick: %q", out)
+	}
+}

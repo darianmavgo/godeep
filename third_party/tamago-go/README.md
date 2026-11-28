@@ -35,3 +35,25 @@ Measured on QEMU virt, HVF, 4 cores, with board/virt's boot-core SGI fix
 Not done: preempting a goroutine that never yields (that needs a timer
 interrupt on every core; secondaries run with IRQs masked). Some wake-ups
 are still lost under load; board/virt's 100 ms `maxIdle` bounds them.
+
+## CPU faults as panics (sigpanic_tamago*.go/.s)
+
+On TamaGo a CPU fault (a nil pointer read: a data abort) went to TamaGo's
+exception handler, which panicked from a frame the unwinder doesn't know
+and left IRQs masked; the second fault in a boot halted the machine. The
+patch adds what the signal-based ports have:
+
+- `runtime.sigpanic` for tamago/arm64: `invalid memory address or nil
+  pointer dereference` (a `runtime.Error`) for aborts, a panic for alignment
+  faults and undefined instructions, and a throw when the fault hit the
+  runtime itself (`canpanic`).
+- `runtime·tamagoFault` (pushed with `//go:linkname` for TamaGo's vectors):
+  records ESR/FAR/ELR in `g`, restores the interrupted code's DAIF, arranges
+  the stack as `sigctxt.preparePanic` does, and branches to sigpanic, so the
+  faulting frame is unwound as trapped (`FuncID_sigpanic`).
+
+third_party/tamago's vectors use it with the `godeepruntime` build tag
+(set by the Makefile when the toolchain has these files) and the board's
+`arm64.FaultPanics`. Tested: `make check-crash` (seven kinds of fault in a
+row, a self-recovered fault, 8000 faults recovered with GC running on 1
+and 4 cores). See docs/UnderstandingGoRoutineFailure.md.

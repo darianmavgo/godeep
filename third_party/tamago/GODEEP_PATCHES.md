@@ -23,3 +23,11 @@ Vendored from `github.com/usbarmory/tamago@v1.27.4` (see `replace` in godeep's g
    from 512 to 2048 bytes for the hook's frames.
 
 All of them are candidates to send upstream (3 perhaps as a per-board setting).
+
+5. `arm64/exception.go`, `exception.s`, `fault_godeep.s`, `fault_stock.s`:
+   `FaultPanics`. With it set (by the board) and godeep's runtime patch
+   (build tag `godeepruntime`, `runtime·tamagoFault`), a synchronous fault
+   taken in a goroutine (data/instruction abort, alignment, undefined
+   instruction) becomes a Go panic in that goroutine instead of a call to
+   `SystemExceptionHandler`; SError and faults with no g still go there.
+   See ../tamago-go/README.md.

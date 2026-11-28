@@ -177,3 +177,99 @@ func TestManyClients(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func startWith(t *testing.T, opt Options) (*Manager, *fakeDisplay, context.Context) {
+	ctx, cancel := context.WithCancel(context.Background())
+	d := &fakeDisplay{}
+	m := NewWith(d, opt)
+	done := make(chan error)
+	go func() { done <- m.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return m, d, ctx
+}
+
+func TestNightCloseButtonAndHooks(t *testing.T) {
+	th, err := Night(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make(chan input.Event, 4)
+	clicks := make(chan image.Point, 4)
+	m, d, ctx := startWith(t, Options{Theme: th,
+		Keys: func(e input.Event) bool {
+			if e.Mods&input.ModLGUI != 0 {
+				keys <- e
+				return true
+			}
+			return false
+		},
+		Desktop: func(p image.Point) { clicks <- p },
+	})
+	w, err := m.NewWindow(ctx, "term 1", 200, 120)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gpu.Fill(w, w.Bounds(), green)
+	w.Present(ctx, w.Bounds())
+	pw, _ := w.Position()
+	eventually(t, "window shown", func() bool { return d.at(pw.X+100, pw.Y+60) == green })
+	if m.Focused(ctx) != w {
+		t.Fatal("new window not focused")
+	}
+	to := func(p image.Point) input.Event {
+		return input.Event{Kind: input.Absolute, X: int32(p.X * input.AbsMax / 639), Y: int32(p.Y * input.AbsMax / 479)}
+	}
+	click := func(p image.Point) {
+		m.Input(to(p))
+		m.Input(input.Event{Kind: input.Button, Code: 0, Down: true})
+		m.Input(input.Event{Kind: input.Button, Code: 0, Down: false})
+	}
+
+	// the close button only asks; the window stays until its owner acts
+	var cb image.Rectangle
+	m.do(ctx, func() { cb = w.closeBox() })
+	if cb.Empty() {
+		t.Fatal("Night has no close button")
+	}
+	if c := d.at(cb.Min.X+cb.Dx()/2, cb.Min.Y+cb.Dy()/2); c == th.TitleFocus {
+		t.Fatal("close button not drawn")
+	}
+	click(cb.Min.Add(cb.Size().Div(2)))
+	select {
+	case <-w.CloseRequests():
+	case <-time.After(2 * time.Second):
+		t.Fatal("no close request")
+	}
+	if p, _ := w.Position(); p != pw {
+		t.Fatal("clicking close dragged the window")
+	}
+
+	// Super keys go to the hook, others to the focused window
+	m.Input(input.Event{Kind: input.KeyDown, Code: 0x28, Mods: input.ModLGUI})
+	m.Input(input.Event{Kind: input.KeyDown, Code: 0x04})
+	if e := <-keys; e.Code != 0x28 {
+		t.Fatalf("hook got %v", e)
+	}
+	if e := <-w.Events(); e.Kind != input.KeyDown || e.Code != 0x04 {
+		t.Fatalf("window got %v", e)
+	}
+
+	// a click on the empty desktop reaches the Desktop hook
+	click(image.Pt(600, 450))
+	select {
+	case p := <-clicks:
+		if p.X < 590 || p.Y < 440 {
+			t.Fatalf("desktop click at %v", p)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no desktop click")
+	}
+
+	if err := w.SetTitle(ctx, "renamed"); err != nil {
+		t.Fatal(err)
+	}
+	// the background is a gradient: top and bottom differ
+	if d.at(600, 2) == d.at(600, 470) {
+		t.Fatal("no gradient")
+	}
+}

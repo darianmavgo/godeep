@@ -28,6 +28,13 @@ const (
 	// up to 1.6 s. Costs 10 wake-ups/s per idle core.
 	maxIdle = 100_000_000 // 100 ms
 
+	// Deadlines closer than 1/minWFI s (50 µs) aren't slept on: the
+	// scheduler loops instead. Under QEMU HVF, a WFI whose virtual timer
+	// had already fired when it ran (armed for a few ticks) wasn't woken by
+	// it: the core slept until some other interrupt, 15 s and more, and
+	// every Go timer with it (make check-linklocal hung ~1 run in 10,
+	// with stock TamaGo too; found 2026-11-28 by timing each WFI).
+	minWFI = 20_000
 )
 
 // GIC's initializer must stay constant (static data): Hwinit1 runs before
@@ -85,7 +92,7 @@ func idle(until int64) {
 		d = min(d, maxIdle)
 	}
 	ticks := uint64(d) * read_cntfrq() / 1e9
-	if ticks == 0 {
+	if ticks < read_cntfrq()/minWFI {
 		return
 	}
 	write_cntv_tval(ticks)

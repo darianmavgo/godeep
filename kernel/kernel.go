@@ -88,6 +88,12 @@ type Board struct {
 	// Pstore is the console record kept across resets (the board copies
 	// console and runtime output into it). nil: none.
 	Pstore *pstore.Ring
+	// BootLog and PrevBootLog are this boot's and the previous boot's
+	// earliest steps, for boards that record them before the console
+	// exists (board/applem1). Kept as ram:/bootlog.txt and
+	// ram:/bootlog.prev.txt; the previous one also goes in the kernel log
+	// (so logd saves it to the LogLabel volume). "": none.
+	BootLog, PrevBootLog string
 	// NetWait is how long netd waits for a network device at boot: 0 means
 	// 10 s, negative forever (a USB Ethernet adapter plugged in later).
 	NetWait time.Duration
@@ -125,6 +131,7 @@ func Boot(ctx context.Context, b Board) error {
 	defer env.TTY.Close()
 	env.Log = klog.New(env.TTY, 0)
 	env.Log.Record([]byte(banner))
+	saveBootLogs(ctx, env, b)
 	crash := b.Pstore.Crash()
 	if crash != nil {
 		if v, err := env.FS.Open(ctx, "ram"); err == nil {
@@ -237,6 +244,27 @@ func Boot(ctx context.Context, b Board) error {
 // crashFile is where a crashed boot's last console output goes: in ram:
 // and, through logd, on the data volume.
 const crashFile = "crash.txt"
+
+// saveBootLogs keeps the board's boot logs in ram: and logs the previous
+// boot's.
+func saveBootLogs(ctx context.Context, env sh.Env, b Board) {
+	if b.BootLog == "" && b.PrevBootLog == "" {
+		return
+	}
+	if v, err := env.FS.Open(ctx, "ram"); err == nil {
+		if w, ok := v.(vfs.Writable); ok {
+			if b.BootLog != "" {
+				w.WriteFile("bootlog.txt", []byte(b.BootLog))
+			}
+			if b.PrevBootLog != "" {
+				w.WriteFile("bootlog.prev.txt", []byte(b.PrevBootLog))
+			}
+		}
+	}
+	if b.PrevBootLog != "" {
+		env.Log.Printf("bootlog: the previous boot's earliest steps (ram:/bootlog.prev.txt):\n%s", b.PrevBootLog)
+	}
+}
 
 func prevNote(r *pstore.Ring) string {
 	_, clean, ok := r.Previous()

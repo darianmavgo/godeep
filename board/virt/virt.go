@@ -55,6 +55,10 @@ func Init() {
 	// The hypervisor programs CNTFRQ; just derive the ns multiplier from it.
 	CPU.InitGenericTimers(0, 0)
 	UART0.Init()
+	// A fault in a goroutine (nil pointer, bad address) panics in that
+	// goroutine, so p.Go's recover kills its process, not the kernel
+	// (docs/UnderstandingGoRoutineFailure.md). Needs bin/tamago-go.
+	arm64.FaultPanics = true
 
 	// The DMA region is mapped as normal memory by mmu.go (Hwinit0).
 

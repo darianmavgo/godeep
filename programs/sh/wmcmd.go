@@ -34,19 +34,9 @@ func wmCmd(ctx context.Context, env Env, p *proc.Proc, args []string) error {
 	} else if len(args) > 1 {
 		return errors.New("usage: wm [SECONDS]")
 	}
-	if env.Dev == nil {
-		return errors.New("no devices")
-	}
-	var d gpu.Display
-	var name string
-	for _, s := range env.Dev.List() {
-		if g, ok := s.Service.(gpu.Display); ok && s.State == dev.Ready {
-			d, name = g, s.Name
-			break
-		}
-	}
-	if d == nil {
-		return errors.New("no display (QEMU: -device virtio-gpu-device)")
+	d, name, err := findDisplay(env) // a GPU before the console's framebuffer
+	if err != nil {
+		return err
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()

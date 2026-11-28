@@ -185,8 +185,10 @@ func configureNodes(root *fdt.Node, nodes []dev.Node, keys chan<- byte) (extra [
 			}
 		case agx.Compatible:
 			n.Name = "gpu0"
-			if !bootArg(root, "godeep.agx") {
-				n.Config = errors.New("agx: off (godeep.agx in bootargs turns it on)")
+			// On by default, like everything built (godeep.agx, the old
+			// opt-in, is still accepted); godeep.noagx turns it off.
+			if bootArg(root, "godeep.noagx") {
+				n.Config = errors.New("agx: off (godeep.noagx in bootargs)")
 			} else if c, err := agx.ConfigFromFDT(fn); err != nil {
 				n.Config = err
 			} else {

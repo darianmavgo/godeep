@@ -73,6 +73,14 @@ func leafBits(a Attr) uint64 {
 	}
 }
 
+// NilGuard is the size of the range at address 0 that boards leave
+// Unmapped. Go's nil checks are loads that must fault: the compiler drops
+// explicit checks for field and index offsets below 4 KB, relying on the
+// zero page faulting. Mapped (QEMU virt's flash, or Device memory on the
+// Mac), a nil read returns garbage, or takes the whole machine down with an
+// SError, instead of panicking in the goroutine that did it.
+const NilGuard = 0x10000
+
 // Memory is where tables are written (physical memory with the MMU off).
 type Memory interface {
 	Read64(addr uint64) uint64

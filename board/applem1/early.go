@@ -10,6 +10,7 @@ import (
 
 	"godeep/drivers/simplefb"
 	"godeep/kernel/fdt"
+	"godeep/kernel/pstore"
 )
 
 // Boot stages, drawn as numbered squares along the top of m1n1's framebuffer
@@ -70,6 +71,9 @@ const testFaultAddr = 0x3ff_dead_0000
 //go:nosplit
 func stage(n int) {
 	bootStage = n
+	blog("stage ")
+	blogDec(uint64(n))
+	blog("\n")
 	screen.Mark(n)
 	if n == testFaultAt {
 		read64(testFaultAddr)
@@ -95,25 +99,59 @@ func parseTestFault(args []byte) int {
 // fault screen work before the final tables exist.
 func earlyScreen() {
 	if bootFDT == 0 {
+		blog("fdt: none from the loader (or not valid)\n")
 		return
 	}
 	hdr := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(bootFDT))), 8)
 	size := uint32(hdr[4])<<24 | uint32(hdr[5])<<16 | uint32(hdr[6])<<8 | uint32(hdr[7])
+	blog("fdt: ")
+	blogDec(uint64(size))
+	blog(" bytes\n")
 	if size > FDT_RESERVE {
+		blog("fdt: too big\n")
 		return
 	}
 	e := fdt.ScanEarly(unsafe.Slice((*byte)(unsafe.Pointer(uintptr(bootFDT))), size))
 	uartBase = e.UART
 	testFaultAt = parseTestFault(e.Bootargs)
-	if !e.HasFB || !mapEarly(e.FB.Base, e.FB.Size) {
+	if len(e.Bootargs) > 0 {
+		blog("bootargs: ")
+		blog(unsafe.String(unsafe.SliceData(e.Bootargs), len(e.Bootargs)))
+		blog("\n")
+	}
+	if !e.HasFB {
+		blog("fb: none in the tree\n")
+		return
+	}
+	blog("fb: ")
+	blogHex(e.FB.Base)
+	blog(" size ")
+	blogHex(e.FB.Size)
+	blog(" ")
+	blogDec(uint64(e.FB.Width))
+	blog("x")
+	blogDec(uint64(e.FB.Height))
+	blog(" stride ")
+	blogDec(uint64(e.FB.Stride))
+	blog(" ")
+	blog(unsafe.String(unsafe.SliceData(e.FB.Format), len(e.FB.Format)))
+	blog("\n")
+	if !mapEarly(e.FB.Base, e.FB.Size) {
+		blog("fb: outside the RAM it can be mapped from\n")
 		return
 	}
 	pix := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(e.FB.Base))), e.FB.Size)
 	s, ok := simplefb.NewEarly(pix, int(e.FB.Width), int(e.FB.Height), int(e.FB.Stride), e.FB.Format)
 	if !ok {
+		blog("fb: format or geometry not supported\n")
 		return
 	}
 	screen = s
+	// what was logged before there was a screen, then the previous boot's
+	if text, _, ok := pstore.BootLogText(bootlogHalf(BOOTLOG_CUR)); ok {
+		screenLog(unsafe.String(unsafe.SliceData(text), len(text)), false)
+	}
+	screenPrevLog()
 	stage(StageGo)
 }
 
@@ -162,6 +200,9 @@ func lateFault(pc uintptr) {
 
 // uartPut writes to the PL011 that QEMU's m1n1 stand-in describes, so the
 // console is mirrored to the terminal there. The Mac's tree has none.
+// nosplit: the boot log calls it from Hwinit0 (no goroutine yet).
+//
+//go:nosplit
 func uartPut(c byte) {
 	if !uartReady {
 		return

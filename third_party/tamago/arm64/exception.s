@@ -9,6 +9,11 @@
 #include "textflag.h"
 
 TEXT ·handleException(SB),NOSPLIT|NOFRAME,$0
+	// godeep: a fault a goroutine caused becomes a Go panic in that
+	// goroutine (faultPanic, fault_*.s); it returns only if not.
+	MOVD	R30, R4
+	BL	·faultPanic(SB)
+	MOVD	R4, R30
 	MRS	ELR_EL1, R0
 	MOVD	R0, 8(RSP)	// arg
 	JMP	·systemException(SB)
