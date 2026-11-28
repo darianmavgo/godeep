@@ -23,4 +23,14 @@ func psciPowerOff() {
 	}
 }
 
-func psciCall4(fn, a1, a2, a3 uint64) uint64 // defined in psci_arm64.s
+// defined in psci_arm64.s
+func psciCall4(fn, a1, a2, a3 uint64) uint64
+func psciCall4SMC(fn, a1, a2, a3 uint64) uint64
+
+// psci4 calls PSCI with three arguments over the tree's conduit.
+func psci4(fn, a1, a2, a3 uint64) uint64 {
+	if psciMethod == "smc" {
+		return psciCall4SMC(fn, a1, a2, a3)
+	}
+	return psciCall4(fn, a1, a2, a3)
+}

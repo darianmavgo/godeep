@@ -47,6 +47,7 @@ type RTKit struct {
 	endpoints map[uint8]bool        // advertised by firmware
 	apps      map[uint8]chan uint64 // started application endpoints
 	buffers   map[uint8]*dma.Buffer // shared buffers by endpoint
+	iovas     map[uint8]uint64      // where each is mapped for the coprocessor
 	syslog    struct{ entries, size int }
 	err       error
 	iopState  int           // last IOP power state the firmware acknowledged (-1: none yet)
@@ -60,7 +61,7 @@ type RTKit struct {
 func New(name string, mbox Mailbox, alloc *dma.Allocator, iommu dma.IOMMU) *RTKit {
 	return &RTKit{Name: name, mbox: mbox, alloc: alloc, iommu: iommu,
 		booted:    make(chan struct{}),
-		endpoints: map[uint8]bool{}, apps: map[uint8]chan uint64{}, buffers: map[uint8]*dma.Buffer{},
+		endpoints: map[uint8]bool{}, apps: map[uint8]chan uint64{}, buffers: map[uint8]*dma.Buffer{}, iovas: map[uint8]uint64{},
 		iopState: -1, apState: -1, pwrChange: make(chan struct{})}
 }
 
@@ -222,7 +223,7 @@ func (r *RTKit) buffer(ep uint8, size int) (uint64, error) {
 		return 0, err
 	}
 	r.mu.Lock()
-	r.buffers[ep] = b
+	r.buffers[ep], r.iovas[ep] = b, io
 	r.mu.Unlock()
 	return io, nil
 }
@@ -282,10 +283,11 @@ func (r *RTKit) freeBuffers() {
 	defer r.mu.Unlock()
 	for ep, b := range r.buffers {
 		if r.iommu != nil {
-			r.iommu.Unmap(b.Phys, b.Size())
+			r.iommu.Unmap(r.iovas[ep], b.Size()) // the IOVA, not the physical address
 		}
 		b.Free()
 		delete(r.buffers, ep)
+		delete(r.iovas, ep)
 	}
 }
 

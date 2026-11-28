@@ -50,7 +50,9 @@ var (
 	evntPeriod uint64 // event stream period, counter ticks
 	idleBase   uint64 // counter when idle accounting started
 	idleTicks  atomic.Uint64
-	idleWakes  atomic.Uint64
+	// per core (dev.CPULoad), indexed like smpWoken
+	coreIdleTicks [maxCPUs]uint64
+	idleWakes     atomic.Uint64
 )
 
 // initIdle turns on the event stream, about one event per millisecond or
@@ -76,7 +78,8 @@ func idle(until int64) {
 	}
 	c0 := read_cntvct()
 	var n uint64
-	woken := &smpWoken[coreIndex()]
+	core := coreIndex()
+	woken := &smpWoken[core]
 	for nanotime() < end {
 		if atomic.SwapUint32(woken, 0) != 0 {
 			break // goos.Wake: there's work for this core
@@ -84,8 +87,22 @@ func idle(until int64) {
 		wfe()
 		n++
 	}
-	idleTicks.Add(read_cntvct() - c0)
+	d := read_cntvct() - c0
+	idleTicks.Add(d)
+	atomic.AddUint64(&coreIdleTicks[core], d)
 	idleWakes.Add(n)
+}
+
+// CPUIdle is each core's time in the idle loop since boot (dev.CPULoad).
+func (idleStats) CPUIdle() []time.Duration {
+	n := max(1, int(atomic.LoadUint32(&smpN)))
+	freq := read_cntfrq()
+	out := make([]time.Duration, min(n, maxCPUs))
+	for i := range out {
+		t := atomic.LoadUint64(&coreIdleTicks[i])
+		out[i] = time.Duration(t/freq*1e9 + t%freq*1e9/freq)
+	}
+	return out
 }
 
 // idleStats is lsdev's view of the idle loop. If WFE didn't sleep, the

@@ -45,7 +45,20 @@ func (b *Buffer) Size() int { return b.size }
 // Free returns the buffer to its allocator. It panics on double free: that
 // would mean two owners, which is a bug that corrupts device memory.
 func (b *Buffer) Free() {
+	if b.a == nil {
+		panic(fmt.Sprintf("dma: Free of a view at %#x: free the buffer it came from", b.Phys))
+	}
 	b.a.free(b)
+}
+
+// View is bytes [off, off+n) of b as a Buffer of its own that shares b's
+// memory: for one allocation a device wants laid out in parts (a legacy
+// virtqueue's rings, page-aligned within one block). Free b, never a view.
+func (b *Buffer) View(off, n int) *Buffer {
+	if off < 0 || n < 0 || off+n > len(b.Bytes) {
+		panic(fmt.Sprintf("dma: view [%d, %d) of a %d-byte buffer", off, off+n, len(b.Bytes)))
+	}
+	return &Buffer{Phys: b.Phys + uint64(off), Bus: b.Bus + uint64(off), Bytes: b.Bytes[off : off+n : off+n], size: n}
 }
 
 type span struct{ off, size int }

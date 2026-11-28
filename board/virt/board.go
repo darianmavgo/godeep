@@ -111,6 +111,11 @@ func NewBoard() kernel.Board {
 	startSMP()
 	nodes, source := devices()
 	noteVirtio(nodes)
+	for _, n := range nodes {
+		if n.Compatible == "arm,pl011" && len(n.Reg) > 0 && uintptr(n.Reg[0].Base) == UART0.Base && len(n.IRQ) > 0 {
+			uart0IRQ = n.IRQ[0]
+		}
+	}
 	// The first FDT_RESERVE bytes hold the boot device tree (entry_arm64.s).
 	alloc := dma.New(dma.Region{
 		Base: DMA_BASE + FDT_RESERVE,
@@ -153,6 +158,16 @@ const fbWidth, fbHeight = 1280, 800
 // framebuffer sets up a console on QEMU's ramfb (-device ramfb), through
 // the fw_cfg device in the tree. No ramfb: nil and no note.
 func framebuffer(nodes []dev.Node, a *dma.Allocator) (*simplefb.Console, string) {
+	if hasFB { // the loader's (Parallels: UEFI GOP), mapped by hwinit0
+		f := earlyFB
+		c, err := simplefb.NewConsole(&simplefb.Framebuffer{
+			Pix:   unsafe.Slice((*byte)(unsafe.Pointer(uintptr(f.Base))), f.Size),
+			Width: int(f.Width), Height: int(f.Height), Stride: int(f.Stride), Format: simplefb.Format(f.Format)}, 0)
+		if err != nil {
+			return nil, "framebuffer: " + err.Error()
+		}
+		return c, fmt.Sprintf("framebuffer %dx%d %s console", f.Width, f.Height, f.Format)
+	}
 	for _, n := range nodes {
 		if n.Compatible != fwcfg.Compatible || len(n.Reg) == 0 {
 			continue

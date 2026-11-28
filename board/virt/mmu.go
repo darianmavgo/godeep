@@ -35,12 +35,21 @@ const tableArena = 0x4000 // tables from RamStart+16 KB up to the kernel text (a
 //go:linkname hwinit0 runtime/goos.Hwinit0
 func hwinit0() {
 	fp_enable()
+	if e, ok := scanEarly(); ok && e.UART != 0 {
+		UART0.Base = uintptr(e.UART) // for check's messages
+	}
 
 	ramStart, ramEnd := runtime.MemRegion()
 	textStart, textEnd := runtime.TextRegion()
 	textEnd = (textEnd + 0xfff) &^ 0xfff
 
 	pt = pgtable.Builder{Mem: &pm, ArenaNext: ramStart + tableArena, ArenaEnd: textStart &^ 0xfff, Limit: 1 << 39}
+	// A framebuffer below RAM (Parallels' GOP at 512 MB) as Normal
+	// non-cacheable: as Device, Go's unaligned and vector stores fault.
+	// Regions go in address order.
+	if e, ok := scanEarly(); ok && e.HasFB && e.FB.Size > 0 && e.FB.Base+e.FB.Size <= ramStart {
+		check(pt.Add(e.FB.Base&^0xfff, (e.FB.Base+e.FB.Size+0xfff)&^0xfff, pgtable.NormalNC))
+	}
 	check(pt.Add(ramStart, textEnd, pgtable.NormalExec)) // vectors + kernel code
 	check(pt.Add(textEnd, ramEnd, pgtable.Normal))       // Go heap, stack
 	check(pt.Add(DMA_BASE, DMA_BASE+DMA_SIZE, pgtable.Normal))
@@ -50,13 +59,16 @@ func hwinit0() {
 
 }
 
-// check halts with a message on the UART (it works with the MMU off).
+// check halts with a message on the UART (it works with the MMU off). No
+// allocation: this runs before the heap exists.
 func check(err error) {
 	if err == nil {
 		return
 	}
-	for _, c := range []byte("godeep: MMU setup failed: " + err.Error() + "\r\n") {
-		UART0.Tx(c)
+	for _, s := range [...]string{"godeep: MMU setup failed: ", err.Error(), "\r\n"} {
+		for i := 0; i < len(s); i++ {
+			UART0.Tx(s[i])
+		}
 	}
 	for {
 	}

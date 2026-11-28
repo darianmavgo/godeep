@@ -130,3 +130,36 @@ func TestTranslatedView(t *testing.T) {
 		t.Fatalf("not fully freed: %+v", s)
 	}
 }
+
+func TestView(t *testing.T) {
+	a := newTest(1 << 16)
+	b, err := a.Alloc(8192, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := b.View(4096, 100)
+	if v.Phys != b.Phys+4096 || v.Bus != b.Bus+4096 || len(v.Bytes) != 100 || cap(v.Bytes) != 100 {
+		t.Fatalf("view: phys %#x bus %#x len %d cap %d", v.Phys, v.Bus, len(v.Bytes), cap(v.Bytes))
+	}
+	v.Store32(0, 0xdeadbeef)
+	if b.Load32(4096) != 0xdeadbeef {
+		t.Fatal("view doesn't share the buffer's memory")
+	}
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("freeing a view didn't panic")
+			}
+		}()
+		v.Free()
+	}()
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("a view past the end didn't panic")
+			}
+		}()
+		b.View(8000, 200)
+	}()
+	b.Free()
+}

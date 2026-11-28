@@ -22,6 +22,11 @@ type Config struct {
 	// Firmware is the version iBoot loaded; Compat the structure layout
 	// it speaks ("apple,firmware-version", "apple,firmware-compat").
 	Firmware, Compat [3]uint32
+	// Pwr is the power configuration (operating points, control loops).
+	Pwr PwrConfig
+	// Calibration blobs, if m1n1 provided them ("hw-cal-a", "hw-cal-b",
+	// "globals"): what a known-good driver built, to compare ours with.
+	CalA, CalB, CalGlobals Region
 }
 
 // ConfigFromFDT resolves an "apple,agx-t6000" node.
@@ -102,5 +107,11 @@ func ConfigFromFDT(n *fdt.Node) (Config, error) {
 		return c, fmt.Errorf("agx: %s: no firmware version (m1n1 sets it)", n.Path)
 	}
 	c.Firmware, c.Compat = [3]uint32(v), [3]uint32(cv)
+	if c.Pwr, err = PwrFromFDT(n, T6000); err != nil {
+		return c, err
+	}
+	c.CalA, _ = blobRegion(n, "hw-cal-a")
+	c.CalB, _ = blobRegion(n, "hw-cal-b")
+	c.CalGlobals, _ = blobRegion(n, "globals")
 	return c, nil
 }

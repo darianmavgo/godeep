@@ -9,11 +9,14 @@ import (
 	"github.com/usbarmory/tamago/arm64/gic"
 )
 
-// GICv3 on QEMU virt (-machine virt,gic-version=3).
-const (
-	GICD_BASE = 0x08000000
-	GICR_BASE = 0x080a0000
+// GICv3: QEMU virt's (-machine virt,gic-version=3) unless the device tree
+// says otherwise (Parallels Desktop; see early.go).
+var (
+	GICD_BASE uint64 = 0x08000000
+	GICR_BASE uint64 = 0x080a0000
+)
 
+const (
 	// Virtual timer PPI (INTID 27).
 	VTIMER_IRQ = gic.FirstPPI + 11
 
@@ -27,13 +30,16 @@ const (
 
 )
 
-var GIC = &gic.GIC{GICD: GICD_BASE, GICR: GICR_BASE}
+// GIC's initializer must stay constant (static data): Hwinit1 runs before
+// dynamic package initialization, and scanTree updates the addresses.
+var GIC = &gic.GIC{GICD: 0x08000000, GICR: 0x080a0000}
 
 // defined in idle_arm64.s
 func read_cntfrq() uint64
 func write_cntv_tval(ticks uint64)
 func write_cntv_ctl(ctl uint64)
 func wfi()
+func read_cntvct() uint64
 
 // initIdle routes the virtual timer through the GIC. Interrupts stay masked
 // in PSTATE (no handler runs); a pending interrupt only wakes WFI.
@@ -84,8 +90,13 @@ func idle(until int64) {
 	}
 	write_cntv_tval(ticks)
 	write_cntv_ctl(1) // ENABLE, not IMASK
+	t0 := read_cntvct()
 	wfi()
 	write_cntv_ctl(0) // deassert the timer interrupt
+	// Idle time (dev.CPULoad), counted only once the timer is deasserted:
+	// with any work between WFI and that, check-virt's USB hub stopped
+	// enumerating and Go timers stalled under QEMU HVF.
+	atomic.AddUint64(&idleTicks[coreIndex(self)], read_cntvct()-t0)
 	if !boot {
 		drainLocal() // a secondary: acknowledge its SGI and timer here
 	}

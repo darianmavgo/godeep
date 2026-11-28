@@ -107,6 +107,15 @@ func TestScanEarlyQEMUVirt(t *testing.T) {
 	if e.UART != 0x0900_0000 {
 		t.Errorf("uart = %#x, want 0x9000000", e.UART)
 	}
+	if e.GICD != 0x0800_0000 || e.GICR != 0x080a_0000 {
+		t.Errorf("gic = %#x, %#x, want 0x8000000, 0x80a0000", e.GICD, e.GICR)
+	}
+	if e.RTC != 0x0901_0000 {
+		t.Errorf("rtc = %#x, want 0x9010000", e.RTC)
+	}
+	if string(e.PSCI) != "hvc" && string(e.PSCI) != "smc" {
+		t.Errorf("psci method = %q", e.PSCI)
+	}
 }
 
 func TestScanEarlyNoAllocs(t *testing.T) {

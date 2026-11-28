@@ -146,6 +146,7 @@ func init() {
 		"dmesg":    {"dmesg [-f]: the kernel log (-f: follow it until ^C)", dmesg},
 		"host":     {"host NAME: look a name up (DNS)", hostCmd},
 		"get":      {"get http[s]://HOST/PATH: fetch a URL, print the body", getCmd},
+		"curl":     {"curl [-X M] [-H H] [-d D] [-o F] [-iIvLfsSk] [-m S] [-w FMT] URL: HTTP(S) requests for network tests (curl -h)", curlCmd},
 		"mount9p":  {"mount9p HOST:PORT NAME: mount a 9P2000.L TCP share (e.g. tools/ninepd)", mount9pCmd},
 		"umount":   {"umount NAME: unmount a mounted volume", umount},
 		"df":       {"volumes: ram, disks and partitions with a filesystem", df},
@@ -212,7 +213,7 @@ func (e Env) out() io.Writer {
 func help(_ context.Context, env Env, _ *proc.Proc, _ []string) error {
 	w := table(env.out())
 	fmt.Fprintln(w, "BUILTIN\tDESCRIPTION")
-	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "ntp", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "ping", "nc", "evtest", "exit", "halt", "reboot", "kexec", "dmesg", "pprof", "kbd", "top", "restrict", "ports", "kvd", "kv", "gpu", "wm", "set", "unset", "source", "jobs", "wait", "fg", "true", "false", "test"} {
+	for _, n := range []string{"help", "ps", "kill", "uptime", "mem", "date", "ntp", "kbdlight", "lsdev", "irqstat", "irqlat", "dmastat", "lsblk", "df", "ls", "cat", "cp", "mv", "rm", "mkdir", "write", "mount9p", "umount", "ifconfig", "host", "get", "curl", "ping", "nc", "evtest", "exit", "halt", "reboot", "kexec", "dmesg", "pprof", "kbd", "top", "restrict", "ports", "kvd", "kv", "gpu", "wm", "set", "unset", "source", "jobs", "wait", "fg", "true", "false", "test"} {
 		fmt.Fprintf(w, "%s\t%s\n", n, builtins[n].usage)
 	}
 	fmt.Fprintln(w, "\t")

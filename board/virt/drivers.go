@@ -53,6 +53,9 @@ func init() {
 		netOpt = virtionet.Options{Poll: 2 * time.Millisecond, IdlePoll: 20 * time.Millisecond}
 	}
 	dev.Register(virtionet.Driver(window, netOpt))
+	// Legacy virtio-net on PCI (Parallels Desktop): INTx isn't routed, so
+	// it's always polled.
+	dev.Register(virtionet.PCIDriver(window, virtionet.Options{Poll: 2 * time.Millisecond, IdlePoll: 20 * time.Millisecond}))
 	dev.Register(pci.Driver(window))
 	// A disk with serial "godeep-mac" rehearses the Mac SSD's write fence:
 	// writes only to the GODEEPDATA FAT32 partition (make check-pcie).

@@ -413,6 +413,11 @@ type LatencyProbe interface {
 	Measure(ctx context.Context, n int) ([]time.Duration, error)
 }
 
+// CPULoad reports how long each core has spent idle since boot (asleep in
+// the board's idle governor), indexed by core. Sampled twice, it gives each
+// core's load: busy = elapsed - idle (top).
+type CPULoad interface{ CPUIdle() []time.Duration }
+
 // Lister reports discovered sub-devices (e.g. virtio-mmio slots).
 type Lister interface{ Devices() []string }
 

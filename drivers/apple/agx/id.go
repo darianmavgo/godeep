@@ -36,11 +36,100 @@ type HwConfig struct {
 	MaxClusters int
 	MaxCores    int // per cluster
 	BaseClockHz uint64
+	// IdleOffStandbyTimerDefault is apple,idleoff-standby-timer's default.
+	IdleOffStandbyTimerDefault uint32
+	Init
+}
+
+// IOMap is a register range the firmware maps (Asahi: hw::IOMapping).
+type IOMap struct {
+	Base         uint64
+	PerDie       bool
+	Count        int
+	Size, Stride uint64
+	Writable     bool
+}
+
+// Init holds the chip constants InitData needs (Asahi: hw/t600x.rs; the
+// unk_* names are the firmware fields they go to).
+type Init struct {
+	CoreID                     uint32 // GpuCore: G13S = 12
+	NumDies                    int
+	MaxFrags, MaxGPs           int
+	DA87C                      int32
+	DA8CC, DAE24               uint32
+	DB454, DB534, DBAB8, DBABC uint32
+	DB4E0                      uint64
+	DBB30                      uint32
+	Shared1Tab                 []int32
+	Shared1A4                  uint32
+	Shared2Tab                 []int32
+	Shared2Unk508              uint32
+	GlobalUnk54                uint16
+	SramK                      float32
+	CoefA, CoefB               []float32 // per cluster (one value each on t600x)
+	GlobalTab                  []uint8
+	FastSensorMask             [2]uint64
+	FastSensorMaskAlt          [2]uint64
+	FastDie0SensorPresent      uint32
+	IOMaps                     []*IOMap // by firmware index; nil: unused
 }
 
 // T6000 is the M1 Pro.
 var T6000 = HwConfig{ChipID: 0x6000, Gen: G13, Variant: 'S', Core: "G13S", OAS: 42,
-	MaxClusters: 2, MaxCores: 8, BaseClockHz: 24_000_000}
+	MaxClusters: 2, MaxCores: 8, BaseClockHz: 24_000_000,
+	Init: Init{
+		CoreID: 12, NumDies: 1, MaxFrags: 8, MaxGPs: 4,
+		DA87C: 900, DA8CC: 11000, DAE24: 125,
+		DB454: 1, DB4E0: 4, DB534: 1, DBAB8: 0x2084, DBABC: 0x80, DBB30: 0,
+		Shared1Tab: []int32{0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff,
+			0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff, 0xffff},
+		Shared1A4:             0xffff,
+		Shared2Tab:            []int32{-1, -1, -1, -1, 0x2aa, 0xaaa, -1, -1, 0, 0},
+		Shared2Unk508:         0xcc00001,
+		GlobalUnk54:           0xffff,
+		SramK:                 1.02,
+		CoefA:                 []float32{9.838, 9.819, 9.826, 9.799, 9.799, 9.826, 9.819, 9.838},
+		CoefB:                 []float32{13, 13, 13, 13, 13, 13, 13, 13},
+		GlobalTab:             []uint8{0, 1, 2, 1, 1, 90, 75, 1, 1, 1, 2, 90, 75, 1, 1, 1, 1, 90, 75, 1, 1},
+		FastSensorMask:        [2]uint64{0x8080, 0},
+		FastSensorMaskAlt:     [2]uint64{0x9090, 0},
+		FastDie0SensorPresent: 0x03,
+		IOMaps:                t600xIOMaps(4, false),
+	}}
+
+// t600xIOMaps is Asahi's iomaps(mcc_count, has_die1) for t600x.
+func t600xIOMaps(mcc int, die1 bool) []*IOMap {
+	m := func(base uint64, perDie bool, count int, size, stride uint64, w bool) *IOMap {
+		return &IOMap{base, perDie, count, size, stride, w}
+	}
+	maps := []*IOMap{
+		m(0x404d00000, false, 1, 0x1c000, 0, true), // Fender
+		m(0x20e100000, false, 1, 0x4000, 0, false), // AICTimer
+		m(0x28e104000, false, 1, 0x4000, 0, true),  // AICSWInt
+		m(0x404000000, false, 1, 0x20000, 0, true), // RGX
+		nil, // UVD
+		nil, // unused
+		nil, // DisplayUnderrunWA
+		m(0x28e494000, true, 1, 0x4000, 0, false), // AnalogTempSensorControllerRegs
+		nil, // PMPDoorbell
+		m(0x404d80000, false, 1, 0x8000, 0, true),           // MetrologySensorRegs
+		m(0x204d61000, false, 1, 0x1000, 0, true),           // GMGIFAFRegs
+		m(0x200000000, true, mcc, 0xd8000, 0x1000000, true), // MCache registers
+		nil, // AICBankedRegisters
+		nil, // PMGRScratch
+		m(0x2643c4000, false, 1, 0x1000, 0, true), // NIA special agent idle, die 0
+		nil, // NIA, die 1
+		nil, // CRE registers
+		nil, // streaming codec registers
+		m(0x28e3d0000, false, 1, 0x1000, 0, true),  // ?
+		m(0x28e3c0000, false, 1, 0x2000, 0, false), // ?
+	}
+	if die1 {
+		maps[15] = m(0x22643c4000, false, 1, 0x1000, 0, true)
+	}
+	return maps
+}
 
 // Firmware versions the reference driver has structure layouts for, on
 // G13 ("apple,firmware-compat"; m1n1 maps 12.3.1 → 12.3, 13.5/13.6 → 13.5).

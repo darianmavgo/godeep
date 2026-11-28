@@ -162,7 +162,7 @@ func startSMP() {
 			continue
 		}
 		mpidr := aff&0xffffff | (aff>>32&0xff)<<32
-		if r := psciCall4(psciCPUOn, mpidr, secondaryEntryAddr(), uint64(n)); r != 0 {
+		if r := psci4(psciCPUOn, mpidr, secondaryEntryAddr(), uint64(n)); r != 0 {
 			failed = append(failed, fmt.Sprintf("%#x: CPU_ON %d", aff, int64(r)))
 			continue
 		}
@@ -237,6 +237,7 @@ var (
 	cntSGI      [maxCPUs]uint32 // wake-up SGIs it acknowledged
 	cntTimer    [maxCPUs]uint32 // idle timer expiries it acknowledged
 	cntIdle     [maxCPUs]uint32 // idle entries (WFI)
+	idleTicks   [maxCPUs]uint64 // counter ticks asleep in WFI (dev.CPULoad)
 )
 
 //go:nosplit
@@ -252,6 +253,18 @@ func (cpuStats) Devices() []string {
 		out = append(out, fmt.Sprintf("cpu%d: idle %d, wakes sent %d, SGIs %d, timer %d", i,
 			atomic.LoadUint32(&cntIdle[i]), atomic.LoadUint32(&cntWakeSent[i]),
 			atomic.LoadUint32(&cntSGI[i]), atomic.LoadUint32(&cntTimer[i])))
+	}
+	return out
+}
+
+// CPUIdle is each core's time asleep in WFI since boot (dev.CPULoad).
+func (cpuStats) CPUIdle() []time.Duration {
+	n := max(1, int(atomic.LoadUint32(&smpN)))
+	freq := read_cntfrq()
+	out := make([]time.Duration, min(n, maxCPUs))
+	for i := range out {
+		t := atomic.LoadUint64(&idleTicks[i])
+		out[i] = time.Duration(t/freq*1e9 + t%freq*1e9/freq)
 	}
 	return out
 }

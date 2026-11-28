@@ -32,3 +32,14 @@ TEXT ·psciCall4(SB),NOSPLIT,$0-40
 	HVC	$0
 	MOVD	R0, ret+32(FP)
 	RET
+
+// func psciCall4SMC(fn, a1, a2, a3 uint64) uint64 (SMC conduit: Parallels
+// Desktop, whose ACPI FADT says PSCI over SMC)
+TEXT ·psciCall4SMC(SB),NOSPLIT,$0-40
+	MOVD	fn+0(FP), R0
+	MOVD	a1+8(FP), R1
+	MOVD	a2+16(FP), R2
+	MOVD	a3+24(FP), R3
+	SMC	$0
+	MOVD	R0, ret+32(FP)
+	RET

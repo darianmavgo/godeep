@@ -49,6 +49,7 @@ var UART0 = &PL011{Base: PL011_BASE}
 //
 //go:linkname Init runtime/goos.Hwinit1
 func Init() {
+	scanTree() // device addresses from the boot device tree (early.go)
 	CPU.Init()
 	CPU.EnableCache()
 	// The hypervisor programs CNTFRQ; just derive the ns multiplier from it.
@@ -58,8 +59,11 @@ func Init() {
 	// The DMA region is mapped as normal memory by mmu.go (Hwinit0).
 
 	// Wall clock from the PL031 RTC (seconds since 1970), before any Go
-	// timer exists: SetTime shifts the monotonic clock too.
-	CPU.SetTime(int64(atomic.LoadUint32((*uint32)(unsafe.Pointer(uintptr(PL031_BASE))))) * 1e9)
+	// timer exists: SetTime shifts the monotonic clock too. Not every
+	// machine has one (Parallels: an access to a missing device stops the VM).
+	if rtcBase != 0 {
+		CPU.SetTime(int64(atomic.LoadUint32((*uint32)(unsafe.Pointer(uintptr(rtcBase))))) * 1e9)
+	}
 
 	// Sleep instead of spinning when the scheduler is idle.
 	initIdle()

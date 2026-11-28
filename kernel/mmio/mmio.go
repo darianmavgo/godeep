@@ -25,6 +25,19 @@ type ByteRegs interface {
 	Read8(off uint64) uint8
 }
 
+// NarrowRegs is a register window with single 8- and 16-bit accesses, for
+// devices whose registers are narrower than 32 bits and packed together
+// (legacy virtio-pci: a 32-bit write to its 8-bit status register would
+// also write the 16-bit queue-notify register beside it). Each access is
+// one load or store of that width.
+type NarrowRegs interface {
+	Regs
+	Read8(off uint64) uint8
+	Store8(off uint64, v uint8)
+	Read16(off uint64) uint16
+	Write16(off uint64, v uint16)
+}
+
 // Regs64 is a register window that also allows single 64-bit accesses
 // (Window and Fake do).
 type Regs64 interface {

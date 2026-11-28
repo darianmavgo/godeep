@@ -33,3 +33,11 @@ TEXT ·read_midr(SB),NOSPLIT,$0-8
 	MRS	MIDR_EL1, R0
 	MOVD	R0, ret+0(FP)
 	RET
+
+// func read_cntvct() uint64: the virtual counter (read in hardware under
+// Hypervisor.framework, where the physical counter's reads may trap).
+TEXT ·read_cntvct(SB),NOSPLIT,$0-8
+	ISB	$15
+	MRS	CNTVCT_EL0, R0
+	MOVD	R0, ret+0(FP)
+	RET

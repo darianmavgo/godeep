@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"godeep/kernel/cap"
+	"godeep/kernel/dev"
 	"godeep/kernel/ipc"
 	"godeep/kernel/proc"
 )
@@ -309,9 +310,15 @@ func top(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 	const tick = 50 * time.Millisecond
 	t := time.NewTicker(tick)
 	defer t.Stop()
+	load := cpuLoad(env)
 	for frame := 1; frames == 0 || frame <= frames; frame++ {
 		busy := map[int]int{}
 		samples := 0
+		var idle0 []time.Duration
+		t0 := time.Now()
+		if load != nil {
+			idle0 = load.CPUIdle()
+		}
 		end := time.Now().Add(every)
 		for time.Now().Before(end) {
 			select {
@@ -333,14 +340,44 @@ func top(ctx context.Context, env Env, _ *proc.Proc, args []string) error {
 			}
 			samples++
 		}
-		if err := topFrame(env, busy, samples); err != nil {
+		cores := ""
+		if load != nil {
+			cores = coreLine(idle0, load.CPUIdle(), time.Since(t0))
+		}
+		if err := topFrame(env, busy, samples, cores); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func topFrame(env Env, busy map[int]int, samples int) error {
+// cpuLoad finds the board's per-core idle accounting among the devices.
+func cpuLoad(env Env) dev.CPULoad {
+	for _, s := range env.Dev.List() {
+		if l, ok := s.Service.(dev.CPULoad); ok {
+			return l
+		}
+	}
+	return nil
+}
+
+// coreLine is each core's busy share over a frame: 1 - idle/elapsed.
+func coreLine(a, b []time.Duration, el time.Duration) string {
+	if el <= 0 || len(a) != len(b) {
+		return ""
+	}
+	var sb strings.Builder
+	total := 0.0
+	for i := range a {
+		busy := 1 - float64(b[i]-a[i])/float64(el)
+		busy = min(1, max(0, busy))
+		total += busy
+		fmt.Fprintf(&sb, "  cpu%d %3.0f%%", i, 100*busy)
+	}
+	return fmt.Sprintf("cores: %d busy (%.1f of %d)%s\n", int(total+0.5), total, len(a), sb.String())
+}
+
+func topFrame(env Env, busy map[int]int, samples int, cores string) error {
 	gs := proc.Snapshot()
 	count := map[int]int{}
 	for _, g := range gs {
@@ -361,6 +398,7 @@ func topFrame(env Env, busy map[int]int, samples int) error {
 	sort.SliceStable(procs, func(i, j int) bool { return pct(procs[i].PID) > pct(procs[j].PID) })
 	fmt.Fprintf(env.out(), "\ntop - up %s, %d procs, %d goroutines, heap %s, %d GC\n",
 		fmtDur(time.Since(env.Boot)), len(procs), len(gs), fmtBytes(m.HeapInuse), m.NumGC)
+	fmt.Fprint(env.out(), cores)
 	w := table(env.out())
 	fmt.Fprintln(w, "PID\tPPID\tNAME\tSTATE\t%RUN\tGOROUTINES\tREAD\tWRITTEN\tUPTIME")
 	fmt.Fprintf(w, "0\t-\t[kernel]\trunning\t%.1f\t%d\t-\t-\t%s\n", pct(0), count[0], fmtDur(time.Since(env.Boot)))

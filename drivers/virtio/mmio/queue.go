@@ -31,6 +31,7 @@ type Queue struct {
 	Size  int
 
 	desc, avail, used *dma.Buffer
+	whole             *dma.Buffer // legacy layout: one block the three are views of
 	notify            func()
 
 	free     []uint16 // free descriptor indices
@@ -72,8 +73,51 @@ func newQueue(index, n int, a *dma.Allocator) (*Queue, error) {
 	return q, nil
 }
 
+// LegacyAlign is where a legacy (virtio 0.9.5) device expects the used
+// ring: the first 4096-byte boundary after the available ring.
+const LegacyAlign = 4096
+
+// NewLegacyQueue lays out a virtqueue for a legacy transport (virtio-pci
+// before 1.0): descriptors, available ring and, on the next LegacyAlign
+// boundary, the used ring, in one page-aligned block whose address alone
+// (Base) tells the device where all three are. n is the device's queue
+// size (a legacy driver can't choose it); notify rings its doorbell.
+func NewLegacyQueue(index, n int, a *dma.Allocator, notify func()) (*Queue, error) {
+	if a == nil {
+		return nil, errors.New("virtio: the board has no DMA region")
+	}
+	if n <= 0 || n&(n-1) != 0 || n > 32768 {
+		return nil, fmt.Errorf("virtio: legacy queue size %d", n)
+	}
+	align := func(x int) int { return (x + LegacyAlign - 1) &^ (LegacyAlign - 1) }
+	usedOff := align(descSize*n + 4 + 2*n + 2)
+	size := usedOff + align(4+usedElemSize*n+2)
+	b, err := a.Alloc(size, LegacyAlign)
+	if err != nil {
+		return nil, err
+	}
+	clear(b.Bytes)
+	q := &Queue{Index: index, Size: n, whole: b, notify: notify,
+		desc:  b.View(0, descSize*n),
+		avail: b.View(descSize*n, 4+2*n+2),
+		used:  b.View(usedOff, 4+usedElemSize*n+2),
+	}
+	for i := n - 1; i >= 0; i-- {
+		q.free = append(q.free, uint16(i))
+	}
+	return q, nil
+}
+
+// Base is the device address of a legacy queue's block (NewLegacyQueue).
+func (q *Queue) Base() uint64 { return q.desc.Bus }
+
 // Free returns the queue's memory. Reset the device first.
 func (q *Queue) Free() {
+	if q.whole != nil {
+		q.whole.Free()
+		q.whole, q.desc, q.avail, q.used = nil, nil, nil, nil
+		return
+	}
 	for _, b := range []*dma.Buffer{q.desc, q.avail, q.used} {
 		if b != nil {
 			b.Free()

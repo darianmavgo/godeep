@@ -20,6 +20,17 @@ func (w Window) Write32(off uint64, v uint32) { atomic.StoreUint32(w.p(off), v) 
 // the end of a virtio device's configuration).
 func (w Window) Read8(off uint64) uint8 { return *(*uint8)(unsafe.Pointer(uintptr(w.Base + off))) }
 
+// Store8 is a single byte store to a device register (NarrowRegs). Not
+// for shared memory: see Write8.
+func (w Window) Store8(off uint64, v uint8) { *(*uint8)(unsafe.Pointer(uintptr(w.Base + off))) = v }
+
+// Read16 and Write16 are single 16-bit accesses (NarrowRegs); off must be
+// 2-aligned.
+func (w Window) Read16(off uint64) uint16 { return *(*uint16)(unsafe.Pointer(uintptr(w.Base + off))) }
+func (w Window) Write16(off uint64, v uint16) {
+	*(*uint16)(unsafe.Pointer(uintptr(w.Base + off))) = v
+}
+
 // Write8 stores one byte without disturbing its neighbours, even when
 // another agent (a coprocessor) writes them at the same time: a
 // compare-and-swap loop on the aligned 32-bit word that holds it. Shared

@@ -26,6 +26,10 @@ func OnAppleHVF() bool { return read_midr()>>24&0xff == 0x61 }
 // mode is used everywhere else (TCG, future hosts and hardware).
 var UARTMode = "irq"
 
+// uart0IRQ is the console UART's interrupt: QEMU virt's, or the tree's
+// (NewBoard).
+var uart0IRQ = UART0_IRQ
+
 // consoleIn is the console's input: the UART's bytes and, through the
 // xHCI driver (drivers.go), USB keyboards'.
 var consoleIn = make(chan byte, 256)
@@ -52,7 +56,7 @@ func NewConsole(b *irq.Bridge) kernel.Console {
 
 	// Interrupt mode: sleep until the receive interrupt, drain the FIFO,
 	// then re-arm.
-	line, err := b.Request(UART0_IRQ, "uart0")
+	line, err := b.Request(uart0IRQ, "uart0")
 	if err != nil {
 		panic(err)
 	}

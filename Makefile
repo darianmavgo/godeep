@@ -129,7 +129,7 @@ endif
 # Control files so `make stop` can find this VM and press its power button.
 CONTROL = -pidfile bin/qemu-$(ARCH).pid -qmp unix:bin/qmp-$(ARCH).sock,server=on,wait=off
 
-.PHONY: wasm push hot check-usbnet check-pcie check-iommu check-hotplug check-linklocal test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
+.PHONY: efiboot parallels-setup parallels check-parallels ssh-parallels wasm push hot check-usbnet check-pcie check-iommu check-hotplug check-linklocal test hosted kernel image qemu check-virt qemu-applem1 shot-applem1 check-applem1 native stop kill clean keys ssh
 
 # ---- SSH keys (development) ----
 # bin/ssh keeps them across builds: host_ed25519 is godeep's host key,
@@ -547,6 +547,69 @@ tamago-go:
 	git -C bin/tamago-go apply $(CURDIR)/third_party/tamago-go/godeep-runtime.patch
 	cd bin/tamago-go/src && ./make.bash >/dev/null
 	@echo "bin/tamago-go: TamaGo with godeep's runtime patch (now the default TAMAGO)"
+
+# Parallels Desktop (docs/Parallels.md): the same arm64 Image, loaded by
+# tools/efiboot (a UEFI app: clang --target=aarch64-windows + lld-link,
+# `brew install lld`) with a device tree from tools/efiboot/mkdtb. PD_VM is
+# an arm64 VM ("Other" OS, 4 GB: RAM must be 0x40000000-0x13fffffff);
+# parallels-setup gives it bin/parallels/boot.hdd (a plain FAT disk) first in
+# the boot order and its first serial port on bin/parallels/serial.sock.
+PD_VM   ?= GoDeep
+PD_CPUS ?= 4
+PD_DISK  = bin/parallels/boot.hdd
+EFI_CC   = clang --target=aarch64-windows -ffreestanding -fno-stack-protector -fno-builtin -mgeneral-regs-only -O2 -Wall
+
+bin/parallels/BOOTAA64.EFI: tools/efiboot/efiboot.c tools/efiboot/efi.h
+	@mkdir -p bin/parallels
+	$(EFI_CC) -c tools/efiboot/efiboot.c -o bin/parallels/efiboot.obj
+	lld-link /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:arm64 /out:$@ bin/parallels/efiboot.obj >/dev/null
+
+efiboot: bin/parallels/BOOTAA64.EFI
+
+parallels-setup:
+	@mkdir -p bin/parallels
+	@test -d $(PD_DISK) || { prl_disk_tool create --hdd $(PD_DISK) --size 64M >/dev/null && \
+	  mformat -i "$$(ls $(PD_DISK)/*.hds)" -F -v GODEEPBOOT :: && mmd -i "$$(ls $(PD_DISK)/*.hds)" ::/EFI ::/EFI/BOOT; }
+	-prlctl stop $(PD_VM) --kill >/dev/null 2>&1
+	prlctl set $(PD_VM) --cpus $(PD_CPUS) --memsize 4096 --on-window-close keep-running
+	@prlctl list -i $(PD_VM) | grep -q "$(CURDIR)/$(PD_DISK)" || prlctl set $(PD_VM) --device-add hdd --image $(CURDIR)/$(PD_DISK)
+	@prlctl list -i $(PD_VM) | grep -q "serial0 " || prlctl set $(PD_VM) --device-add serial --socket $(CURDIR)/bin/parallels/serial.sock --socket-mode server
+	prlctl set $(PD_VM) --device-set serial0 --socket $(CURDIR)/bin/parallels/serial.sock --socket-mode server
+	prlctl set $(PD_VM) --device-bootorder "$$(prlctl list -i $(PD_VM) | awk -v d='$(CURDIR)/$(PD_DISK)' 'index($$0, d) {print $$1}')"
+
+# Build, copy onto the boot disk, (re)start the VM. Serial console: connect
+# to bin/parallels/serial.sock (e.g. `nc -U bin/parallels/serial.sock`).
+parallels: image efiboot
+	go run ./tools/efiboot/mkdtb -cpus $(PD_CPUS) -o bin/parallels/parallels.dtb
+	-prlctl stop $(PD_VM) --kill >/dev/null 2>&1
+	mcopy -o -i "$$(ls $(PD_DISK)/*.hds)" bin/parallels/BOOTAA64.EFI ::/EFI/BOOT/BOOTAA64.EFI
+	mcopy -o -i "$$(ls $(PD_DISK)/*.hds)" $(BOOTFILE) ::/godeep.img
+	mcopy -o -i "$$(ls $(PD_DISK)/*.hds)" bin/parallels/parallels.dtb ::/parallels.dtb
+	prlctl start $(PD_VM)
+
+# The VM's address on Parallels' shared network (10.211.55.x): the newest
+# DHCP lease for its MAC. godeep answers ssh there directly, no forwarding.
+PD_IP = $$(mac=$$(prlctl list -i $(PD_VM) | sed -n 's/.*net0 .*mac=\([0-9A-Fa-f]*\).*/\1/p' | tr A-F a-f); \
+	grep "$$mac" /Library/Preferences/Parallels/parallels_dhcp_leases | tail -1 | cut -d= -f1)
+PD_SSH  = ssh $(subst -p $(SSH_PORT),-p 22,$(SSH_OPTS))
+
+# make ssh-parallels [CMD='lsdev net0']
+ssh-parallels: $(SSH_DIR)/id_ed25519
+	$(PD_SSH) root@$(PD_IP) $(CMD)
+
+# Boot on Parallels and check every core runs: GOMAXPROCS, all cores
+# started, and a CPU-bound program on PD_CPUS goroutines uses more than
+# (PD_CPUS - 0.5) host cores; then the network: a DHCP lease, and ssh from
+# this Mac to the VM's address.
+check-parallels: parallels
+	go run ./tools/pdcheck -vm $(PD_VM) -sock bin/parallels/serial.sock \
+	  -step 'cat proc:/version=>GOMAXPROCS=$(PD_CPUS)' -step 'lsdev cpus=>$(PD_CPUS) cores' \
+	  -step 'load:burn $(PD_CPUS) 10=>$(shell echo "$(PD_CPUS) - 0.5" | bc)' -step 'uptime=>up' \
+	  -step 'ifconfig=>dhcp from'
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+	  out=$$($(PD_SSH) -o ConnectTimeout=3 root@$(PD_IP) cat proc:/version 2>&1) && break; sleep 2; done; \
+	  echo "$$out" | grep -q "GOMAXPROCS=$(PD_CPUS)" && echo "check-parallels: OK: ssh root@$(PD_IP)" || \
+	  { echo "check-parallels: FAIL: ssh root@$(PD_IP): $$out"; exit 1; }
 
 stop:
 	@tools/qemu-stop.sh

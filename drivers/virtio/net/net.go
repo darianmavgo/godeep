@@ -1,5 +1,6 @@
 // Package net drives a virtio network device (virtio device ID 1) over the
-// virtio-mmio transport. It publishes a *NIC, an Ethernet frame device that
+// virtio-mmio transport, or over legacy virtio-pci (Parallels Desktop:
+// PCIDriver). It publishes a *NIC, an Ethernet frame device that
 // net/netstack runs TCP/IP on.
 //
 // One goroutine (the driver's) owns the device and both queues: receive
@@ -16,14 +17,15 @@ package net
 import (
 	"context"
 	"crypto/rand"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	stdnet "net"
 	"sync/atomic"
 	"time"
 
+	"godeep/drivers/pci"
 	vmmio "godeep/drivers/virtio/mmio"
+	vpci "godeep/drivers/virtio/pci"
 	"godeep/kernel/dev"
 	"godeep/kernel/dma"
 	"godeep/kernel/mmio"
@@ -40,8 +42,9 @@ const (
 )
 
 const (
-	hdrSize   = 12   // struct virtio_net_hdr with num_buffers (VERSION_1)
-	bufSize   = 2048 // header + a 1514-byte frame, rounded up
+	hdrSize       = 12   // struct virtio_net_hdr with num_buffers (VERSION_1)
+	legacyHdrSize = 10   // without num_buffers: legacy, MRG_RXBUF not negotiated
+	bufSize       = 2048 // header + a 1514-byte frame, rounded up
 	queueSize = 128
 	mtu       = 1500
 	maxFrame  = 1514
@@ -69,8 +72,60 @@ func Driver(regs func(base uint64) mmio.Regs, opt Options) dev.Driver {
 		if len(d.Reg) == 0 {
 			return errors.New("virtio-net: no registers")
 		}
-		return run(ctx, d, regs(d.Reg[0].Base), opt)
+		t, err := vmmio.Init(ctx, regs(d.Reg[0].Base), FeatureMAC|FeatureStatus)
+		if err != nil {
+			return err
+		}
+		return run(ctx, d, t, opt)
 	}}
+}
+
+// PCICompatible is a PCI Ethernet controller (class 02, subclass 00).
+const PCICompatible = "pciclass,020000"
+
+// PCIDriver drives a legacy virtio-net PCI function (1af4:1000) with its
+// registers in memory BAR0, as Parallels Desktop has. It has no interrupt
+// (PCI INTx isn't routed): opt.Poll must be set. regs must give single
+// 8- and 16-bit accesses (mmio.NarrowRegs).
+func PCIDriver(regs func(base uint64) mmio.Regs, opt Options) dev.Driver {
+	if opt.Poll > 0 && opt.IdlePoll < opt.Poll {
+		opt.IdlePoll = 20 * opt.Poll
+	}
+	return dev.Driver{Compatible: PCICompatible, Run: func(ctx context.Context, d *dev.Device) error {
+		f, ok := d.Config.(*pci.Function)
+		if !ok {
+			return errors.New("virtio-net: no PCI function")
+		}
+		if f.Vendor != vpci.VendorID || f.Device != 0x1000 {
+			return fmt.Errorf("virtio-net: %04x:%04x isn't a legacy virtio-net", f.Vendor, f.Device)
+		}
+		if f.BARs[0].Size == 0 { // drivers/pci assigns memory BARs only
+			return errors.New("virtio-net: BAR0 isn't a memory BAR (an I/O BAR has no window on arm64)")
+		}
+		if opt.Poll == 0 {
+			return errors.New("virtio-net: PCI needs Options.Poll (no interrupt routing)")
+		}
+		r, ok := regs(f.BARs[0].CPU).(mmio.NarrowRegs)
+		if !ok {
+			return errors.New("virtio-net: registers without 8/16-bit access")
+		}
+		t, err := vpci.InitLegacy(ctx, r, FeatureMAC|FeatureStatus)
+		if err != nil {
+			return err
+		}
+		return run(ctx, d, t, opt)
+	}}
+}
+
+// transport is what the driver needs of a virtio transport: vmmio.Transport
+// (modern virtio-mmio) or vpci.Legacy.
+type transport interface {
+	Queue(index, max int, a *dma.Allocator) (*vmmio.Queue, error)
+	DriverOK()
+	Reset()
+	Has(f uint64) bool
+	Ack() uint32
+	Config8(off uint64) uint8
 }
 
 // NIC is the published service.
@@ -133,20 +188,21 @@ func (n *NIC) Devices() []string {
 func (n *NIC) Down() <-chan struct{} { return n.down }
 
 type driver struct {
-	t        *vmmio.Transport
+	t        transport
+	hdr      int // virtio_net_hdr size
 	rxq, txq *vmmio.Queue
 	rxBuf    *dma.Buffer // rxq.Size slots of bufSize
 	txBuf    *dma.Buffer
 	nic      *NIC
 }
 
-func run(ctx context.Context, d *dev.Device, r mmio.Regs, opt Options) error {
-	t, err := vmmio.Init(ctx, r, FeatureMAC|FeatureStatus)
-	if err != nil {
-		return err
-	}
+func run(ctx context.Context, d *dev.Device, t transport, opt Options) error {
+	var err error
 	defer t.Reset()
-	drv := &driver{t: t}
+	drv := &driver{t: t, hdr: hdrSize}
+	if !t.Has(vmmio.FeatureVersion1) {
+		drv.hdr = legacyHdrSize
+	}
 	defer drv.free()
 	if drv.rxq, err = t.Queue(0, queueSize, d.DMA); err != nil {
 		return err
@@ -165,9 +221,9 @@ func run(ctx context.Context, d *dev.Device, r mmio.Regs, opt Options) error {
 	defer close(nic.down)
 	drv.nic = nic
 	if t.Has(FeatureMAC) {
-		lo, hi := t.Config32(0), t.Config32(4)
-		binary.LittleEndian.PutUint32(nic.mac[0:], lo)
-		nic.mac[4], nic.mac[5] = byte(hi), byte(hi>>8)
+		for i := range nic.mac {
+			nic.mac[i] = t.Config8(uint64(i))
+		}
 	} else {
 		rand.Read(nic.mac[:])
 		nic.mac[0] = nic.mac[0]&^1 | 2 // unicast, locally administered
@@ -272,8 +328,8 @@ func (drv *driver) reapRx() int {
 			break
 		}
 		n++
-		if size > hdrSize && size <= bufSize {
-			b := drv.rxBuf.Bytes[int(id)*bufSize:][hdrSize:size]
+		if size > drv.hdr && size <= bufSize {
+			b := drv.rxBuf.Bytes[int(id)*bufSize:][drv.hdr:size]
 			f := append([]byte(nil), b...)
 			select {
 			case drv.nic.rx <- f:
@@ -305,9 +361,9 @@ func (drv *driver) send(frame []byte) error {
 		drv.nic.txFull.Add(1)
 		return errors.New("virtio-net: transmit ring full")
 	}
-	b := drv.txBuf.Bytes[int(id)*bufSize:][:hdrSize+len(frame)]
-	clear(b[:hdrSize])
-	copy(b[hdrSize:], frame)
+	b := drv.txBuf.Bytes[int(id)*bufSize:][:drv.hdr+len(frame)]
+	clear(b[:drv.hdr])
+	copy(b[drv.hdr:], frame)
 	drv.txq.Push(id, drv.txBuf.Phys+uint64(id)*bufSize, len(b), false)
 	drv.txq.Kick()
 	drv.nic.txFrames.Add(1)

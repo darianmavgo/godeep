@@ -16,6 +16,12 @@ type Early struct {
 	HasFB    bool
 	UART     uint64 // base of the first "arm,pl011" node, 0 if none
 	Bootargs []byte // /chosen/bootargs (a slice of the blob, no NUL), nil if none
+
+	// For boards that take the interrupt controller, RTC and PSCI from
+	// the tree (board/virt: QEMU virt, Parallels Desktop).
+	GICD, GICR uint64 // first "arm,gic-v3": distributor and redistributor region, 0 if none
+	RTC        uint64 // base of the first "arm,pl031", 0 if none
+	PSCI       []byte // "method" ("hvc", "smc") of the first "arm,psci*" node, nil if none
 }
 
 const earlyMaxDepth = 16
@@ -24,6 +30,7 @@ const earlyMaxDepth = 16
 type earlyNode struct {
 	addrCells, sizeCells  uint32 // for this node's children
 	compat, reg, format   []byte
+	method                []byte
 	width, height, stride []byte
 	chosen                bool // this is /chosen
 	done                  bool
@@ -79,6 +86,22 @@ func ScanEarly(b []byte) (e Early) {
 				e.UART = base
 			}
 		}
+		if e.GICD == 0 && hasString(n.compat, "arm,gic-v3") {
+			d, _, ok1 := nthReg(n.reg, ac, sc, 0)
+			r, _, ok2 := nthReg(n.reg, ac, sc, 1)
+			if ok1 && ok2 {
+				e.GICD, e.GICR = d, r
+			}
+		}
+		if e.RTC == 0 && hasString(n.compat, "arm,pl031") {
+			if base, _, ok := firstReg(n.reg, ac, sc); ok {
+				e.RTC = base
+			}
+		}
+		if e.PSCI == nil && len(n.method) > 0 && (hasString(n.compat, "arm,psci") ||
+			hasString(n.compat, "arm,psci-0.2") || hasString(n.compat, "arm,psci-1.0")) {
+			e.PSCI = trimNUL(n.method)
+		}
 	}
 
 	for p := 0; p+4 <= len(st); {
@@ -127,6 +150,8 @@ func ScanEarly(b []byte) (e Early) {
 				n.reg = val
 			case eq(name, "format"):
 				n.format = val
+			case eq(name, "method"):
+				n.method = val
 			case eq(name, "width"):
 				n.width = val
 			case eq(name, "height"):
@@ -177,9 +202,15 @@ func hasString(list []byte, s string) bool {
 
 // firstReg decodes the first (address, size) pair of a reg property.
 func firstReg(reg []byte, ac, sc uint32) (base, size uint64, ok bool) {
-	if ac == 0 || ac > 2 || sc > 2 || len(reg) < int(ac+sc)*4 {
+	return nthReg(reg, ac, sc, 0)
+}
+
+// nthReg decodes the (address, size) pair at index i of a reg property.
+func nthReg(reg []byte, ac, sc uint32, i int) (base, size uint64, ok bool) {
+	if ac == 0 || ac > 2 || sc > 2 || i < 0 || len(reg) < (i+1)*int(ac+sc)*4 {
 		return 0, 0, false
 	}
+	reg = reg[i*int(ac+sc)*4:]
 	be := binary.BigEndian
 	for i := uint32(0); i < ac; i++ {
 		base = base<<32 | uint64(be.Uint32(reg[i*4:]))
